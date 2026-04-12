@@ -1,0 +1,14 @@
+.next
+node_modules
+dist
+coverage
+*.log
+.env
+.env.local
+.env.*.local
+!.env.example
+*.tsbuildinfo
+npm-cache
+.wwebjs_auth
+.wwebjs_cache
+prisma/*.db
