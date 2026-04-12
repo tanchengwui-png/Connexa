@@ -1,0 +1,48 @@
+services:
+  sender:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: connexa-stg-sender
+    working_dir: /app
+    env_file:
+      - .env.staging
+    command: sh -lc "npm run sender:service"
+    ports:
+      - "127.0.0.1:3101:3101"
+    volumes:
+      - ../data/prisma:/app/prisma
+      - ../data/wwebjs_auth:/app/.wwebjs_auth
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: connexa-stg-web
+    working_dir: /app
+    env_file:
+      - .env.staging
+    command: sh -lc "npm run db:push && npm run dev -- --hostname 0.0.0.0 --port 3000"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ../data/prisma:/app/prisma
+    depends_on:
+      - sender
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: connexa-stg-worker
+    working_dir: /app
+    env_file:
+      - .env.staging
+    command: sh -lc "npm run worker:messages"
+    volumes:
+      - ../data/prisma:/app/prisma
+    depends_on:
+      - web
+    restart: unless-stopped

@@ -1,0 +1,237 @@
+import "dotenv/config";
+import fs from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import path from "node:path";
+import { registerHooks } from "node:module";
+import { pathToFileURL } from "node:url";
+import { prisma } from "../lib/prisma.ts";
+
+function resolveAlias(specifier: string) {
+  const basePath = path.join(process.cwd(), specifier.slice(2));
+  const candidates = [
+    basePath,
+    `${basePath}.ts`,
+    `${basePath}.tsx`,
+    path.join(basePath, "index.ts"),
+    path.join(basePath, "index.tsx")
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return pathToFileURL(candidate).href;
+    }
+  }
+
+  return pathToFileURL(basePath).href;
+}
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("@/")) {
+      return nextResolve(resolveAlias(specifier), context);
+    }
+
+    return nextResolve(specifier, context);
+  }
+});
+
+const {
+  disconnectWorkspaceWhatsAppClient,
+  ensureWorkspaceWhatsAppClient,
+  getWorkspaceWhatsAppRuntimeStatus,
+  sendWhatsAppWebMessage,
+  syncWorkspaceHistory
+} = await import("../lib/whatsapp-web.ts");
+
+const host = process.env.SENDER_SERVICE_HOST?.trim() || "127.0.0.1";
+const port = Number(process.env.SENDER_SERVICE_PORT || "3101");
+const expectedToken = process.env.SENDER_SERVICE_TOKEN?.trim() || "";
+
+function isAuthorized(request: IncomingMessage) {
+  if (!expectedToken) {
+    return true;
+  }
+
+  const headerToken = request.headers["x-sender-token"]?.toString().trim();
+  const bearerToken = request.headers.authorization?.replace(/^Bearer\s+/i, "").trim();
+  return headerToken === expectedToken || bearerToken === expectedToken;
+}
+
+async function readJsonBody<T>(request: IncomingMessage): Promise<T | null> {
+  const chunks: Buffer[] = [];
+
+  for await (const chunk of request) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  if (!chunks.length) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+function sendJson(response: ServerResponse, status: number, payload: unknown) {
+  response.statusCode = status;
+  response.setHeader("content-type", "application/json; charset=utf-8");
+  response.end(JSON.stringify(payload));
+}
+
+function getRequiredSearchParam(url: URL, key: string) {
+  return url.searchParams.get(key)?.trim() || null;
+}
+
+const server = createServer(async (request, response) => {
+  try {
+    if (!request.url || !request.method) {
+      sendJson(response, 400, { error: "Invalid request." });
+      return;
+    }
+
+    const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
+
+    if (url.pathname === "/health" && request.method === "GET") {
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (!isAuthorized(request)) {
+      sendJson(response, 401, { error: "Unauthorized sender request." });
+      return;
+    }
+
+    if (url.pathname === "/whatsapp/runtime" && request.method === "GET") {
+      const workspaceId = getRequiredSearchParam(url, "workspaceId");
+      const agentId = getRequiredSearchParam(url, "agentId");
+
+      if (!workspaceId || !agentId) {
+        sendJson(response, 400, { error: "workspaceId and agentId are required." });
+        return;
+      }
+
+      const status = await getWorkspaceWhatsAppRuntimeStatus({ workspaceId, agentId });
+      sendJson(response, 200, { status });
+      return;
+    }
+
+    if (url.pathname === "/whatsapp/runtime/start" && request.method === "POST") {
+      const body = await readJsonBody<{ workspaceId?: string; agentId?: string }>(request);
+      const workspaceId = body?.workspaceId?.trim();
+      const agentId = body?.agentId?.trim();
+
+      if (!workspaceId || !agentId) {
+        sendJson(response, 400, { error: "workspaceId and agentId are required." });
+        return;
+      }
+
+      await ensureWorkspaceWhatsAppClient({ workspaceId, agentId });
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/whatsapp/runtime" && request.method === "DELETE") {
+      const workspaceId = getRequiredSearchParam(url, "workspaceId");
+
+      if (!workspaceId) {
+        sendJson(response, 400, { error: "workspaceId is required." });
+        return;
+      }
+
+      await disconnectWorkspaceWhatsAppClient(workspaceId);
+      sendJson(response, 200, { ok: true });
+      return;
+    }
+
+    if (url.pathname === "/whatsapp/runtime/sync" && request.method === "POST") {
+      const body = await readJsonBody<{ workspaceId?: string }>(request);
+      const workspaceId = body?.workspaceId?.trim();
+
+      if (!workspaceId) {
+        sendJson(response, 400, { error: "workspaceId is required." });
+        return;
+      }
+
+      const result = await syncWorkspaceHistory(workspaceId);
+      sendJson(response, 200, { ok: true, result });
+      return;
+    }
+
+    if (url.pathname === "/messages/send" && request.method === "POST") {
+      const body = await readJsonBody<{
+        workspaceId?: string;
+        to?: string;
+        body?: string;
+        interactiveButtons?: string[] | null;
+        interactiveListButtonText?: string | null;
+        interactiveListOptions?: string[] | null;
+        attachmentPath?: string | null;
+        attachmentUrl?: string | null;
+        attachmentMimeType?: string | null;
+        attachmentName?: string | null;
+      }>(request);
+
+      const workspaceId = body?.workspaceId?.trim();
+      const to = body?.to?.trim();
+      const messageBody = body?.body ?? "";
+
+      if (!workspaceId || !to) {
+        sendJson(response, 400, { error: "workspaceId and to are required." });
+        return;
+      }
+
+      const result = await sendWhatsAppWebMessage({
+        workspaceId,
+        to,
+        body: messageBody,
+        interactiveButtons: body?.interactiveButtons ?? null,
+        interactiveListButtonText: body?.interactiveListButtonText ?? null,
+        interactiveListOptions: body?.interactiveListOptions ?? null,
+        attachmentPath: body?.attachmentPath ?? null,
+        attachmentUrl: body?.attachmentUrl ?? null,
+        attachmentMimeType: body?.attachmentMimeType ?? null,
+        attachmentName: body?.attachmentName ?? null
+      });
+
+      sendJson(response, 200, { result });
+      return;
+    }
+
+    sendJson(response, 404, { error: "Not found." });
+  } catch (error) {
+    sendJson(response, 500, {
+      error: error instanceof Error ? error.message : "Sender service request failed."
+    });
+  }
+});
+
+server.listen(port, host, () => {
+  console.info(`Connexa sender service listening on http://${host}:${port}`);
+});
+
+async function shutdown(signal: string) {
+  console.info(`Shutting down sender service on ${signal}`);
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+  await prisma.$disconnect();
+  process.exit(0);
+}
+
+process.on("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+
+process.on("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});

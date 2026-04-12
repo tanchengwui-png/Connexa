@@ -19,6 +19,7 @@ if (!workspaceId) {
 }
 
 let shuttingDown = false;
+let hasLoggedWaitingMessage = false;
 
 process.on("SIGINT", () => {
   shuttingDown = true;
@@ -51,10 +52,18 @@ while (!shuttingDown) {
 
     const payload = await response.json().catch(() => null);
 
-    if (!response.ok) {
+    if (response.status === 404 || response.status === 502 || response.status === 503) {
+      if (!hasLoggedWaitingMessage) {
+        console.info("Outbound worker is waiting for the app server to finish starting.");
+        hasLoggedWaitingMessage = true;
+      }
+    } else if (!response.ok) {
       console.error("Outbound worker request failed.", payload ?? response.statusText);
-    } else if (payload?.claimed || payload?.failed) {
+    } else {
+      hasLoggedWaitingMessage = false;
+      if (payload?.claimed || payload?.failed) {
       console.info("Outbound worker cycle", payload);
+      }
     }
   } catch (error) {
     console.error("Outbound worker cycle crashed.", error);

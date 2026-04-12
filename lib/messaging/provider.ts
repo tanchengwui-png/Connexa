@@ -1,5 +1,5 @@
 import { isWhatsAppMockModeEnabled } from "@/lib/whatsapp-channel";
-import { sendWhatsAppWebMessage } from "@/lib/whatsapp-web";
+import { sendWhatsAppMessage } from "@/lib/whatsapp-runtime";
 
 type OutboundMessagePayload = {
   agentId?: string;
@@ -27,7 +27,7 @@ export interface MessagingProvider {
 
 class WebJsWhatsAppProvider implements MessagingProvider {
   async sendOutboundMessage(payload: OutboundMessagePayload): Promise<OutboundMessageResult> {
-    return sendWhatsAppWebMessage({
+    return sendWhatsAppMessage({
       workspaceId: payload.workspaceId,
       to: payload.to,
       body: payload.body,

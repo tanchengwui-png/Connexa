@@ -1,7 +1,7 @@
 import { accessSync } from "fs";
 import path from "path";
 import QRCode from "qrcode";
-import { Buttons, Client, List, LocalAuth, Message, MessageMedia } from "whatsapp-web.js";
+import whatsappWebJs from "whatsapp-web.js";
 import { prisma } from "@/lib/prisma";
 import {
   clearWorkspaceWhatsAppSession,
@@ -9,6 +9,9 @@ import {
   saveWorkspaceWhatsAppChannelConnection
 } from "@/lib/whatsapp-channel";
 import { ingestWhatsAppClientMessage, syncWhatsAppHistoryConversation } from "@/lib/whatsapp";
+
+const { Buttons, Client, List, LocalAuth, MessageMedia } = whatsappWebJs;
+type Message = InstanceType<typeof whatsappWebJs.Message>;
 
 type RuntimeState = {
   client: Client;

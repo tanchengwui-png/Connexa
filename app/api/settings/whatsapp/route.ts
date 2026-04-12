@@ -5,7 +5,7 @@ import {
   ensureWorkspaceWhatsAppClient,
   getWorkspaceWhatsAppRuntimeStatus,
   syncWorkspaceHistory
-} from "@/lib/whatsapp-web";
+} from "@/lib/whatsapp-runtime";
 
 export async function GET() {
   try {
