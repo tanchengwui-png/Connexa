@@ -1,0 +1,88 @@
+Connexa Staging Deploy Cheatsheet
+
+Target path:
+/srv/recurvos/staging/connexa/repo
+
+Initial setup
+
+mkdir -p /srv/recurvos/staging/connexa
+cd /srv/recurvos/staging/connexa
+git clone https://github.com/tanchengwui-png/Connexa.git repo
+cd repo
+git checkout develop
+
+mkdir -p ../data/prisma
+mkdir -p ../data/wwebjs_auth
+
+Pull latest from staging branch
+
+cd /srv/recurvos/staging/connexa/repo
+git checkout develop
+git pull origin develop
+
+Create staging env
+
+cp .env.staging .env
+nano .env
+
+Update at least:
+- APP_URL
+- APP_ENCRYPTION_KEY
+- OUTBOUND_WORKER_TOKEN
+- SENDER_SERVICE_TOKEN
+- WORKSPACE_ID after seed
+
+Start staging stack
+
+cd /srv/recurvos/staging/connexa/repo
+docker compose -f docker-compose.stg.yml --env-file .env up -d --build
+
+Seed database first time
+
+docker compose -f docker-compose.stg.yml --env-file .env exec web npm run db:seed
+
+Get workspace id
+
+docker compose -f docker-compose.stg.yml --env-file .env exec web node -e "const Database=require('better-sqlite3'); const db=new Database('prisma/dev.db'); console.log(db.prepare('select id from Workspace limit 1').get().id)"
+
+Put that value into .env as WORKSPACE_ID, then rebuild/restart:
+
+docker compose -f docker-compose.stg.yml --env-file .env up -d --build
+
+Check logs
+
+docker compose -f docker-compose.stg.yml --env-file .env logs -f web
+docker compose -f docker-compose.stg.yml --env-file .env logs -f sender
+docker compose -f docker-compose.stg.yml --env-file .env logs -f worker
+
+Restart
+
+docker compose -f docker-compose.stg.yml --env-file .env restart
+
+Stop
+
+docker compose -f docker-compose.stg.yml --env-file .env down
+
+Update later
+
+cd /srv/recurvos/staging/connexa/repo
+git checkout develop
+git pull origin develop
+docker compose -f docker-compose.stg.yml --env-file .env up -d --build
+
+WhatsApp setup after deploy
+
+1. Open https://connexa-stg.recurvos.com
+2. Log in
+3. Go to WhatsApp settings
+4. Generate QR
+5. Scan QR
+6. Test send and receive
+
+Important persistent paths
+
+DB:
+/srv/recurvos/staging/connexa/data/prisma
+
+WhatsApp auth:
+/srv/recurvos/staging/connexa/data/wwebjs_auth
