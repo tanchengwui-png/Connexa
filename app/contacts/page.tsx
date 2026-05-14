@@ -1,4 +1,3 @@
-import { ContactCreateCard } from "@/components/contact-create-card";
 import { ContactsDirectory } from "@/components/contacts-directory";
 import { DashboardShell } from "@/components/dashboard-shell";
 import { getContactsData } from "@/lib/contacts";
@@ -6,12 +5,18 @@ import { getContactsData } from "@/lib/contacts";
 type ContactsPageProps = {
   searchParams?: Promise<{
     q?: string;
+    page?: string;
+    pageSize?: string;
   }>;
 };
 
 export default async function ContactsPage({ searchParams }: ContactsPageProps) {
   const params = searchParams ? await searchParams : undefined;
-  const { agents, contacts, summary, search } = await getContactsData(params?.q);
+  const { agents, contacts, summary, search, pagination } = await getContactsData({
+    search: params?.q,
+    page: params?.page ? Number.parseInt(params.page, 10) : undefined,
+    pageSize: params?.pageSize ? Number.parseInt(params.pageSize, 10) : undefined
+  });
 
   return (
     <DashboardShell currentPath="/contacts">
@@ -50,13 +55,14 @@ export default async function ContactsPage({ searchParams }: ContactsPageProps) 
       </section>
 
       <section className="contacts-workspace">
-        <aside className="contacts-sidepane">
-          <ContactCreateCard agents={agents} />
-        </aside>
-
         <div className="contacts-mainpane">
           <section className="contacts-grid contacts-grid-single">
-            <ContactsDirectory agents={agents} contacts={contacts} search={search} />
+            <ContactsDirectory
+              agents={agents}
+              contacts={contacts}
+              pagination={pagination}
+              search={search}
+            />
           </section>
         </div>
       </section>

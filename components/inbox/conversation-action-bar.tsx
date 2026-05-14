@@ -9,15 +9,19 @@ import {
   TagIcon
 } from "@/components/inbox/icons";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
-import type { InboxAgent, InboxSelectedConversation } from "@/components/inbox/types";
+import type { InboxAgent, InboxCurrentAgent, InboxSelectedConversation } from "@/components/inbox/types";
 
 type ConversationActionBarProps = {
   agents: InboxAgent[];
+  currentAgent: InboxCurrentAgent;
   onAddTag: (tag?: string) => void;
-  onSnooze: () => void;
+  onSnoozeConversation: () => void;
+  onTakeOverConversation: () => void;
   onUpdateConversation: (updates: {
     status?: "OPEN" | "PENDING" | "CLOSED";
     assigneeId?: string | null;
+    teammateIds?: string[];
+    snoozedUntil?: string | null;
   }) => void;
   selectedConversation: NonNullable<InboxSelectedConversation>;
 };
@@ -31,8 +35,10 @@ const STATUS_OPTIONS = [
 
 export function ConversationActionBar({
   agents,
+  currentAgent,
   onAddTag,
-  onSnooze,
+  onSnoozeConversation,
+  onTakeOverConversation,
   onUpdateConversation,
   selectedConversation
 }: ConversationActionBarProps) {
@@ -41,9 +47,18 @@ export function ConversationActionBar({
   const tagButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const [openMenu, setOpenMenu] = useState<"assign" | "more" | "status" | "tag" | null>(null);
+  const canTakeOverConversation = Boolean(selectedConversation.assigneeId && selectedConversation.assigneeId !== currentAgent.id);
 
   return (
     <div className="inbox-thread-actions">
+      {canTakeOverConversation ? (
+        <button className="inbox-action-button" onClick={onTakeOverConversation} type="button">
+          <AssignIcon />
+          <span>Take over</span>
+          <strong>{selectedConversation.assignee}</strong>
+        </button>
+      ) : null}
+
       <button
         className="inbox-action-button"
         onClick={() => setOpenMenu((current) => (current === "assign" ? null : "assign"))}
@@ -51,7 +66,7 @@ export function ConversationActionBar({
         type="button"
       >
         <AssignIcon />
-        <span>Owner</span>
+        <span>Primary owner</span>
         <strong>{selectedConversation.assignee}</strong>
       </button>
 
@@ -68,21 +83,22 @@ export function ConversationActionBar({
 
       <button
         className="inbox-action-button"
+        onClick={onSnoozeConversation}
+        type="button"
+      >
+        <SnoozeIcon />
+        <span>Reminder</span>
+        <strong>{selectedConversation.snoozedUntil ? "Active" : "Set"}</strong>
+      </button>
+
+      <button
+        className="inbox-action-button"
         onClick={() => setOpenMenu((current) => (current === "tag" ? null : "tag"))}
         ref={tagButtonRef}
         type="button"
       >
         <TagIcon />
         <span>Label</span>
-      </button>
-
-      <button
-        className="inbox-action-button"
-        onClick={onSnooze}
-        type="button"
-      >
-        <SnoozeIcon />
-        <span>{selectedConversation.snoozedUntil ? "Snooze" : "Later"}</span>
       </button>
 
       <button
@@ -104,9 +120,10 @@ export function ConversationActionBar({
       >
         <div className="inbox-menu-panel">
           <div className="inbox-menu-panel-head">
-            <strong>Assign conversation</strong>
-            <span>Ownership updates route this thread immediately.</span>
+            <strong>Assignment</strong>
+            <span>Set one primary owner and add supporting teammates.</span>
           </div>
+          <div className="inbox-menu-section-label">Primary owner</div>
           <button
             className={`inbox-menu-item${selectedConversation.assigneeId ? "" : " active"}`}
             onClick={() => {
@@ -115,14 +132,17 @@ export function ConversationActionBar({
             }}
             type="button"
           >
-            <span>Unassigned</span>
+            <span>No primary owner</span>
           </button>
           {agents.map((agent) => (
             <button
               className={`inbox-menu-item${selectedConversation.assigneeId === agent.id ? " active" : ""}`}
               key={agent.id}
               onClick={() => {
-                onUpdateConversation({ assigneeId: agent.id });
+                onUpdateConversation({
+                  assigneeId: agent.id,
+                  teammateIds: selectedConversation.teammateIds.filter((id) => id !== agent.id)
+                });
                 setOpenMenu(null);
               }}
               type="button"
@@ -130,6 +150,29 @@ export function ConversationActionBar({
               <span>{agent.name}</span>
             </button>
           ))}
+
+          <div className="inbox-menu-section-label">Supporting teammates</div>
+          {agents.map((agent) => {
+            const isActive = selectedConversation.teammateIds.includes(agent.id);
+            return (
+              <button
+                className={`inbox-menu-item${isActive ? " active" : ""}`}
+                key={`teammate-${agent.id}`}
+                onClick={() => {
+                  if (selectedConversation.assigneeId === agent.id) {
+                    return;
+                  }
+                  const nextTeammateIds = isActive
+                    ? selectedConversation.teammateIds.filter((id) => id !== agent.id)
+                    : [...selectedConversation.teammateIds, agent.id];
+                  onUpdateConversation({ teammateIds: nextTeammateIds });
+                }}
+                type="button"
+              >
+                <span>{agent.name}</span>
+              </button>
+            );
+          })}
         </div>
       </PortalDropdown>
 
@@ -210,18 +253,30 @@ export function ConversationActionBar({
         <div className="inbox-menu-panel">
           <div className="inbox-menu-panel-head">
             <strong>Conversation actions</strong>
-            <span>Secondary actions for this thread.</span>
+            <span>Secondary controls for this thread.</span>
           </div>
           <button
             className="inbox-menu-item"
             onClick={() => {
-              onSnooze();
+              onSnoozeConversation();
               setOpenMenu(null);
             }}
             type="button"
           >
-            <span>{selectedConversation.snoozedUntil ? "Edit snooze" : "Snooze conversation"}</span>
+            <span>{selectedConversation.snoozedUntil ? "Edit snooze reminder" : "Set snooze reminder"}</span>
           </button>
+          {selectedConversation.snoozedUntil ? (
+            <button
+              className="inbox-menu-item"
+              onClick={() => {
+                onUpdateConversation({ snoozedUntil: null });
+                setOpenMenu(null);
+              }}
+              type="button"
+            >
+              <span>Clear snooze reminder</span>
+            </button>
+          ) : null}
         </div>
       </PortalDropdown>
     </div>

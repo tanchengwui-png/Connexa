@@ -14,7 +14,7 @@ export default async function LeadsPage() {
           <h2>Run lead follow-up from one operational workspace.</h2>
           <p className="muted">
             Contacts tell you who the person is. Leads track the actual opportunity: owner, stage,
-            priority, next action, and property interest.
+            source, priority, value, next action, and custom fields.
           </p>
         </div>
       </section>

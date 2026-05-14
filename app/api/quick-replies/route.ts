@@ -22,15 +22,15 @@ export async function POST(request: NextRequest) {
       title?: string;
       shortcut?: string;
       category?: string;
-      isPinned?: boolean;
       body?: string;
+      mediaAssetIds?: string[];
     };
     const quickReply = await createQuickReply({
       title: body.title ?? "",
       shortcut: body.shortcut ?? "",
       category: body.category ?? "General",
-      isPinned: Boolean(body.isPinned),
-      body: body.body ?? ""
+      body: body.body ?? "",
+      mediaAssetIds: body.mediaAssetIds ?? []
     });
 
     return NextResponse.json({ quickReply }, { status: 201 });

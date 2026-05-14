@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { ConnexaLogo } from "@/components/connexa-logo";
 import { VerifyEmailPanel } from "@/components/verify-email-panel";
+import { getAgentEntryPath } from "@/lib/auth/entry-path";
 import { getCurrentAgent } from "@/lib/auth/current-user";
 import { verifyEmailToken } from "@/lib/auth/verification";
 
@@ -33,8 +34,11 @@ export default async function VerifyEmailPage({ searchParams }: VerifyEmailPageP
   }
 
   if (verified && agent?.emailVerifiedAt && !params?.token) {
-    redirect("/onboarding");
+    redirect(await getAgentEntryPath(agent));
   }
+
+  const continueHref = agent ? await getAgentEntryPath(agent) : "/login";
+  const continueLabel = continueHref === "/onboarding" ? "Continue to onboarding" : "Go to inbox";
 
   return (
     <main className="connexa-dark-shell connexa-public-shell">
@@ -66,8 +70,8 @@ export default async function VerifyEmailPage({ searchParams }: VerifyEmailPageP
         </aside>
 
         <VerifyEmailPanel
-          continueHref={agent ? "/onboarding" : "/login"}
-          continueLabel={agent ? "Continue to onboarding" : "Go to login"}
+          continueHref={continueHref}
+          continueLabel={agent ? continueLabel : "Go to login"}
           email={email}
           tokenError={tokenError}
           verified={verified}

@@ -7,6 +7,13 @@ type OutboundMessagePayload = {
   attachmentName?: string | null;
   attachmentPath?: string | null;
   attachmentUrl?: string | null;
+  mentions?: Array<{
+    id: string;
+    label: string;
+    token: string;
+  }> | null;
+  quotedProviderMessageId?: string | null;
+  simulateTyping?: boolean;
   interactiveButtons?: string[] | null;
   interactiveListButtonText?: string | null;
   interactiveListOptions?: string[] | null;
@@ -29,15 +36,19 @@ class WebJsWhatsAppProvider implements MessagingProvider {
   async sendOutboundMessage(payload: OutboundMessagePayload): Promise<OutboundMessageResult> {
     return sendWhatsAppMessage({
       workspaceId: payload.workspaceId,
+      conversationId: payload.conversationId,
       to: payload.to,
       body: payload.body,
+      simulateTyping: payload.simulateTyping,
       interactiveButtons: payload.interactiveButtons,
       interactiveListButtonText: payload.interactiveListButtonText,
       interactiveListOptions: payload.interactiveListOptions,
       attachmentPath: payload.attachmentPath,
       attachmentUrl: payload.attachmentUrl,
       attachmentMimeType: payload.attachmentMimeType,
-      attachmentName: payload.attachmentName
+      attachmentName: payload.attachmentName,
+      quotedProviderMessageId: payload.quotedProviderMessageId,
+      mentions: payload.mentions
     });
   }
 }

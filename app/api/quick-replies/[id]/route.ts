@@ -35,16 +35,16 @@ export async function PATCH(request: Request, context: RouteContext) {
       title?: string;
       shortcut?: string;
       category?: string;
-      isPinned?: boolean;
       body?: string;
+      mediaAssetIds?: string[];
     };
 
     const quickReply = await updateQuickReply(id, {
       title: body.title,
       shortcut: body.shortcut,
       category: body.category,
-      isPinned: body.isPinned,
-      body: body.body
+      body: body.body,
+      mediaAssetIds: body.mediaAssetIds
     });
 
     return NextResponse.json({ quickReply });

@@ -1,4 +1,4 @@
-import { prisma } from "@/lib/prisma";
+import { countPendingInvites, findWorkspaceWithAgentCount } from "@/lib/db-auth";
 import { getWorkspacePlanSettings, normalizeWorkspacePlan } from "@/lib/workspace-plan";
 
 type TeamCapacityOptions = {
@@ -6,45 +6,18 @@ type TeamCapacityOptions = {
 };
 
 export async function getWorkspaceTeamCapacity(workspaceId: string, options: TeamCapacityOptions = {}) {
-  const workspace = await prisma.workspace.findUnique({
-    where: {
-      id: workspaceId
-    },
-    select: {
-      plan: true,
-      _count: {
-        select: {
-          agents: true
-        }
-      }
-    }
-  });
+  const workspace = await findWorkspaceWithAgentCount(workspaceId);
 
   if (!workspace) {
     throw new Error("Workspace not found.");
   }
 
   const normalizedExcludedEmail = options.excludeInviteEmail?.trim().toLowerCase();
-  const pendingInvites = await prisma.invite.count({
-    where: {
-      workspaceId,
-      acceptedAt: null,
-      expiresAt: {
-        gt: new Date()
-      },
-      ...(normalizedExcludedEmail
-        ? {
-            email: {
-              not: normalizedExcludedEmail
-            }
-          }
-        : {})
-    }
-  });
+  const pendingInvites = await countPendingInvites(workspaceId, normalizedExcludedEmail);
 
   const planKey = normalizeWorkspacePlan(workspace.plan);
   const planSettings = getWorkspacePlanSettings(workspace.plan);
-  const activeMembers = workspace._count.agents;
+  const activeMembers = workspace.agentCount;
   const seatsUsed = activeMembers + pendingInvites;
   const memberLimit = planSettings.memberLimit;
 
@@ -73,19 +46,7 @@ export async function assertWorkspaceHasInviteCapacity(workspaceId: string, opti
 }
 
 export async function assertWorkspaceHasAcceptanceCapacity(workspaceId: string) {
-  const workspace = await prisma.workspace.findUnique({
-    where: {
-      id: workspaceId
-    },
-    select: {
-      plan: true,
-      _count: {
-        select: {
-          agents: true
-        }
-      }
-    }
-  });
+  const workspace = await findWorkspaceWithAgentCount(workspaceId);
 
   if (!workspace) {
     throw new Error("Workspace not found.");
@@ -93,7 +54,7 @@ export async function assertWorkspaceHasAcceptanceCapacity(workspaceId: string) 
 
   const planSettings = getWorkspacePlanSettings(workspace.plan);
 
-  if (planSettings.memberLimit !== null && workspace._count.agents >= planSettings.memberLimit) {
+  if (planSettings.memberLimit !== null && workspace.agentCount >= planSettings.memberLimit) {
     throw new Error(
       `This workspace has reached the ${planSettings.label.toLowerCase()} plan team limit of ${planSettings.memberLimit} members. Ask a manager to free a seat or upgrade the plan.`
     );

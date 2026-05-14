@@ -26,8 +26,14 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
     phoneNumber: initialValues.phoneNumber,
     lastError: initialValues.lastError,
     connectedAt: initialValues.connectedAt,
-    qrCodeDataUrl: null as string | null
+    qrCodeDataUrl: null as string | null,
+    isSyncingHistory: false
   });
+  const isReady = status.connectionStatus === "READY";
+  const hasActiveSession = status.connectionStatus !== "DISCONNECTED" && status.connectionStatus !== "AUTH_FAILED";
+  const visibleStatusError = getVisibleStatusError(status.connectionStatus, status.lastError, status.isSyncingHistory);
+  const statusLabel = formatRuntimeStatus(status.connectionStatus, status.isSyncingHistory);
+  const statusHint = getRuntimeStatusHint(status.connectionStatus, status.isSyncingHistory);
 
   const refreshStatus = async () => {
     const response = await fetch("/api/settings/whatsapp", {
@@ -66,7 +72,8 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
       phoneNumber: payload.status.channel?.phoneNumber ?? "",
       lastError: payload.status.lastError ?? payload.status.channel?.lastError ?? "",
       connectedAt: payload.status.channel?.connectedAt ?? null,
-      qrCodeDataUrl: payload.status.qrCodeDataUrl ?? null
+      qrCodeDataUrl: payload.status.qrCodeDataUrl ?? null,
+      isSyncingHistory: payload.status.isSyncingHistory ?? false
     });
   };
 
@@ -95,6 +102,33 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
       }
 
       await refreshStatus();
+      router.refresh();
+    });
+  };
+
+  const startFreshSession = () => {
+    setError(null);
+    setSuccess(null);
+
+    startTransition(async () => {
+      const response = await fetch("/api/settings/whatsapp", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          action: "fresh-start"
+        })
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        setError(payload?.error ?? "Unable to start a fresh WhatsApp session.");
+        return;
+      }
+
+      await refreshStatus();
+      setSuccess("Fresh session started. Scan the new QR code to relink the phone.");
       router.refresh();
     });
   };
@@ -166,7 +200,7 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
       <div className="whatsapp-setup-fields">
         <label className="control-block">
           <span className="control-label">Connection status</span>
-          <input className="control-input" readOnly value={status.connectionStatus} />
+          <input className="control-input" readOnly value={statusLabel} />
         </label>
 
         <label className="control-block">
@@ -202,14 +236,25 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
 
       {error ? <div className="form-error">{error}</div> : null}
       {success ? <div className="form-success">{success}</div> : null}
-      {status.lastError ? <div className="form-error">{status.lastError}</div> : null}
+      {visibleStatusError ? <div className="form-error">{visibleStatusError}</div> : null}
+      {statusHint ? <div className="table-subtle">{statusHint}</div> : null}
 
       <div className="composer-actions">
-        <button className="button button-primary" disabled={isPending} onClick={startQrLogin} type="button">
-          {isPending ? "Starting..." : "Generate QR"}
+        {!hasActiveSession ? (
+          <button className="button button-primary" disabled={isPending} onClick={startQrLogin} type="button">
+            {isPending ? "Starting..." : "Generate QR"}
+          </button>
+        ) : null}
+        <button className="button button-secondary" disabled={isPending} onClick={startFreshSession} type="button">
+          {isPending ? "Starting..." : "Start fresh session"}
         </button>
-        <button className="button button-secondary" disabled={isPending} onClick={syncChats} type="button">
-          Sync chats
+        <button
+          className="button button-secondary"
+          disabled={isPending || (!isReady && !visibleStatusError) || status.isSyncingHistory}
+          onClick={syncChats}
+          type="button"
+        >
+          {status.isSyncingHistory ? "Syncing..." : "Sync chats"}
         </button>
         <button className="button button-secondary" disabled={isPending} onClick={disconnectSession} type="button">
           Disconnect
@@ -217,4 +262,74 @@ export function WhatsAppSetupForm({ initialValues }: WhatsAppSetupFormProps) {
       </div>
     </article>
   );
+}
+
+function formatRuntimeStatus(status: string, isSyncingHistory: boolean) {
+  if (isSyncingHistory || status === "SYNCING_HISTORY") {
+    return "Importing chats";
+  }
+
+  if (status === "READY") {
+    return "Ready";
+  }
+
+  if (status === "CONNECTED") {
+    return "Finalizing session";
+  }
+
+  if (status === "AUTHENTICATED") {
+    return "Authenticating";
+  }
+
+  if (status === "QR_READY") {
+    return "Waiting for QR scan";
+  }
+
+  if (status === "INITIALIZING") {
+    return "Starting WhatsApp";
+  }
+
+  if (status === "DISCONNECTED") {
+    return "Disconnected";
+  }
+
+  return status;
+}
+
+function getRuntimeStatusHint(status: string, isSyncingHistory: boolean) {
+  if (isSyncingHistory || status === "SYNCING_HISTORY") {
+    return "Chat history is importing in the background. You can continue onboarding.";
+  }
+
+  if (status === "CONNECTED") {
+    return "WhatsApp is connected. Connexa is preparing the session and will import chats automatically.";
+  }
+
+  if (status === "READY") {
+    return "WhatsApp is ready. Chat history import has completed.";
+  }
+
+  return null;
+}
+
+function getVisibleStatusError(status: string, lastError: string, isSyncingHistory: boolean) {
+  const normalized = lastError.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  const isTransientInternalError =
+    normalized.includes("Attempted to use detached Frame") ||
+    normalized.includes("WhatsApp is still finalizing the browser session") ||
+    normalized.includes("WhatsApp is still preparing chat history") ||
+    normalized.includes("waitForChatLoading") ||
+    normalized.includes("Execution context was destroyed") ||
+    normalized.includes("Protocol error (Runtime.callFunctionOn)");
+
+  if (isTransientInternalError && (isSyncingHistory || status === "CONNECTED" || status === "SYNCING_HISTORY")) {
+    return null;
+  }
+
+  return normalized;
 }

@@ -1,4 +1,4 @@
-import { AppointmentStatus, AppointmentType, IndustryType } from "@prisma/client";
+import { AppointmentStatus, AppointmentType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 
@@ -35,9 +35,6 @@ export async function createAppointment(input: CreateAppointmentInput) {
       contact: {
         include: {
           leads: {
-            where: {
-              industryType: IndustryType.PROPERTY
-            },
             include: {
               product: true
             },

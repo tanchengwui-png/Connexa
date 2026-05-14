@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireApiManager } from "@/lib/auth/current-user";
+import { findConversationHeader, listConversationMessages } from "@/lib/db-conversations";
+import { MessageDirection } from "@/lib/db-types";
 import { ingestSimulatedInboundMessage } from "@/lib/whatsapp";
 
 export async function POST(request: Request) {
@@ -24,10 +26,34 @@ export async function POST(request: Request) {
       displayName: body.displayName,
       conversationId: body.conversationId,
       sentAt: parsedSentAt,
-      ignoreAutomationPause: Boolean(body.ignoreAutomationPause)
+      ignoreAutomationPause: Boolean(body.ignoreAutomationPause),
+      isTest: true
     });
 
-    return NextResponse.json(result, { status: 201 });
+    const conversationHeader = await findConversationHeader(result.conversationId, manager.workspaceId, true);
+    const messages = await listConversationMessages(result.conversationId);
+
+    const conversation = conversationHeader
+      ? {
+          id: conversationHeader.id,
+          contactName: conversationHeader.contactName,
+          phone: conversationHeader.phone,
+          messages: messages.map((message) => ({
+            id: message.id,
+            attachmentMimeType: message.attachmentMimeType,
+            attachmentName: message.attachmentName,
+            attachmentUrl: message.attachmentUrl,
+            body: message.body,
+            direction:
+              message.direction === MessageDirection.INBOUND ? ("inbound" as const) : ("outbound" as const),
+            sender: message.sender,
+            sentAt: formatMessageTime(message.sentAt),
+            sentAtIso: message.sentAt.toISOString()
+          }))
+        }
+      : null;
+
+    return NextResponse.json({ conversation }, { status: 201 });
   } catch (error) {
     const message =
       error instanceof Error
@@ -50,4 +76,13 @@ export async function POST(request: Request) {
       }
     );
   }
+}
+
+function formatMessageTime(date: Date) {
+  return new Intl.DateTimeFormat("en-MY", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Kuala_Lumpur"
+  }).format(date);
 }

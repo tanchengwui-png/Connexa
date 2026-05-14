@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useEffect, useState } from "react";
 import { INBOX_LAYERS } from "@/components/inbox/layers";
 import type { InboxSelectedConversation } from "@/components/inbox/types";
+import { formatMalaysiaDateTimeLocalInput, parseMalaysiaDateTimeLocalInput } from "@/lib/malaysia-time";
 
 type SimulateInboundDialogProps = {
   isOpen: boolean;
@@ -93,7 +94,9 @@ export function SimulateInboundDialog({
               <span>
                 Use selected conversation
                 <strong className="simulate-inbound-inline-label">
-                  {selectedConversation.contactName} ({selectedConversation.phone})
+                  {selectedConversation.isGroup
+                    ? selectedConversation.contactName
+                    : `${selectedConversation.contactName} (${selectedConversation.phone})`}
                 </strong>
               </span>
             </label>
@@ -171,7 +174,7 @@ export function SimulateInboundDialog({
                   conversationId: useSelectedConversation ? selectedConversation?.id ?? null : null,
                   displayName: useSelectedConversation ? null : displayName,
                   phone: useSelectedConversation ? null : phone,
-                  sentAt: sentAt ? new Date(sentAt).toISOString() : null,
+                  sentAt: sentAt ? parseMalaysiaDateTimeLocalInput(sentAt)?.toISOString() ?? null : null,
                   ignoreAutomationPause
                 })
               }
@@ -188,8 +191,5 @@ export function SimulateInboundDialog({
 }
 
 function getCurrentLocalDateTimeValue() {
-  const now = new Date();
-  const timezoneOffset = now.getTimezoneOffset();
-  const local = new Date(now.getTime() - timezoneOffset * 60 * 1000);
-  return local.toISOString().slice(0, 16);
+  return formatMalaysiaDateTimeLocalInput(new Date());
 }

@@ -19,6 +19,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       matchType?: AutomationMatchType;
       keyword?: string;
       replyBody?: string;
+      replyMediaAssetIds?: string[];
+      replyMediaAssetId?: string | null;
+      workflowId?: string | null;
       addTags?: string[];
       priority?: number;
       cooldownMinutes?: number;
@@ -26,6 +29,8 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       businessHoursOnly?: boolean;
       followUpDelayMinutes?: number | null;
       followUpReplyBody?: string | null;
+      followUpMediaAssetIds?: string[];
+      followUpMediaAssetId?: string | null;
       enabled?: boolean;
     };
     const rule = await updateAutomationRule(id, {
@@ -34,6 +39,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       matchType: body.matchType,
       keyword: body.keyword,
       replyBody: body.replyBody,
+      replyMediaAssetIds: body.replyMediaAssetIds,
+      replyMediaAssetId: body.replyMediaAssetId,
+      workflowId: body.workflowId,
       addTags: body.addTags,
       priority: body.priority,
       cooldownMinutes: body.cooldownMinutes,
@@ -41,6 +49,8 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       businessHoursOnly: body.businessHoursOnly,
       followUpDelayMinutes: body.followUpDelayMinutes,
       followUpReplyBody: body.followUpReplyBody,
+      followUpMediaAssetIds: body.followUpMediaAssetIds,
+      followUpMediaAssetId: body.followUpMediaAssetId,
       enabled: body.enabled
     });
 

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { IndustryType } from "@prisma/client";
 import { requireApiManager } from "@/lib/auth/current-user";
-import { prisma } from "@/lib/prisma";
+import { IndustryType } from "@/lib/db-types";
+import { updateWorkspaceIndustryType } from "@/lib/db-auth";
 
 export async function POST(request: NextRequest) {
   try {
@@ -14,14 +14,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid industry type." }, { status: 400 });
     }
 
-    const workspace = await prisma.workspace.update({
-      where: {
-        id: manager.workspaceId
-      },
-      data: {
-        industryType: body.industryType
-      }
-    });
+    const workspace = await updateWorkspaceIndustryType(manager.workspaceId, body.industryType);
 
     return NextResponse.json({ workspace });
   } catch (error) {

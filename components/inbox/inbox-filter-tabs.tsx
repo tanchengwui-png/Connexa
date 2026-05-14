@@ -15,6 +15,7 @@ const PRIMARY_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
 ];
 
 const OVERFLOW_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
+  { key: "assigned-others", label: "Assigned to others" },
   { key: "unassigned", label: "Unowned" },
   { key: "hot", label: "Hot" }
 ];

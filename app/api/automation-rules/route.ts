@@ -25,6 +25,9 @@ export async function POST(request: NextRequest) {
       matchType?: AutomationMatchType;
       keyword?: string;
       replyBody?: string;
+      replyMediaAssetIds?: string[];
+      replyMediaAssetId?: string | null;
+      workflowId?: string | null;
       addTags?: string[];
       priority?: number;
       cooldownMinutes?: number;
@@ -32,6 +35,8 @@ export async function POST(request: NextRequest) {
       businessHoursOnly?: boolean;
       followUpDelayMinutes?: number | null;
       followUpReplyBody?: string | null;
+      followUpMediaAssetIds?: string[];
+      followUpMediaAssetId?: string | null;
       enabled?: boolean;
     };
 
@@ -49,6 +54,9 @@ export async function POST(request: NextRequest) {
       matchType: body.matchType,
       keyword: body.keyword,
       replyBody: body.replyBody ?? "",
+      replyMediaAssetIds: body.replyMediaAssetIds ?? [],
+      replyMediaAssetId: body.replyMediaAssetId ?? null,
+      workflowId: body.workflowId ?? null,
       addTags: body.addTags ?? [],
       priority: body.priority ?? 100,
       cooldownMinutes: body.cooldownMinutes ?? 360,
@@ -56,6 +64,8 @@ export async function POST(request: NextRequest) {
       businessHoursOnly: body.businessHoursOnly ?? false,
       followUpDelayMinutes: body.followUpDelayMinutes ?? null,
       followUpReplyBody: body.followUpReplyBody ?? null,
+      followUpMediaAssetIds: body.followUpMediaAssetIds ?? [],
+      followUpMediaAssetId: body.followUpMediaAssetId ?? null,
       enabled: body.enabled
     });
 

@@ -1,46 +1,61 @@
-import { AppointmentStatus, ConversationStatus, IndustryType, MessageDirection } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { ConversationAuditEventType } from "@prisma/client";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 import { applyHumanTakeoverPause } from "@/lib/automation-engine";
+import { expireStaleConversationWorkflowIfNeeded } from "@/lib/automation-workflow-timeouts";
+import { AppointmentStatus, ConversationStatus, LeadActivityType, LeadPriority, LeadStage, MessageDirection } from "@/lib/db-types";
+import {
+  createConversationNoteRecord,
+  createOutboundMessageRecord,
+  findConversationContactPhone,
+  findConversationForWorkspace,
+  findConversationHeader,
+  listConversationMessages,
+  listConversationNotes,
+  listConversationRows,
+  listConversationTeammatesByWorkspace,
+  setConversationTeammates,
+  updateConversationRecord,
+  updateConversationTagsRecord
+} from "@/lib/db-conversations";
+import { findPropertyLeadConversation, upsertPropertyLeadForConversationRecord } from "@/lib/db-leads";
+import { getLeadCustomString, parseLeadCustomData } from "@/lib/lead-custom-fields";
+import { prisma } from "@/lib/prisma";
+import { deleteWhatsAppMessageForEveryone } from "@/lib/whatsapp-runtime";
 
 export async function listConversations() {
   const workspaceId = await requireCurrentWorkspaceId();
-  const workspace = await prisma.workspace.findUnique({
-    where: {
-      id: workspaceId
-    },
-    include: {
-      conversations: {
-        include: {
-          assignee: true,
-          contact: true
-        },
-        orderBy: {
-          lastMessageAt: "desc"
-        }
-      }
-    }
-  });
+  const [conversations, teammateRows] = await Promise.all([
+    listConversationRows(workspaceId),
+    listConversationTeammatesByWorkspace(workspaceId)
+  ]);
+  const teammatesByConversationId = new Map<string, Array<{ id: string; name: string }>>();
 
-  if (!workspace) {
-    throw new Error("No workspace found. Run the database seed first.");
+  for (const teammate of teammateRows) {
+    const existing = teammatesByConversationId.get(teammate.conversationId) ?? [];
+    existing.push({
+      id: teammate.agentId,
+      name: teammate.agentName
+    });
+    teammatesByConversationId.set(teammate.conversationId, existing);
   }
 
-  return workspace.conversations.map((conversation) => ({
+  return conversations.map((conversation) => ({
     id: conversation.id,
-    contactName: conversation.contact.displayName,
-    photoUrl: conversation.contact.photoUrl,
-    phone: conversation.contact.phone,
+    contactName: conversation.contactName,
+    photoUrl: conversation.photoUrl,
+    phone: conversation.phone,
+    isGroup: conversation.isGroup,
     status: conversation.status,
     snoozedUntil: conversation.snoozedUntil,
     unreadCount: conversation.unreadCount,
-    assignee: conversation.assignee
+    assignee: conversation.assigneeId
       ? {
-          id: conversation.assignee.id,
-          name: conversation.assignee.name
+          id: conversation.assigneeId,
+          name: conversation.assigneeName ?? "Unknown"
         }
       : null,
-    isHotLead: conversation.isHotLead || conversation.contact.isHotLead,
+    teammates: teammatesByConversationId.get(conversation.id) ?? [],
+    isHotLead: conversation.isHotLead,
     lastMessagePreview: conversation.lastMessagePreview,
     lastMessageAt: conversation.lastMessageAt
   }));
@@ -48,105 +63,269 @@ export async function listConversations() {
 
 export async function getConversationDetail(conversationId: string) {
   const workspaceId = await requireCurrentWorkspaceId();
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      workspaceId
-    },
-    include: {
-      assignee: true,
-      contact: {
-        include: {
-          leads: {
-            where: {
-              industryType: IndustryType.PROPERTY
-            },
-            include: {
-              product: true,
-              owner: true,
-              appointments: {
-                where: {
-                  status: AppointmentStatus.SCHEDULED
-                },
-                orderBy: {
-                  startAt: "asc"
-                },
-                take: 5
-              }
-            },
-            orderBy: {
-              lastActivityAt: "desc"
-            },
-            take: 1
+  const [conversation, messages, notes, auditEvents, lead, teammateRows, automationState] = await Promise.all([
+    findConversationHeader(conversationId, workspaceId),
+    listConversationMessages(conversationId),
+    listConversationNotes(conversationId),
+    prisma.conversationAuditEvent.findMany({
+      where: {
+        conversationId,
+        workspaceId
+      },
+      orderBy: {
+        createdAt: "asc"
+      },
+      include: {
+        actor: {
+          select: {
+            name: true
+          }
+        },
+        fromAssignee: {
+          select: {
+            name: true
+          }
+        },
+        toAssignee: {
+          select: {
+            name: true
+          }
+        }
+      }
+    }),
+    prisma.lead.findFirst({
+      where: {
+        contact: {
+          conversations: {
+            some: {
+              id: conversationId,
+              workspaceId
+            }
           }
         }
       },
-      messages: {
-        include: {
-          sender: true
-        },
-        orderBy: {
-          sentAt: "asc"
+      include: {
+        product: true,
+        appointments: {
+          where: {
+            status: AppointmentStatus.SCHEDULED
+          },
+          orderBy: {
+            startAt: "asc"
+          },
+          take: 5
         }
       },
-      notes: {
-        include: {
-          author: true
-        },
-        orderBy: {
-          createdAt: "desc"
-        }
+      orderBy: {
+        lastActivityAt: "desc"
       }
-    }
-  });
+    }),
+    listConversationTeammatesByWorkspace(workspaceId),
+    prisma.conversationAutomationState.findUnique({
+      where: {
+        conversationId
+      },
+      select: {
+        automationPausedUntil: true,
+        activeFlowKey: true,
+        activeFlowStep: true,
+        lastAutoReplyAt: true,
+        lastMatchedRuleId: true
+      }
+    })
+  ]);
 
   if (!conversation) {
     return null;
   }
 
+  const teammates = teammateRows
+    .filter((teammate) => teammate.conversationId === conversation.id)
+    .map((teammate) => ({
+      id: teammate.agentId,
+      name: teammate.agentName
+    }));
+
+  const messageProviderIds = messages
+    .map((message) => message.providerMessageId?.trim() ?? "")
+    .filter(Boolean);
+  const messageProviderLookupIds = Array.from(
+    new Set(
+      messageProviderIds
+        .flatMap((providerMessageId) => [providerMessageId, getWhatsAppMessageShortId(providerMessageId)])
+        .filter(Boolean)
+    )
+  );
+
+  const reactionEnvelopes = await prisma.whatsAppMessageEnvelope.findMany({
+    where: {
+      workspaceId,
+      messageType: "reaction",
+      OR: [
+        {
+          conversationId
+        },
+        ...(messageProviderLookupIds.length
+          ? [
+              {
+                quotedMessageId: {
+                  in: messageProviderLookupIds
+                }
+              }
+            ]
+          : [])
+      ]
+    },
+    orderBy: {
+      messageTimestamp: "asc"
+    },
+    select: {
+      id: true,
+      quotedMessageId: true,
+      body: true,
+      fromMe: true,
+      from: true,
+      messageTimestamp: true
+    }
+  });
+
+  const reactionsByProviderMessageId = new Map<
+    string,
+    Array<{
+      id: string;
+      emoji: string;
+      senderId: string | null;
+      sender: string;
+      sentAt: Date;
+    }>
+  >();
+
+  for (const envelope of reactionEnvelopes) {
+    const targetProviderMessageId = resolveStoredProviderMessageId(
+      envelope.quotedMessageId?.trim() ?? "",
+      messageProviderIds
+    );
+    const emoji = envelope.body?.trim() ?? "";
+    if (!targetProviderMessageId || !emoji) {
+      continue;
+    }
+
+    const existing = reactionsByProviderMessageId.get(targetProviderMessageId) ?? [];
+    existing.push({
+      id: envelope.id,
+      emoji,
+      senderId: envelope.from?.trim() || null,
+      sender: envelope.fromMe ? "You" : envelope.from?.trim() || "Contact",
+      sentAt: envelope.messageTimestamp ?? new Date()
+    });
+    reactionsByProviderMessageId.set(targetProviderMessageId, existing);
+  }
+
+  const leadCustomData = lead ? parseLeadCustomData(lead.customData) : {};
+  const effectiveAutomationState = await expireStaleConversationWorkflowIfNeeded({
+    workspaceId,
+    conversationId,
+    state: automationState
+  });
+
+  const matchedRule =
+    effectiveAutomationState?.lastMatchedRuleId
+      ? await prisma.automationRule.findFirst({
+          where: {
+            id: effectiveAutomationState.lastMatchedRuleId,
+            workspaceId
+          },
+          select: {
+            name: true
+          }
+        })
+      : null;
+
   return {
     id: conversation.id,
-    contactName: conversation.contact.displayName,
-    photoUrl: conversation.contact.photoUrl,
-    lead: conversation.contact.leads[0]
+    contactName: conversation.contactName,
+    photoUrl: conversation.photoUrl,
+    lead: lead
       ? {
-          id: conversation.contact.leads[0].id,
-          product: conversation.contact.leads[0].product,
-          appointments: conversation.contact.leads[0].appointments,
-          project: conversation.contact.leads[0].project,
-          stage: conversation.contact.leads[0].stage,
-          priority: conversation.contact.leads[0].priority,
-          preferredArea: conversation.contact.leads[0].preferredArea,
-          budget: conversation.contact.leads[0].budget,
-          financingStatus: conversation.contact.leads[0].financingStatus,
-          nextActionAt: conversation.contact.leads[0].nextActionAt,
-          sourceDetail: conversation.contact.leads[0].sourceDetail
+          id: lead.id,
+          product: lead.product,
+          appointments: lead.appointments,
+          project: getLeadCustomString(leadCustomData, "project") ?? lead.project,
+          stage: lead.stage,
+          priority: lead.priority,
+          preferredArea: getLeadCustomString(leadCustomData, "preferredArea") ?? lead.preferredArea,
+          budget: getLeadCustomString(leadCustomData, "budget") ?? (lead.budget === null ? null : `${lead.budget}`),
+          budgetValue: lead.value ?? lead.budget,
+          financingStatus: getLeadCustomString(leadCustomData, "financingStatus") ?? lead.financingStatus,
+          nextActionAt: lead.nextActionAt,
+          sourceDetail: lead.sourceDetail,
+          customData: leadCustomData
         }
       : null,
-    phone: conversation.contact.phone,
+    phone: conversation.phone,
+    isGroup: conversation.isGroup,
     status: conversation.status,
     snoozedUntil: conversation.snoozedUntil,
-    assignee: conversation.assignee
+    assignee: conversation.assigneeId
       ? {
-          id: conversation.assignee.id,
-          name: conversation.assignee.name
+          id: conversation.assigneeId,
+          name: conversation.assigneeName ?? "Unknown"
         }
       : null,
-    tags: splitTags(conversation.contact.tags),
-    notes: conversation.notes.map((note) => ({
+    teammates,
+    tags: splitTags(conversation.tags),
+    notes: notes.map((note) => ({
       id: note.id,
       body: note.body,
-      author: note.author.name,
+      author: note.author,
       createdAt: note.createdAt
     })),
-    messages: conversation.messages.map((message) => ({
+    auditEvents: auditEvents.map((event) => ({
+      id: event.id,
+      type: event.type,
+      actor: event.actor.name,
+      fromAssignee: event.fromAssignee?.name ?? null,
+      toAssignee: event.toAssignee?.name ?? null,
+      createdAt: event.createdAt
+    })),
+    automation: effectiveAutomationState
+      ? {
+          automationPausedUntil: effectiveAutomationState.automationPausedUntil,
+          activeFlowKey: effectiveAutomationState.activeFlowKey,
+          activeFlowStep: effectiveAutomationState.activeFlowStep,
+          lastAutoReplyAt: effectiveAutomationState.lastAutoReplyAt,
+          lastMatchedRuleName: matchedRule?.name ?? null
+        }
+      : null,
+    messages: messages.map((message) => ({
       id: message.id,
       attachmentMimeType: message.attachmentMimeType,
       attachmentName: message.attachmentName,
       attachmentUrl: message.attachmentUrl,
       body: message.body,
+      deletedAt: message.deletedAt,
       direction: message.direction,
-      sender: message.sender?.name ?? conversation.contact.displayName,
+      isConnexaOutbound: message.isConnexaOutbound,
+      outboundJobAvailableAt: message.outboundJobAvailableAt,
+      outboundJobLastError: message.outboundJobLastError,
+      outboundJobStatus: message.outboundJobStatus,
+      providerMessageId: message.providerMessageId,
+      rawPayload: message.rawPayload,
+      whatsAppEnvelopeMentionedIdsJson: message.whatsAppEnvelopeMentionedIdsJson,
+      whatsAppEnvelopeGroupMentionsJson: message.whatsAppEnvelopeGroupMentionsJson,
+      whatsAppEnvelopeRawJson: message.whatsAppEnvelopeRawJson,
+      replyToMessageId: message.replyToMessageId,
+      replyToMessage:
+        message.replyToMessageId
+          ? {
+              id: message.replyToMessageId,
+              body: message.replyToBody,
+              attachmentName: message.replyToAttachmentName,
+              sender: message.replyToSender
+            }
+          : null,
+      reactions: message.providerMessageId ? reactionsByProviderMessageId.get(message.providerMessageId) ?? [] : [],
+      sender: message.sender,
       sentAt: message.sentAt
     }))
   };
@@ -159,83 +338,50 @@ export async function upsertPropertyLeadForConversation(
     financingStatus?: string | null;
     nextActionAt?: Date | null;
     preferredArea?: string | null;
-    priority: "LOW" | "MEDIUM" | "HIGH" | "URGENT";
+    priority: LeadPriority;
     project: string;
     sourceDetail?: string | null;
-    stage:
-      | "NEW_LEAD"
-      | "QUALIFIED"
-      | "SITE_VISIT_BOOKED"
-      | "FOLLOW_UP"
-      | "NEGOTIATION"
-      | "CLOSED_WON"
-      | "CLOSED_LOST";
+    stage: LeadStage;
   }
 ) {
   const workspaceId = await requireCurrentWorkspaceId();
-
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      workspaceId
-    },
-    include: {
-      contact: {
-        include: {
-          leads: {
-            where: {
-              industryType: IndustryType.PROPERTY
-            },
-            orderBy: {
-              lastActivityAt: "desc"
-            },
-            take: 1
-          }
-        }
-      }
-    }
-  });
+  const conversation = await findPropertyLeadConversation(conversationId, workspaceId);
 
   if (!conversation) {
     throw new Error("Conversation not found.");
   }
 
-  const payload = {
-    workspaceId,
-    contactId: conversation.contactId,
-    ownerId: conversation.assigneeId ?? null,
-    name: conversation.contact.displayName,
-    phone: conversation.contact.phone,
-    source: conversation.contact.leads[0]?.source ?? "WEBSITE_CHAT",
-    sourceDetail: input.sourceDetail?.trim() || null,
-    project: input.project.trim(),
-    stage: input.stage,
-    pipelineStageKey: mapLeadStageToPipelineKey(input.stage),
-    industryType: IndustryType.PROPERTY,
-    priority: input.priority,
-    budget: input.budget ?? null,
-    preferredArea: input.preferredArea?.trim() || null,
-    financingStatus: input.financingStatus?.trim() || null,
-    nextActionAt: input.nextActionAt ?? null,
-    lastActivityAt: new Date()
-  } as const;
-
-  if (!payload.project) {
-    throw new Error("Project is required.");
+  const project = input.project.trim();
+  if (!project) {
+    throw new Error("Lead title is required.");
   }
 
-  const existingLead = conversation.contact.leads[0];
+  const lead = await upsertPropertyLeadForConversationRecord(conversation, {
+    workspaceId,
+    budget: input.budget ?? null,
+    financingStatus: input.financingStatus?.trim() || null,
+    nextActionAt: input.nextActionAt ?? null,
+    preferredArea: input.preferredArea?.trim() || null,
+    priority: input.priority,
+    project,
+    sourceDetail: input.sourceDetail?.trim() || null,
+    stage: input.stage
+  });
 
-  return existingLead
-    ? prisma.lead.update({
-        where: {
-          id: existingLead.id
-        },
-        data: payload
-      })
-    : prisma.lead.create({
-        data: payload
-      });
+  if (!conversation.existingLeadId && lead && typeof lead === "object" && "id" in lead && typeof lead.id === "string") {
+    await prisma.leadActivity.create({
+      data: {
+        workspaceId,
+        leadId: lead.id,
+        createdById: conversation.assigneeId ?? null,
+        type: LeadActivityType.LEAD_CREATED,
+        title: "Lead created",
+        description: "Created from inbox conversation"
+      }
+    });
+  }
+
+  return lead;
 }
 
 export async function updateConversation(
@@ -243,35 +389,52 @@ export async function updateConversation(
   updates: {
     status?: ConversationStatus;
     assigneeId?: string | null;
+    teammateIds?: string[];
     snoozedUntil?: Date | null;
+    unreadCount?: number;
   }
 ) {
-  const workspaceId = await requireCurrentWorkspaceId();
-
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      workspaceId
-    },
-    select: {
-      id: true
-    }
-  });
+  const agent = await requireCurrentAgent();
+  const workspaceId = agent.workspaceId;
+  const conversation = await findConversationForWorkspace(conversationId, workspaceId);
 
   if (!conversation) {
     throw new Error("Conversation not found.");
   }
 
-  return prisma.conversation.update({
-    where: {
-      id: conversation.id
-    },
-    data: {
-      ...(updates.status ? { status: updates.status } : {}),
-      ...(updates.assigneeId !== undefined ? { assigneeId: updates.assigneeId } : {}),
-      ...(updates.snoozedUntil !== undefined ? { snoozedUntil: updates.snoozedUntil } : {})
-    }
+  const updatedConversation = await updateConversationRecord(conversation.id, {
+    status: updates.status,
+    assigneeId: updates.assigneeId,
+    snoozedUntil: updates.snoozedUntil,
+    unreadCount: updates.unreadCount
   });
+
+  if (updates.teammateIds !== undefined) {
+    const effectiveAssigneeId = updates.assigneeId !== undefined ? updates.assigneeId : conversation.assigneeId;
+    await setConversationTeammates(
+      conversation.id,
+      updates.teammateIds.filter((teammateId) => teammateId !== effectiveAssigneeId)
+    );
+  }
+
+  if (updates.assigneeId !== undefined && updates.assigneeId !== conversation.assigneeId) {
+    await prisma.conversationAuditEvent.create({
+      data: {
+        workspaceId,
+        conversationId: conversation.id,
+        actorId: agent.id,
+        type: resolveConversationAuditEventType({
+          actorId: agent.id,
+          fromAssigneeId: conversation.assigneeId,
+          toAssigneeId: updates.assigneeId ?? null
+        }),
+        fromAssigneeId: conversation.assigneeId,
+        toAssigneeId: updates.assigneeId ?? null
+      }
+    });
+  }
+
+  return updatedConversation;
 }
 
 export async function updateConversationTags(conversationId: string, tags: string[]) {
@@ -284,31 +447,55 @@ export async function updateConversationTags(conversationId: string, tags: strin
     )
   );
 
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: conversationId,
-      workspaceId
-    },
-    select: {
-      id: true,
-      contactId: true
-    }
-  });
+  const conversation = await findConversationForWorkspace(conversationId, workspaceId);
 
   if (!conversation) {
     throw new Error("Conversation not found.");
   }
 
-  await prisma.contact.update({
+  await updateConversationTagsRecord(conversation.contactId, normalizedTags.join(", "));
+
+  return normalizedTags;
+}
+
+export async function deleteConversation(conversationId: string) {
+  const workspaceId = await requireCurrentWorkspaceId();
+  return deleteConversationForWorkspace(workspaceId, conversationId);
+}
+
+export async function deleteConversationForWorkspace(workspaceId: string, conversationId: string) {
+  const conversation = await findConversationForWorkspace(conversationId, workspaceId);
+
+  if (!conversation) {
+    throw new Error("Conversation not found.");
+  }
+
+  await prisma.conversation.delete({
     where: {
-      id: conversation.contactId
-    },
-    data: {
-      tags: normalizedTags.join(", ")
+      id: conversation.id
     }
   });
 
-  return normalizedTags;
+  const remainingConversationCount = await prisma.conversation.count({
+    where: {
+      workspaceId,
+      contactId: conversation.contactId
+    }
+  });
+
+  if (remainingConversationCount === 0) {
+    try {
+      await prisma.contact.delete({
+        where: {
+          id: conversation.contactId
+        }
+      });
+    } catch {
+      // Leaving an unreferenced contact is acceptable for test cleanup; the inbox entry is already gone.
+    }
+  }
+
+  return { id: conversation.id };
 }
 
 export async function createOutboundMessage(input: {
@@ -318,6 +505,7 @@ export async function createOutboundMessage(input: {
   attachmentName?: string | null;
   attachmentUrl?: string | null;
   providerMessageId?: string | null;
+  replyToMessageId?: string | null;
 }) {
   const agent = await requireCurrentAgent();
   const workspaceId = agent.workspaceId;
@@ -326,15 +514,7 @@ export async function createOutboundMessage(input: {
     throw new Error("Message body or attachment is required.");
   }
 
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: input.conversationId,
-      workspaceId
-    },
-    include: {
-      contact: true
-    }
-  });
+  const conversation = await findConversationContactPhone(input.conversationId, workspaceId);
 
   if (!conversation) {
     throw new Error("Conversation not found.");
@@ -344,44 +524,18 @@ export async function createOutboundMessage(input: {
     normalizedBody ||
     (input.attachmentName ? `Attachment: ${input.attachmentName}` : "Attachment sent");
 
-  const message = await prisma.$transaction(async (tx) => {
-    const createdMessage = await tx.message.create({
-      data: {
-        conversationId: input.conversationId,
-        senderId: agent.id,
-        providerMessageId: input.providerMessageId ?? null,
-        direction: MessageDirection.OUTBOUND,
-        body: normalizedBody,
-        attachmentMimeType: input.attachmentMimeType ?? null,
-        attachmentName: input.attachmentName ?? null,
-        attachmentUrl: input.attachmentUrl ?? null
-      },
-      include: {
-        sender: true
-      }
-    });
-
-    await tx.conversation.update({
-      where: {
-        id: input.conversationId
-      },
-      data: {
-        status: ConversationStatus.OPEN,
-        lastMessagePreview: previewText,
-        lastMessageAt: createdMessage.sentAt
-      }
-    });
-
-    await tx.contact.update({
-      where: {
-        id: conversation.contactId
-      },
-      data: {
-        lastInteractionAt: createdMessage.sentAt
-      }
-    });
-
-    return createdMessage;
+  const message = await createOutboundMessageRecord({
+    conversationId: input.conversationId,
+    senderId: agent.id,
+    providerMessageId: input.providerMessageId ?? null,
+    replyToMessageId: input.replyToMessageId ?? null,
+    direction: MessageDirection.OUTBOUND,
+    body: normalizedBody,
+    attachmentMimeType: input.attachmentMimeType ?? null,
+    attachmentName: input.attachmentName ?? null,
+    attachmentUrl: input.attachmentUrl ?? null,
+    previewText,
+    contactId: conversation.contactId
   });
 
   await applyHumanTakeoverPause({
@@ -397,8 +551,8 @@ export async function createOutboundMessage(input: {
     attachmentUrl: message.attachmentUrl,
     body: message.body,
     direction: message.direction,
-    sender: message.sender?.name ?? "Team",
-    sentAt: message.sentAt
+    sender: message?.sender ?? "Team",
+    sentAt: message?.sentAt ?? new Date()
   };
 }
 
@@ -414,40 +568,149 @@ export async function createConversationNote(input: {
     throw new Error("Note body is required.");
   }
 
-  const conversation = await prisma.conversation.findFirst({
-    where: {
-      id: input.conversationId,
-      workspaceId
-    },
-    select: {
-      id: true,
-      contactId: true
-    }
-  });
+  const conversation = await findConversationForWorkspace(input.conversationId, workspaceId);
 
   if (!conversation) {
     throw new Error("Conversation not found.");
   }
 
-  const note = await prisma.note.create({
-    data: {
-      workspaceId,
-      contactId: conversation.contactId,
-      conversationId: conversation.id,
-      authorId: agent.id,
-      body: normalizedBody
-    },
-    include: {
-      author: true
-    }
+  const note = await createConversationNoteRecord({
+    workspaceId,
+    contactId: conversation.contactId,
+    conversationId: conversation.id,
+    authorId: agent.id,
+    body: normalizedBody
   });
 
   return {
     id: note.id,
     body: note.body,
-    author: note.author.name,
+    author: note.author,
     createdAt: note.createdAt
   };
+}
+
+function resolveConversationAuditEventType(input: {
+  actorId: string;
+  fromAssigneeId: string | null;
+  toAssigneeId: string | null;
+}) {
+  if (!input.toAssigneeId) {
+    return ConversationAuditEventType.RELEASED;
+  }
+
+  if (!input.fromAssigneeId) {
+    return ConversationAuditEventType.ASSIGNED;
+  }
+
+  if (input.toAssigneeId === input.actorId && input.fromAssigneeId !== input.actorId) {
+    return ConversationAuditEventType.TAKEN_OVER;
+  }
+
+  return ConversationAuditEventType.REASSIGNED;
+}
+
+export async function deleteConversationMessage(conversationId: string, messageId: string) {
+  const workspaceId = await requireCurrentWorkspaceId();
+  const conversation = await findConversationForWorkspace(conversationId, workspaceId);
+
+  if (!conversation) {
+    throw new Error("Conversation not found.");
+  }
+
+  const message = await prisma.message.findFirst({
+    where: {
+      id: messageId,
+      conversationId: conversation.id
+    },
+    select: {
+      id: true,
+      sentAt: true,
+      deletedAt: true
+      ,
+      direction: true,
+      providerMessageId: true
+    }
+  });
+
+  if (!message) {
+    throw new Error("Message not found.");
+  }
+
+  if (message.deletedAt) {
+    return { id: message.id };
+  }
+
+  if (message.direction !== "OUTBOUND") {
+    throw new Error("Only outbound messages sent from Connexa can be deleted for everyone.");
+  }
+
+  if (!message.providerMessageId) {
+    throw new Error("This message cannot be deleted for everyone.");
+  }
+
+  const outboundJob = await prisma.outboundMessageJob.findFirst({
+    where: {
+      messageId: message.id
+    },
+    select: {
+      id: true
+    }
+  });
+
+  if (!outboundJob) {
+    throw new Error("Only messages sent via Connexa can be deleted for everyone.");
+  }
+
+  await deleteWhatsAppMessageForEveryone({
+    workspaceId,
+    providerMessageId: message.providerMessageId
+  });
+
+  await prisma.$transaction(async (tx) => {
+    await tx.message.update({
+      where: {
+        id: message.id
+      },
+      data: {
+        body: "",
+        attachmentMimeType: null,
+        attachmentName: null,
+        attachmentUrl: null,
+        deletedAt: new Date()
+      }
+    });
+
+    const latestVisibleMessage = await tx.message.findFirst({
+      where: {
+        conversationId: conversation.id,
+        deletedAt: null
+      },
+      orderBy: {
+        sentAt: "desc"
+      },
+      select: {
+        sentAt: true,
+        body: true,
+        attachmentName: true
+      }
+    });
+
+    await tx.conversation.update({
+      where: {
+        id: conversation.id
+      },
+      data: {
+        lastMessagePreview: latestVisibleMessage
+          ? latestVisibleMessage.body.trim() ||
+            (latestVisibleMessage.attachmentName ? `Attachment: ${latestVisibleMessage.attachmentName}` : "Attachment sent")
+          : "No recent messages",
+        lastMessageAt: latestVisibleMessage?.sentAt ?? message.sentAt
+      }
+    });
+  });
+
+  return { id: message.id };
 }
 
 function splitTags(tags: string) {
@@ -457,25 +720,19 @@ function splitTags(tags: string) {
     .filter(Boolean);
 }
 
-function mapLeadStageToPipelineKey(
-  stage:
-    | "NEW_LEAD"
-    | "QUALIFIED"
-    | "SITE_VISIT_BOOKED"
-    | "FOLLOW_UP"
-    | "NEGOTIATION"
-    | "CLOSED_WON"
-    | "CLOSED_LOST"
-) {
-  const mapping = {
-    NEW_LEAD: "new_lead",
-    QUALIFIED: "qualified",
-    SITE_VISIT_BOOKED: "viewing_booked",
-    FOLLOW_UP: "follow_up",
-    NEGOTIATION: "negotiation",
-    CLOSED_WON: "closed_won",
-    CLOSED_LOST: "closed_lost"
-  } as const;
+function resolveStoredProviderMessageId(value: string, providerMessageIds: string[]) {
+  if (!value) {
+    return null;
+  }
 
-  return mapping[stage];
+  if (providerMessageIds.includes(value)) {
+    return value;
+  }
+
+  return providerMessageIds.find((providerMessageId) => getWhatsAppMessageShortId(providerMessageId) === value) ?? null;
+}
+
+function getWhatsAppMessageShortId(providerMessageId: string) {
+  const parts = providerMessageId.trim().split("_");
+  return parts.length >= 3 ? parts[2] : providerMessageId.trim();
 }

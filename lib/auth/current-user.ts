@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 import { getCurrentSession } from "@/lib/auth/session";
+import { findAgentsByAccountId } from "@/lib/db-auth";
 
 export async function getCurrentAgent() {
   const session = await getCurrentSession();
@@ -10,12 +11,37 @@ export async function getCurrentAgent() {
 
   return {
     id: session.agent.id,
+    accountId: session.agent.accountId,
     workspaceId: session.workspaceId,
     name: session.agent.name,
     email: session.agent.email,
     emailVerifiedAt: session.agent.emailVerifiedAt,
     role: session.agent.role
   };
+}
+
+export async function getCurrentAgentMemberships() {
+  const agent = await getCurrentAgent();
+
+  if (!agent) {
+    return [];
+  }
+
+  if (!agent.accountId) {
+    return [];
+  }
+
+  const memberships = await findAgentsByAccountId(agent.accountId);
+
+  return memberships.map((membership) => ({
+    agentId: membership.id,
+    workspaceId: membership.workspaceId,
+    workspaceName: membership.workspaceName,
+    workspaceSlug: membership.workspaceSlug,
+    role: membership.role,
+    emailVerifiedAt: membership.effectiveEmailVerifiedAt,
+    isCurrent: membership.id === agent.id
+  }));
 }
 
 export async function requireCurrentAgent() {

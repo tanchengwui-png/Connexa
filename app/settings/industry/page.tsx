@@ -1,19 +1,12 @@
 import { DashboardShell } from "@/components/dashboard-shell";
 import { IndustrySetupForm } from "@/components/industry-setup-form";
 import { requireManager } from "@/lib/auth/current-user";
-import { prisma } from "@/lib/prisma";
+import { findWorkspaceSummaryById } from "@/lib/db-auth";
+import { IndustryType } from "@/lib/db-types";
 
 export default async function IndustrySetupPage() {
   const manager = await requireManager();
-  const workspace = await prisma.workspace.findUnique({
-    where: {
-      id: manager.workspaceId
-    },
-    select: {
-      industryType: true,
-      name: true
-    }
-  });
+  const workspace = await findWorkspaceSummaryById(manager.workspaceId);
 
   if (!workspace) {
     throw new Error("No workspace found. Run the database seed first.");
@@ -52,7 +45,7 @@ export default async function IndustrySetupPage() {
             </div>
           </div>
 
-          <IndustrySetupForm initialIndustryType={workspace.industryType} />
+          <IndustrySetupForm initialIndustryType={workspace.industryType as IndustryType} />
         </article>
 
         <article className="content-card settings-dark-panel">

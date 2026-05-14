@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiManager } from "@/lib/auth/current-user";
 import {
-  disconnectWorkspaceWhatsAppClient,
+  deleteWorkspaceWhatsAppClientSession,
   ensureWorkspaceWhatsAppClient,
   getWorkspaceWhatsAppRuntimeStatus,
   syncWorkspaceHistory
@@ -40,9 +40,19 @@ export async function GET() {
   }
 }
 
-export async function POST(_request: NextRequest) {
+export async function POST(request: NextRequest) {
   try {
     const manager = await requireApiManager();
+    const body = (await request.json().catch(() => null)) as
+      | {
+          action?: string;
+        }
+      | null;
+
+    if (body?.action === "fresh-start") {
+      await deleteWorkspaceWhatsAppClientSession(manager.workspaceId);
+    }
+
     await ensureWorkspaceWhatsAppClient({
       workspaceId: manager.workspaceId,
       agentId: manager.id
@@ -81,7 +91,7 @@ export async function POST(_request: NextRequest) {
 export async function DELETE() {
   try {
     const manager = await requireApiManager();
-    await disconnectWorkspaceWhatsAppClient(manager.workspaceId);
+    await deleteWorkspaceWhatsAppClientSession(manager.workspaceId);
     return NextResponse.json({ ok: true }, { status: 200 });
   } catch (error) {
     return NextResponse.json(

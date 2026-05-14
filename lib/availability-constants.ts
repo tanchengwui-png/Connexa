@@ -1,4 +1,4 @@
-import { AvailabilityOverrideType } from "@prisma/client";
+import { AvailabilityOverrideType } from "@/lib/db-types";
 
 export const WEEKDAY_OPTIONS = [
   { dayOfWeek: 0, label: "Sunday" },

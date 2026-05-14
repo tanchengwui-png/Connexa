@@ -1,3 +1,5 @@
+import { getResolvedPlatformEmailConfig } from "@/lib/platform-config";
+
 type EmailTemplateInput = {
   preheader?: string;
   eyebrow: string;
@@ -8,22 +10,11 @@ type EmailTemplateInput = {
   logoSrc?: string;
 };
 
-function getBrandName() {
-  return process.env.EMAIL_BRAND_NAME ?? "Connexa";
-}
-
-function getBrandTagline() {
-  return process.env.EMAIL_BRAND_TAGLINE ?? "Shared workspace communication for modern teams.";
-}
-
-function getSupportEmail() {
-  return process.env.SUPPORT_EMAIL ?? process.env.SMTP_FROM ?? "Connexa <no-reply@connexa.local>";
-}
-
-export function renderEmailTemplate(input: EmailTemplateInput) {
-  const brandName = getBrandName();
-  const brandTagline = getBrandTagline();
-  const supportEmail = getSupportEmail();
+export async function renderEmailTemplate(input: EmailTemplateInput) {
+  const config = await getResolvedPlatformEmailConfig();
+  const brandName = config.emailBrandName;
+  const brandTagline = config.emailBrandTagline;
+  const supportEmail = config.supportEmail || config.smtpFrom || "Connexa <no-reply@connexa.local>";
   const logoSrc = input.logoSrc ?? "cid:connexa-logo";
 
   return `

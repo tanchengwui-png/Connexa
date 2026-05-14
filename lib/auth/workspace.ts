@@ -1,13 +1,9 @@
-import { prisma } from "@/lib/prisma";
+import { findWorkspaceById } from "@/lib/db-auth";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 
 export async function requireCurrentWorkspace() {
   const workspaceId = await requireCurrentWorkspaceId();
-  const workspace = await prisma.workspace.findUnique({
-    where: {
-      id: workspaceId
-    }
-  });
+  const workspace = await findWorkspaceById(workspaceId);
 
   if (!workspace) {
     throw new Error("Workspace not found.");

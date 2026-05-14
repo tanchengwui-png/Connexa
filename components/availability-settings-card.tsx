@@ -1,12 +1,25 @@
 "use client";
 
-import { AvailabilityOverrideType } from "@prisma/client";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { AVAILABILITY_OVERRIDE_OPTIONS } from "@/lib/availability-constants";
 import { INBOX_LAYERS } from "@/components/inbox/layers";
 import { useToast } from "@/components/toast-provider";
+import { AvailabilityOverrideType } from "@/lib/db-types";
+import {
+  MALAYSIA_TIME_ZONE,
+  addMalaysiaDays,
+  addMalaysiaMonths,
+  createMalaysiaDate,
+  formatMalaysiaDateTimeLocalInput,
+  getMalaysiaDateKey,
+  getMalaysiaDateTimeParts,
+  getMalaysiaDayOfWeek,
+  parseMalaysiaDateTimeLocalInput,
+  startOfMalaysiaDay,
+  startOfMalaysiaMonth
+} from "@/lib/malaysia-time";
 
 type WeeklyRule = {
   dayOfWeek: number;
@@ -73,8 +86,8 @@ export function AvailabilitySettingsCard({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isMounted, setIsMounted] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState(() => startOfMonth(new Date()));
-  const [selectedDay, setSelectedDay] = useState(() => startOfDay(new Date()));
+  const [calendarMonth, setCalendarMonth] = useState(() => startOfMalaysiaMonth(new Date()));
+  const [selectedDay, setSelectedDay] = useState(() => startOfMalaysiaDay(new Date()));
   const [quickAddDraft, setQuickAddDraft] = useState<QuickAddDraft | null>(null);
   const [editDraft, setEditDraft] = useState<DraftOverride | null>(null);
   const [ruleDrafts, setRuleDrafts] = useState(weeklyRules);
@@ -82,8 +95,8 @@ export function AvailabilitySettingsCard({
     overrides.map((override) => ({
       id: override.id,
       type: override.type,
-      startAt: toLocalDateTimeValue(override.startAtIso),
-      endAt: toLocalDateTimeValue(override.endAtIso),
+      startAt: formatMalaysiaDateTimeLocalInput(override.startAtIso),
+      endAt: formatMalaysiaDateTimeLocalInput(override.endAtIso),
       note: override.note
     }))
   );
@@ -142,17 +155,21 @@ export function AvailabilitySettingsCard({
   };
 
   const openQuickAdd = (seedDate?: Date) => {
-    const seed = seedDate ? new Date(seedDate) : new Date();
-    seed.setMinutes(0, 0, 0);
-    if (seedDate) {
-      seed.setHours(9, 0, 0, 0);
-    }
+    const parts = getMalaysiaDateTimeParts(seedDate ?? new Date());
+    const seed = createMalaysiaDate({
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+      hour: seedDate ? 9 : parts.hour,
+      minute: 0,
+      second: 0
+    });
     const end = new Date(seed.getTime() + 60 * 60 * 1000);
 
     setQuickAddDraft({
       type: AvailabilityOverrideType.BLOCKED,
-      startAt: toLocalDateTimeValue(seed.toISOString()),
-      endAt: toLocalDateTimeValue(end.toISOString()),
+      startAt: formatMalaysiaDateTimeLocalInput(seed),
+      endAt: formatMalaysiaDateTimeLocalInput(end),
       note: ""
     });
   };
@@ -214,8 +231,8 @@ export function AvailabilitySettingsCard({
         })),
         overrides: overrideDrafts.map((override) => ({
           type: override.type,
-          startAt: new Date(override.startAt).toISOString(),
-          endAt: new Date(override.endAt).toISOString(),
+          startAt: parseMalaysiaDateTimeLocalInput(override.startAt)?.toISOString(),
+          endAt: parseMalaysiaDateTimeLocalInput(override.endAt)?.toISOString(),
           note: override.note
         }))
       })
@@ -263,7 +280,7 @@ export function AvailabilitySettingsCard({
               </button>
               <button
                 className="inbox-search-tool"
-                onClick={() => setCalendarMonth((current) => addMonths(current, -1))}
+                onClick={() => setCalendarMonth((current) => addMalaysiaMonths(current, -1))}
                 type="button"
               >
                 Prev
@@ -271,7 +288,7 @@ export function AvailabilitySettingsCard({
               <strong>{formatMonthLabel(calendarMonth)}</strong>
               <button
                 className="inbox-search-tool"
-                onClick={() => setCalendarMonth((current) => addMonths(current, 1))}
+                onClick={() => setCalendarMonth((current) => addMalaysiaMonths(current, 1))}
                 type="button"
               >
                 Next
@@ -383,23 +400,23 @@ export function AvailabilitySettingsCard({
                 <div
                   className={`availability-calendar-day${day.isCurrentMonth ? "" : " muted-day"}${day.isToday ? " today" : ""}${day.isSelected ? " selected" : ""}`}
                   key={day.key}
-                  onClick={() => setSelectedDay(startOfDay(day.date))}
+                  onClick={() => setSelectedDay(startOfMalaysiaDay(day.date))}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
-                      setSelectedDay(startOfDay(day.date));
+                      setSelectedDay(startOfMalaysiaDay(day.date));
                     }
                   }}
                 >
                   <div className="availability-calendar-day-top">
-                    <strong>{day.date.getDate()}</strong>
+                    <strong>{getMalaysiaDateTimeParts(day.date).day}</strong>
                     <button
                       className="availability-calendar-add"
                       onClick={(event) => {
                         event.stopPropagation();
-                        setSelectedDay(startOfDay(day.date));
+                        setSelectedDay(startOfMalaysiaDay(day.date));
                         openQuickAdd(day.date);
                       }}
                       type="button"
@@ -798,13 +815,6 @@ export function AvailabilitySettingsCard({
   );
 }
 
-function toLocalDateTimeValue(isoString: string) {
-  const date = new Date(isoString);
-  const offset = date.getTimezoneOffset();
-  const localDate = new Date(date.getTime() - offset * 60 * 1000);
-  return localDate.toISOString().slice(0, 16);
-}
-
 function buildCalendarDays(
   month: Date,
   weeklyRules: WeeklyRule[],
@@ -812,20 +822,23 @@ function buildCalendarDays(
   appointments: CalendarAppointment[],
   selectedDay: Date
 ) {
-  const firstOfMonth = startOfMonth(month);
-  const firstDay = new Date(firstOfMonth);
-  firstDay.setDate(firstDay.getDate() - firstOfMonth.getDay());
+  const firstOfMonth = startOfMalaysiaMonth(month);
+  const firstDay = addMalaysiaDays(firstOfMonth, -getMalaysiaDayOfWeek(firstOfMonth));
+  const monthParts = getMalaysiaDateTimeParts(month);
 
   return Array.from({ length: 42 }, (_, index) => {
-    const date = new Date(firstDay);
-    date.setDate(firstDay.getDate() + index);
+    const date = addMalaysiaDays(firstDay, index);
 
-    const matchingRule = weeklyRules.find((rule) => rule.dayOfWeek === date.getDay());
+    const dateKey = getMalaysiaDateKey(date);
+    const matchingRule = weeklyRules.find((rule) => rule.dayOfWeek === getMalaysiaDayOfWeek(date));
     const appointmentCount = appointments.filter((appointment) =>
-      isSameCalendarDay(new Date(appointment.startAtIso), date)
+      getMalaysiaDateKey(appointment.startAtIso) === dateKey
     ).length;
     const dayOverrides = overrides
-      .filter((override) => isSameCalendarDay(new Date(override.startAt), date))
+      .filter((override) => {
+        const startAt = parseMalaysiaDateTimeLocalInput(override.startAt);
+        return startAt ? getMalaysiaDateKey(startAt) === dateKey : false;
+      })
       .map((override) => ({
         id: override.id,
         label: getOverrideBadgeLabel(override.type),
@@ -835,11 +848,14 @@ function buildCalendarDays(
       }));
 
     return {
-      key: date.toISOString(),
+      key: dateKey,
       date,
-      isCurrentMonth: date.getMonth() === month.getMonth(),
-      isToday: isSameCalendarDay(date, new Date()),
-      isSelected: isSameCalendarDay(date, selectedDay),
+      isCurrentMonth: (() => {
+        const dateParts = getMalaysiaDateTimeParts(date);
+        return dateParts.year === monthParts.year && dateParts.month === monthParts.month;
+      })(),
+      isToday: getMalaysiaDateKey(date) === getMalaysiaDateKey(new Date()),
+      isSelected: getMalaysiaDateKey(date) === getMalaysiaDateKey(selectedDay),
       appointmentCount,
       defaultLabel:
         matchingRule && matchingRule.enabled ? `${matchingRule.startTime} - ${matchingRule.endTime}` : "Off day",
@@ -849,18 +865,18 @@ function buildCalendarDays(
   });
 }
 
-function startOfMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), 1);
-}
-
-function startOfDay(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
-}
-
 function buildTimeSlots(day: Date) {
+  const parts = getMalaysiaDateTimeParts(day);
+
   return Array.from({ length: 14 }, (_, index) => {
-    const slot = new Date(day);
-    slot.setHours(index + 8, 0, 0, 0);
+    const slot = createMalaysiaDate({
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+      hour: index + 8,
+      minute: 0,
+      second: 0
+    });
     return {
       date: slot,
       label: formatLocalTime(slot.toISOString())
@@ -868,14 +884,11 @@ function buildTimeSlots(day: Date) {
   });
 }
 
-function addMonths(date: Date, delta: number) {
-  return new Date(date.getFullYear(), date.getMonth() + delta, 1);
-}
-
 function formatMonthLabel(date: Date) {
   return new Intl.DateTimeFormat("en-MY", {
     month: "long",
-    year: "numeric"
+    year: "numeric",
+    timeZone: MALAYSIA_TIME_ZONE
   }).format(date);
 }
 
@@ -884,7 +897,8 @@ function formatDayPanelLabel(date: Date) {
     weekday: "long",
     day: "2-digit",
     month: "long",
-    year: "numeric"
+    year: "numeric",
+    timeZone: MALAYSIA_TIME_ZONE
   }).format(date);
 }
 
@@ -894,25 +908,35 @@ function buildDaySchedule(
   overrides: DraftOverride[],
   appointments: CalendarAppointment[]
 ) {
-  const matchingRule = weeklyRules.find((rule) => rule.dayOfWeek === day.getDay());
+  const dayKey = getMalaysiaDateKey(day);
+  const matchingRule = weeklyRules.find((rule) => rule.dayOfWeek === getMalaysiaDayOfWeek(day));
   const defaultLabel =
     matchingRule && matchingRule.enabled ? `${matchingRule.startTime} - ${matchingRule.endTime}` : "Off day";
 
   const overrideItems = overrides
-    .filter((override) => isSameCalendarDay(new Date(override.startAt), day))
-    .map((override) => ({
-      key: `override-${override.id}`,
-      id: override.id,
-      kind: "override" as const,
-      tone: getOverrideTone(override.type),
-      title: getOverrideBadgeLabel(override.type),
-      timeLabel: `${formatLocalTime(override.startAt)} - ${formatLocalTime(override.endAt)}`,
-      note: override.note.trim(),
-      sortAt: new Date(override.startAt).getTime()
-    }));
+    .flatMap((override) => {
+      const startAt = parseMalaysiaDateTimeLocalInput(override.startAt);
+
+      if (!startAt || getMalaysiaDateKey(startAt) !== dayKey) {
+        return [];
+      }
+
+      return [
+        {
+          key: `override-${override.id}`,
+          id: override.id,
+          kind: "override" as const,
+          tone: getOverrideTone(override.type),
+          title: getOverrideBadgeLabel(override.type),
+          timeLabel: `${formatLocalTime(override.startAt)} - ${formatLocalTime(override.endAt)}`,
+          note: override.note.trim(),
+          sortAt: startAt.getTime()
+        }
+      ];
+    });
 
   const appointmentItems = appointments
-    .filter((appointment) => isSameCalendarDay(new Date(appointment.startAtIso), day))
+    .filter((appointment) => getMalaysiaDateKey(appointment.startAtIso) === dayKey)
     .map((appointment) => ({
       key: `appointment-${appointment.id}`,
       kind: "appointment" as const,
@@ -934,14 +958,6 @@ function buildDaySchedule(
     overrideCount: overrideItems.length,
     items: [...overrideItems, ...appointmentItems].sort((left, right) => left.sortAt - right.sortAt)
   };
-}
-
-function isSameCalendarDay(left: Date, right: Date) {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
 }
 
 function getOverrideBadgeLabel(type: AvailabilityOverrideType) {
@@ -974,6 +990,7 @@ function formatLocalTime(value: string) {
   return new Intl.DateTimeFormat("en-MY", {
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
+    timeZone: MALAYSIA_TIME_ZONE
   }).format(date);
 }

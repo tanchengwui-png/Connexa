@@ -13,7 +13,7 @@ export async function sendBrandedTestEmail(to: string) {
       "",
       "If you received this message, SMTP delivery and the embedded logo are working."
     ].join("\n"),
-    html: renderEmailTemplate({
+    html: await renderEmailTemplate({
       preheader: "Connexa branded email test.",
       eyebrow: "Email preview",
       title: "Connexa email test",

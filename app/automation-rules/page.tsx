@@ -1,9 +1,16 @@
 import { DashboardShell } from "@/components/dashboard-shell";
 import { AutomationRulesManager } from "@/components/automation-rules-manager";
 import { getAutomationRulesData } from "@/lib/automation-rules";
+import { getMediaLibraryData } from "@/lib/media-library";
+import { getWorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
 
 export default async function AutomationRulesPage() {
-  const { rules, settings, jobs, summary, workflows } = await getAutomationRulesData();
+  const automationData = await getAutomationRulesData();
+  const { workspaceId, rules, settings, jobs, summary, workflows, agents } = automationData;
+  const [mediaLibrary, whatsAppChannel] = await Promise.all([
+    getMediaLibraryData(),
+    getWorkspaceWhatsAppChannelStatus(workspaceId)
+  ]);
 
   return (
     <DashboardShell currentPath="/automation-rules">
@@ -13,7 +20,7 @@ export default async function AutomationRulesPage() {
           <h2>Start with simple automation the team can see and trust.</h2>
           <p className="muted">
             Build a controlled WhatsApp automation layer with workflow automation, welcome replies,
-            away logic, keyword rules, human takeover pause, and queued follow-ups.
+            away logic, message rules, human takeover pause, and queued follow-ups.
           </p>
         </div>
       </section>
@@ -30,7 +37,7 @@ export default async function AutomationRulesPage() {
           <div className="table-subtle">Rules currently active</div>
         </article>
         <article className="content-card metric-card">
-          <div className="metric-label">Keyword rules</div>
+          <div className="metric-label">Message rules</div>
           <div className="metric-value">{summary.keywordRules}</div>
           <div className="table-subtle">Rules that react to inbound customer text</div>
         </article>
@@ -41,7 +48,21 @@ export default async function AutomationRulesPage() {
         </article>
       </section>
 
-      <AutomationRulesManager jobs={jobs} rules={rules} settings={settings} workflows={workflows} />
+      <AutomationRulesManager
+        agents={agents}
+        jobs={jobs}
+        mediaAssets={mediaLibrary.assets}
+        mediaLimits={mediaLibrary.limits}
+        rules={rules}
+        settings={settings}
+        liveKeywordTesting={{
+          connectionStatus: whatsAppChannel?.connectionStatus ?? "DISCONNECTED",
+          displayName: whatsAppChannel?.displayName ?? null,
+          phoneNumber: whatsAppChannel?.phoneNumber ?? null
+        }}
+        workflows={workflows}
+        workspaceId={workspaceId}
+      />
     </DashboardShell>
   );
 }

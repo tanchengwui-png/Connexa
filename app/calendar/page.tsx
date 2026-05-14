@@ -74,6 +74,7 @@ function formatAppointmentDateTime(date: Date) {
     month: "short",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
+    timeZone: "Asia/Kuala_Lumpur"
   }).format(date);
 }

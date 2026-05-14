@@ -8,6 +8,12 @@ import { MetadataRow } from "@/components/inbox/metadata-row";
 import { SidebarCard } from "@/components/inbox/sidebar-card";
 import { SidebarField } from "@/components/inbox/sidebar-field";
 import { formatFinancingTag } from "@/lib/financing-tags";
+import {
+  createMalaysiaDate,
+  formatMalaysiaDateTimeLocalInput,
+  getMalaysiaDateTimeParts,
+  parseMalaysiaDateTimeLocalInput
+} from "@/lib/malaysia-time";
 import type { InboxQuickReply, InboxSelectedConversation } from "@/components/inbox/types";
 import { useToast } from "@/components/toast-provider";
 
@@ -51,6 +57,7 @@ export function InboxDetailPanel({
 
   const latestMessage = selectedConversation.messages[selectedConversation.messages.length - 1];
   const conversation = selectedConversation;
+  const profileIdentityField = getProfileIdentityField(selectedConversation);
 
   async function scheduleAppointment() {
     setIsSavingAppointment(true);
@@ -65,8 +72,8 @@ export function InboxDetailPanel({
         conversationId: conversation.id,
         title: appointmentForm.title,
         type: appointmentForm.type,
-        startAt: new Date(appointmentForm.startAt).toISOString(),
-        endAt: new Date(appointmentForm.endAt).toISOString(),
+        startAt: parseMalaysiaDateTimeLocalInput(appointmentForm.startAt)?.toISOString(),
+        endAt: parseMalaysiaDateTimeLocalInput(appointmentForm.endAt)?.toISOString(),
         location: appointmentForm.location,
         note: appointmentForm.note
       })
@@ -119,10 +126,24 @@ export function InboxDetailPanel({
           <>
             <SidebarCard eyebrow="Profile" title={selectedConversation.contactName}>
               <div className="inbox-detail-grid">
-                <SidebarField label="Phone" value={selectedConversation.phone} />
-                <SidebarField label="Owner" value={selectedConversation.assignee} />
+                <SidebarField label={profileIdentityField.label} value={profileIdentityField.value} />
+                <SidebarField label="Primary owner" value={selectedConversation.assignee} />
+                <SidebarField
+                  label="Supporting teammates"
+                  value={selectedConversation.teammates.length ? selectedConversation.teammates.map((teammate) => teammate.name).join(", ") : "None"}
+                />
                 <SidebarField label="Status" value={selectedConversation.status} />
                 <SidebarField label="Messages" value={`${selectedConversation.messages.length}`} />
+              </div>
+              <div className="inbox-detail-link-row">
+                <a className="inbox-scheduled-link" href={`/message-logs?conversationId=${selectedConversation.id}`}>
+                  Open message logs
+                </a>
+                {selectedConversation.scheduledCount ? (
+                  <a className="inbox-scheduled-link" href={`/scheduled-messages?conversationId=${selectedConversation.id}`}>
+                    Open scheduled queue
+                  </a>
+                ) : null}
               </div>
             </SidebarCard>
 
@@ -215,7 +236,16 @@ export function InboxDetailPanel({
               <div className="inbox-detail-list">
                 <MetadataRow label="Latest activity" value={latestMessage?.sentAt ?? "No activity"} />
                 <MetadataRow label="Quick replies" value={`${quickReplies.length} available`} />
-                <MetadataRow label="Owner" value={selectedConversation.assignee} />
+                <MetadataRow label="Primary owner" value={selectedConversation.assignee} />
+                <MetadataRow
+                  label="Supporting teammates"
+                  value={selectedConversation.teammates.length ? selectedConversation.teammates.map((teammate) => teammate.name).join(", ") : "None"}
+                />
+              </div>
+              <div className="inbox-detail-link-row">
+                <a className="inbox-scheduled-link" href={`/message-logs?conversationId=${selectedConversation.id}`}>
+                  View audit history
+                </a>
               </div>
             </SidebarCard>
 
@@ -235,6 +265,20 @@ export function InboxDetailPanel({
       </div>
     </aside>
   );
+}
+
+function getProfileIdentityField(selectedConversation: NonNullable<DetailPanelProps["selectedConversation"]>) {
+  if (selectedConversation.isGroup) {
+    return {
+      label: "Group",
+      value: selectedConversation.contactName || "Group conversation"
+    };
+  }
+
+  return {
+    label: "Phone",
+    value: selectedConversation.phone
+  };
 }
 
 function TabButton({
@@ -282,12 +326,12 @@ function PropertyProfileCard({
 }) {
   if (!selectedConversation.lead) {
     return (
-      <SidebarCard eyebrow="Profile" title="No linked lead">
+      <SidebarCard eyebrow="Lead" title="No linked lead">
         <div className="inbox-detail-placeholder-block">
           <LightningIcon />
-          <span>No property lead is linked to this contact yet.</span>
+          <span>No lead is linked to this contact yet.</span>
           <button className="inbox-search-tool" onClick={() => void onCreateLeadRecord()} type="button">
-            Create property record
+            Create lead
           </button>
         </div>
       </SidebarCard>
@@ -295,23 +339,23 @@ function PropertyProfileCard({
   }
 
   return (
-    <SidebarCard eyebrow="Profile" title={selectedConversation.lead.project}>
+    <SidebarCard eyebrow="Lead" title={selectedConversation.lead.project}>
       <div className="inbox-detail-chip-row">
         <MetadataChip>{selectedConversation.lead.stage}</MetadataChip>
         <MetadataChip tone="hot">{selectedConversation.lead.priority}</MetadataChip>
       </div>
       <div className="inbox-detail-grid">
-        <SidebarField label="Area" value={selectedConversation.lead.preferredArea ?? "Not captured"} />
+        <SidebarField label="Preferred area" value={selectedConversation.lead.preferredArea ?? "Not captured"} />
         <SidebarField label="Budget" value={selectedConversation.lead.budget ?? "Not captured"} />
         <SidebarField label="Financing" value={selectedConversation.lead.financingStatus ?? "Not captured"} />
-        <SidebarField label="Next action" value={selectedConversation.lead.nextActionAt ?? "No reminder set"} />
+        <SidebarField label="Next Action" value={selectedConversation.lead.nextActionAt ?? "No reminder set"} />
       </div>
       <div className="inbox-detail-action-row">
         <button className="inbox-search-tool" onClick={onToggleSchedule} type="button">
           {isScheduling ? "Close scheduler" : "Schedule appointment"}
         </button>
         <a className="inbox-search-tool" href={`/leads/${selectedConversation.lead.id}`}>
-          Open property record
+          Open lead
         </a>
       </div>
       {isScheduling ? (
@@ -380,22 +424,23 @@ function PropertyProfileCard({
 }
 
 function createDefaultAppointmentForm(title = "Property site visit", location = "") {
-  const start = new Date();
-  start.setMinutes(0, 0, 0);
-  start.setHours(start.getHours() + 1);
+  const now = getMalaysiaDateTimeParts(new Date());
+  const start = createMalaysiaDate({
+    year: now.year,
+    month: now.month,
+    day: now.day,
+    hour: now.hour + 1,
+    minute: 0,
+    second: 0
+  });
   const end = new Date(start.getTime() + 60 * 60 * 1000);
 
   return {
     title,
     type: "SITE_VISIT",
-    startAt: toDateTimeLocalValue(start),
-    endAt: toDateTimeLocalValue(end),
+    startAt: formatMalaysiaDateTimeLocalInput(start),
+    endAt: formatMalaysiaDateTimeLocalInput(end),
     location,
     note: ""
   };
-}
-
-function toDateTimeLocalValue(date: Date) {
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60 * 1000);
-  return local.toISOString().slice(0, 16);
 }

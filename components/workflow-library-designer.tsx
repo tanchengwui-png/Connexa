@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Definition, Sequence, Step } from "sequential-workflow-designer";
+import { normalizeWorkflowContentAttributeKey } from "@/lib/workflow-content-attributes";
 
 type WorkflowVariableType = "text";
 
@@ -11,12 +12,19 @@ type WorkflowVariable = {
   description?: string | null;
 };
 
+type WorkflowMediaItem = {
+  mediaAssetId: string;
+  message?: string | null;
+};
+
+type WorkflowAssignmentMode = "none" | "fixed" | "round_robin";
+
 type WorkflowDraft = {
   startStepId: string;
   variables?: WorkflowVariable[];
   steps: Array<{
     id: string;
-    type: "ask" | "question" | "choice" | "action" | "end";
+    type: "ask" | "question" | "choice" | "action" | "reply" | "update" | "delay" | "go_to" | "end";
     title?: string;
     position?: { x: number; y: number };
     prompt?: string;
@@ -24,11 +32,32 @@ type WorkflowDraft = {
     decisionSource?: "currentReply" | "savedValue";
     decisionSourceKey?: string | null;
     maxRetries?: number | null;
+    expiresAfterMinutes?: number | null;
+    onTimeoutStepId?: string | null;
     reply?: string;
     tags?: string[];
     assignOwnerId?: string | null;
+    notifyAssignedOwner?: boolean;
+    notifyAgentIds?: string[];
+    notifyMessage?: string | null;
+    assignmentMode?: WorkflowAssignmentMode;
+    roundRobinAgentIds?: string[];
+    overwriteExistingOwner?: boolean;
     leadStage?: string | null;
+    leadAttributeKey?: string | null;
+    leadAttributeValue?: string | null;
+    leadAttributeValueSource?: "literal" | "savedValue";
+    leadAttributeValueKey?: string | null;
+    leadCustomAttributeKey?: string | null;
+    delayMinutes?: number | null;
+    businessHoursOnly?: boolean;
+    cancelOnInbound?: boolean;
+    cancelOnHumanReply?: boolean;
+    emoji?: string | null;
+    mediaAssetIds?: string[];
+    mediaItems?: WorkflowMediaItem[];
     nextStepId?: string | null;
+    targetStepId?: string | null;
     fallbackReply?: string | null;
     fallbackNextStepId?: string | null;
     branches?: Array<{
@@ -56,6 +85,20 @@ const ACTION_ICON = buildIconDataUri(`
     <circle cx="46" cy="32" r="7" fill="#22c55e"/>
   </svg>
 `);
+const REPLY_ICON = buildIconDataUri(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+    <rect x="8" y="12" width="48" height="36" rx="12" fill="#13283f"/>
+    <path d="M20 25h24M20 33h18" stroke="#e0f2fe" stroke-width="4" stroke-linecap="round"/>
+    <path d="M25 48l8-6h11" stroke="#38bdf8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+`);
+const UPDATE_ICON = buildIconDataUri(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+    <rect x="10" y="10" width="44" height="44" rx="12" fill="#132f2b"/>
+    <path d="M21 24h22M21 32h22M21 40h14" stroke="#dcfce7" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="44" cy="40" r="6" fill="#22c55e"/>
+  </svg>
+`);
 const ASK_ICON = buildIconDataUri(`
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
     <rect x="8" y="10" width="48" height="36" rx="12" fill="#0f172a"/>
@@ -76,6 +119,20 @@ const CHOICE_ICON = buildIconDataUri(`
     <rect x="10" y="10" width="44" height="44" rx="12" fill="#1f2937"/>
     <path d="M20 22h24M20 32h24M20 42h16" stroke="#f8fafc" stroke-width="4" stroke-linecap="round"/>
     <circle cx="46" cy="42" r="5" fill="#38bdf8"/>
+  </svg>
+`);
+const DELAY_ICON = buildIconDataUri(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+    <rect x="10" y="10" width="44" height="44" rx="12" fill="#162336"/>
+    <circle cx="32" cy="32" r="14" stroke="#cbd5e1" stroke-width="4"/>
+    <path d="M32 24v9l6 4" stroke="#cbd5e1" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+`);
+const GOTO_ICON = buildIconDataUri(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+    <rect x="10" y="12" width="44" height="40" rx="12" fill="#13283f"/>
+    <path d="M20 32h20" stroke="#e0f2fe" stroke-width="4" stroke-linecap="round"/>
+    <path d="M34 22l10 10-10 10" stroke="#38bdf8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
 `);
 
@@ -123,13 +180,25 @@ export function WorkflowLibraryDesigner({
         theme: "dark",
         undoStackSize: 20,
         toolbox: {
-          isCollapsed: false,
+          isCollapsed: true,
           labelProvider: (step) => {
+            if (step.type === "reply") {
+              return "Send Reply";
+            }
+            if (step.type === "update") {
+              return "Update Contact";
+            }
             if (step.type === "action") {
               return "Reply + Update";
             }
+            if (step.type === "delay") {
+              return "Delay";
+            }
+            if (step.type === "go_to") {
+              return "Go To Step";
+            }
             if (step.type === "ask") {
-              return "Ask + Save Reply";
+              return "Ask for Input";
             }
             if (step.type === "decision") {
               return "Yes / No Branch";
@@ -140,11 +209,23 @@ export function WorkflowLibraryDesigner({
             return step.name;
           },
           descriptionProvider: (step) => {
+            if (step.type === "reply") {
+              return "Send a reply and continue to the next step.";
+            }
+            if (step.type === "update") {
+              return "Apply tags, assign an owner, or move the lead stage without sending a message.";
+            }
             if (step.type === "action") {
-              return "Send a reply, tag the contact, assign an owner, or move the lead stage.";
+              return "Legacy combined step for sending a reply and updating the contact record.";
+            }
+            if (step.type === "delay") {
+              return "Pause the workflow, then resume automatically after the selected wait time.";
+            }
+            if (step.type === "go_to") {
+              return "Jump to any existing node, including back to the main menu.";
             }
             if (step.type === "ask") {
-              return "Ask a question, wait for the answer, and store it for later steps.";
+              return "Ask for one piece of information, wait for the answer, and save it into a workflow variable.";
             }
             if (step.type === "decision") {
               return "Ask a yes/no question and branch the conversation based on the reply.";
@@ -160,23 +241,68 @@ export function WorkflowLibraryDesigner({
               steps: [
                 {
                   componentType: "task",
-                  type: "ask",
-                  name: "Ask + Save Reply",
+                  type: "reply",
+                  name: "Send Reply",
                   properties: {
-                    prompt: "Ask the customer a question.",
-                    saveAs: "",
+                    reply: "",
+                    emoji: "",
+                    mediaAssetIds: [],
+                    mediaItems: [],
                     nextStepId: ""
                   }
                 },
                 {
                   componentType: "task",
-                  type: "action",
-                  name: "Reply + Update",
+                  type: "ask",
+                  name: "Ask for Input",
                   properties: {
-                    reply: "",
+                    prompt: "Ask the customer for one detail.",
+                    saveAs: "",
+                    expiresAfterMinutes: "",
+                    onTimeoutStepId: "",
+                    nextStepId: ""
+                  }
+                },
+                {
+                  componentType: "task",
+                  type: "update",
+                  name: "Update Contact",
+                  properties: {
                     tags: [],
                     leadStage: "",
-                    assignOwnerId: ""
+                    assignOwnerId: "",
+                    notifyAssignedOwner: false,
+                    notifyAgentIds: [],
+                    notifyMessage: "",
+                    assignmentMode: "none",
+                    roundRobinAgentIds: [],
+                    overwriteExistingOwner: false,
+                    leadAttributeKey: "",
+                    leadAttributeValue: "",
+                    leadAttributeValueSource: "literal",
+                    leadAttributeValueKey: "",
+                    leadCustomAttributeKey: "",
+                    nextStepId: ""
+                  }
+                },
+                {
+                  componentType: "task",
+                  type: "delay",
+                  name: "Delay",
+                  properties: {
+                    delayMinutes: "1440",
+                    businessHoursOnly: false,
+                    cancelOnInbound: true,
+                    cancelOnHumanReply: false,
+                    nextStepId: ""
+                  }
+                },
+                {
+                  componentType: "task",
+                  type: "go_to",
+                  name: "Go To Step",
+                  properties: {
+                    targetStepId: ""
                   }
                 },
                 {
@@ -185,8 +311,14 @@ export function WorkflowLibraryDesigner({
                   name: "Yes / No Branch",
                   properties: {
                     prompt: "Ask a yes/no question.",
+                    saveAs: "",
+                    decisionSource: "currentReply",
+                    decisionSourceKey: "",
                     maxRetries: "",
+                    expiresAfterMinutes: "",
+                    onTimeoutStepId: "",
                     fallbackReply: "Please answer yes or no.",
+                    nextStepId: "",
                     yesKeywords: ["yes", "y"],
                     yesReply: "",
                     yesTags: [],
@@ -205,8 +337,14 @@ export function WorkflowLibraryDesigner({
                   name: "Numbered Menu",
                   properties: {
                     prompt: "Ask the customer to choose 1, 2, 3, 4, or 5.",
+                    saveAs: "",
+                    decisionSource: "currentReply",
+                    decisionSourceKey: "",
                     maxRetries: "",
+                    expiresAfterMinutes: "",
+                    onTimeoutStepId: "",
                     fallbackReply: "Please reply with one of the listed options.",
+                    nextStepId: "",
                     branchDefinitions: [
                       { id: "1", label: "Option 1", keywords: ["1"], reply: "", tags: [] },
                       { id: "2", label: "Option 2", keywords: ["2"], reply: "", tags: [] },
@@ -227,8 +365,20 @@ export function WorkflowLibraryDesigner({
           canDeleteStep: (step) => step.id !== WORKFLOW_END_ID,
           canInsertStep: (_step, targetSequence) => targetSequence.length < 5,
           iconUrlProvider: (_componentType, type) => {
+            if (type === "reply") {
+              return REPLY_ICON;
+            }
+            if (type === "update") {
+              return UPDATE_ICON;
+            }
             if (type === "action") {
               return ACTION_ICON;
+            }
+            if (type === "delay") {
+              return DELAY_ICON;
+            }
+            if (type === "go_to") {
+              return GOTO_ICON;
             }
             if (type === "ask") {
               return ASK_ICON;
@@ -331,7 +481,42 @@ function parseWorkflowDraft(value: string): WorkflowDraft | null {
     }
     return {
       ...parsed,
-      variables: readWorkflowVariables(parsed.variables)
+      variables: readWorkflowVariables(parsed.variables),
+      steps: parsed.steps.map((step) => {
+        if (step.type === "ask" || step.type === "question" || step.type === "choice") {
+          return {
+            ...step,
+            saveAs: readNullableString(step.saveAs),
+            expiresAfterMinutes: readNullableInteger(step.expiresAfterMinutes),
+            onTimeoutStepId: readNullableString(step.onTimeoutStepId),
+            ...(step.type === "question" || step.type === "choice"
+              ? {
+                  decisionSource: readDecisionSource(step.decisionSource),
+                  decisionSourceKey: readNullableString(step.decisionSourceKey),
+                  maxRetries: readNullableInteger(step.maxRetries),
+                  fallbackReply: readNullableString(step.fallbackReply),
+                  fallbackNextStepId: readNullableString(step.fallbackNextStepId)
+                }
+              : {})
+          };
+        }
+
+        if (step.type === "update") {
+          return {
+            ...step,
+            assignmentMode: readWorkflowAssignmentMode(step.assignmentMode ?? (step.assignOwnerId ? "fixed" : "none")),
+            roundRobinAgentIds: readStringArray(step.roundRobinAgentIds),
+            overwriteExistingOwner: readBoolean(step.overwriteExistingOwner),
+            leadAttributeKey: readLeadAttributeKey(step.leadAttributeKey),
+            leadAttributeValue: readNullableString(step.leadAttributeValue),
+            leadAttributeValueSource: step.leadAttributeValueSource === "savedValue" ? "savedValue" : "literal",
+            leadAttributeValueKey: readNullableString(step.leadAttributeValueKey),
+            leadCustomAttributeKey: readNullableString(step.leadCustomAttributeKey)
+          };
+        }
+
+        return step;
+      })
     };
   } catch {
     return null;
@@ -361,6 +546,27 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
           properties: {
             prompt: step.prompt ?? "",
             saveAs: step.saveAs ?? "",
+            expiresAfterMinutes: step.expiresAfterMinutes ? `${step.expiresAfterMinutes}` : "",
+            onTimeoutStepId: step.onTimeoutStepId ?? "",
+            nextStepId: step.nextStepId ?? ""
+          }
+        },
+        ...buildSequence(step.nextStepId)
+      ];
+    }
+
+    if (step.type === "delay") {
+      return [
+        {
+          id: step.id,
+          componentType: "task",
+          type: "delay",
+          name: step.title || step.id,
+          properties: {
+            delayMinutes: step.delayMinutes ? `${step.delayMinutes}` : "60",
+            businessHoursOnly: Boolean(step.businessHoursOnly),
+            cancelOnInbound: step.cancelOnInbound !== false,
+            cancelOnHumanReply: Boolean(step.cancelOnHumanReply),
             nextStepId: step.nextStepId ?? ""
           }
         },
@@ -394,9 +600,15 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
           name: step.title || step.id,
           properties: {
             prompt: step.prompt ?? "",
+            saveAs: step.saveAs ?? "",
+            decisionSource: step.decisionSource ?? "currentReply",
+            decisionSourceKey: step.decisionSourceKey ?? "",
             maxRetries: step.maxRetries ? `${step.maxRetries}` : "",
+            expiresAfterMinutes: step.expiresAfterMinutes ? `${step.expiresAfterMinutes}` : "",
+            onTimeoutStepId: step.onTimeoutStepId ?? "",
             fallbackReply: step.fallbackReply ?? "",
             fallbackNextStepId: step.fallbackNextStepId ?? "",
+            nextStepId: step.nextStepId ?? "",
             yesKeywords: normalizedBranches[0]?.keywords ?? ["yes", "y"],
             yesReply: normalizedBranches[0]?.reply ?? "",
             yesTags: normalizedBranches[0]?.tags ?? [],
@@ -409,6 +621,70 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
             normalizedBranches.map((branch) => [branch.id, buildSequence(branch.nextStepId)])
           )
         } as Step & { branches: Record<string, Sequence> }
+        ,
+        ...buildSequence(step.nextStepId)
+      ];
+    }
+
+    if (step.type === "reply") {
+      return [
+        {
+          id: step.id,
+          componentType: "task",
+          type: "reply",
+          name: step.title || step.id,
+          properties: {
+            reply: step.reply ?? "",
+            emoji: step.emoji ?? "",
+            mediaAssetIds: step.mediaAssetIds ?? [],
+            mediaItems: step.mediaItems ?? [],
+            nextStepId: step.nextStepId ?? ""
+          }
+        },
+        ...buildSequence(step.nextStepId)
+      ];
+    }
+
+    if (step.type === "go_to") {
+      return [
+        {
+          id: step.id,
+          componentType: "task",
+          type: "go_to",
+          name: step.title || step.id,
+          properties: {
+            targetStepId: step.targetStepId ?? ""
+          }
+        }
+      ];
+    }
+
+    if (step.type === "update") {
+      return [
+        {
+          id: step.id,
+          componentType: "task",
+          type: "update",
+          name: step.title || step.id,
+          properties: {
+            tags: step.tags ?? [],
+            leadStage: step.leadStage ?? "",
+            assignOwnerId: step.assignOwnerId ?? "",
+            notifyAssignedOwner: Boolean(step.notifyAssignedOwner),
+            notifyAgentIds: step.notifyAgentIds ?? [],
+            notifyMessage: step.notifyMessage ?? "",
+            assignmentMode: step.assignmentMode ?? "none",
+            roundRobinAgentIds: step.roundRobinAgentIds ?? [],
+            overwriteExistingOwner: Boolean(step.overwriteExistingOwner),
+            leadAttributeKey: step.leadAttributeKey ?? "",
+            leadAttributeValue: step.leadAttributeValue ?? "",
+            leadAttributeValueSource: step.leadAttributeValueSource ?? "literal",
+            leadAttributeValueKey: step.leadAttributeValueKey ?? "",
+            leadCustomAttributeKey: step.leadCustomAttributeKey ?? "",
+            nextStepId: step.nextStepId ?? ""
+          }
+        },
+        ...buildSequence(step.nextStepId)
       ];
     }
 
@@ -422,7 +698,11 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
           reply: step.reply ?? "",
           tags: step.tags ?? [],
           leadStage: step.leadStage ?? "",
-          assignOwnerId: step.assignOwnerId ?? ""
+          assignOwnerId: step.assignOwnerId ?? "",
+          notifyAssignedOwner: Boolean(step.notifyAssignedOwner),
+          notifyAgentIds: step.notifyAgentIds ?? [],
+          notifyMessage: step.notifyMessage ?? "",
+          nextStepId: step.nextStepId ?? ""
         }
       },
       ...buildSequence(step.nextStepId)
@@ -472,8 +752,11 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
         decisionSource: readDecisionSource(step.properties.decisionSource),
         decisionSourceKey: readNullableString(step.properties.decisionSourceKey),
         maxRetries: readNullableInteger(step.properties.maxRetries),
+        expiresAfterMinutes: readNullableInteger(step.properties.expiresAfterMinutes),
+        onTimeoutStepId: readNullableString(step.properties.onTimeoutStepId),
         fallbackReply: readString(step.properties.fallbackReply),
         fallbackNextStepId: readNullableString(step.properties.fallbackNextStepId),
+        nextStepId,
         branches: nextBranches
       });
       return step.id;
@@ -486,6 +769,70 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
         title: step.name,
         prompt: readString(step.properties.prompt),
         saveAs: readNullableString(step.properties.saveAs),
+        expiresAfterMinutes: readNullableInteger(step.properties.expiresAfterMinutes),
+        onTimeoutStepId: readNullableString(step.properties.onTimeoutStepId),
+        nextStepId
+      });
+      return step.id;
+    }
+
+    if (step.type === "delay") {
+      steps.push({
+        id: step.id,
+        type: "delay",
+        title: step.name,
+        delayMinutes: readNullableInteger(step.properties.delayMinutes),
+        businessHoursOnly: readBoolean(step.properties.businessHoursOnly),
+        cancelOnInbound: readBoolean(step.properties.cancelOnInbound, true),
+        cancelOnHumanReply: readBoolean(step.properties.cancelOnHumanReply),
+        nextStepId
+      });
+      return step.id;
+    }
+
+    if (step.type === "reply") {
+      steps.push({
+        id: step.id,
+        type: "reply",
+        title: step.name,
+        reply: readString(step.properties.reply),
+        emoji: readNullableString(step.properties.emoji),
+        mediaAssetIds: readStringArray(step.properties.mediaAssetIds),
+        mediaItems: readWorkflowMediaItems(step.properties.mediaItems, step.properties.mediaAssetIds),
+        nextStepId
+      });
+      return step.id;
+    }
+
+    if (step.type === "go_to") {
+      steps.push({
+        id: step.id,
+        type: "go_to",
+        title: step.name,
+        targetStepId: readNullableString(step.properties.targetStepId)
+      });
+      return step.id;
+    }
+
+    if (step.type === "update") {
+      steps.push({
+        id: step.id,
+        type: "update",
+        title: step.name,
+        tags: readStringArray(step.properties.tags),
+        assignOwnerId: readNullableString(step.properties.assignOwnerId),
+        notifyAssignedOwner: readBoolean(step.properties.notifyAssignedOwner),
+        notifyAgentIds: readStringArray(step.properties.notifyAgentIds),
+        notifyMessage: readNullableString(step.properties.notifyMessage),
+        assignmentMode: readWorkflowAssignmentMode(step.properties.assignmentMode),
+        roundRobinAgentIds: readStringArray(step.properties.roundRobinAgentIds),
+        overwriteExistingOwner: readBoolean(step.properties.overwriteExistingOwner),
+        leadStage: readNullableString(step.properties.leadStage),
+        leadAttributeKey: readLeadAttributeKey(step.properties.leadAttributeKey),
+        leadAttributeValue: readNullableString(step.properties.leadAttributeValue),
+        leadAttributeValueSource: step.properties.leadAttributeValueSource === "savedValue" ? "savedValue" : "literal",
+        leadAttributeValueKey: readNullableString(step.properties.leadAttributeValueKey),
+        leadCustomAttributeKey: readNullableString(step.properties.leadCustomAttributeKey),
         nextStepId
       });
       return step.id;
@@ -498,6 +845,9 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
       reply: readString(step.properties.reply),
       tags: readStringArray(step.properties.tags),
       assignOwnerId: readNullableString(step.properties.assignOwnerId),
+      notifyAssignedOwner: readBoolean(step.properties.notifyAssignedOwner),
+      notifyAgentIds: readStringArray(step.properties.notifyAgentIds),
+      notifyMessage: readNullableString(step.properties.notifyMessage),
       leadStage: readNullableString(step.properties.leadStage),
       nextStepId
     });
@@ -582,6 +932,48 @@ function readNullableInteger(value: unknown): number | null {
     return null;
   }
   return Math.round(parsed);
+}
+
+function readBoolean(value: unknown, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    if (value === "true") {
+      return true;
+    }
+    if (value === "false") {
+      return false;
+    }
+  }
+
+  return fallback;
+}
+
+function readWorkflowAssignmentMode(value: unknown): WorkflowAssignmentMode {
+  return value === "round_robin" ? "round_robin" : value === "fixed" ? "fixed" : "none";
+}
+
+function readLeadAttributeKey(value: unknown) {
+  return normalizeWorkflowContentAttributeKey(typeof value === "string" ? value : null);
+}
+
+function readWorkflowMediaItems(value: unknown, fallbackIds: unknown): WorkflowMediaItem[] {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .map((item) => ({
+        mediaAssetId: readString(item.mediaAssetId).trim(),
+        message: readNullableString(item.message)
+      }))
+      .filter((item) => item.mediaAssetId);
+  }
+
+  return readStringArray(fallbackIds).map((mediaAssetId) => ({
+    mediaAssetId,
+    message: ""
+  }));
 }
 
 function readBranchDefinitions(

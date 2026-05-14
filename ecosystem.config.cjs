@@ -18,7 +18,6 @@ module.exports = {
       cwd: "/srv/connexa",
       env: {
         NODE_ENV: "production",
-        WORKSPACE_ID: "replace-with-your-workspace-id",
         APP_URL: "http://YOUR_WEB_HOST:3000",
         OUTBOUND_WORKER_URL: "http://YOUR_WEB_HOST:3000",
         OUTBOUND_WORKER_LABEL: "connexa-worker-1",

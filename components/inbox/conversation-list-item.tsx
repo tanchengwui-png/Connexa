@@ -54,11 +54,17 @@ export function ConversationListItem({
 
           <div className="inbox-list-preview">{conversation.lastMessagePreview}</div>
 
+          {conversation.snoozedUntil ? (
+            <div className="inbox-list-reminder">
+              <span className="inbox-list-reminder-label">Reminder</span>
+              <span>{conversation.snoozedUntil}</span>
+            </div>
+          ) : null}
+
           <div className="inbox-list-subline">
-            <span>{conversation.phone}</span>
+            {conversation.isGroup ? null : <span>{conversation.phone}</span>}
             <span>{conversation.assigneeId ? conversation.assignee : "Unassigned"}</span>
             {conversation.isHotLead ? <span className="inbox-list-flag">Hot lead</span> : null}
-            {conversation.snoozedUntil ? <span className="inbox-list-flag subdued">Snoozed</span> : null}
           </div>
         </div>
       </div>

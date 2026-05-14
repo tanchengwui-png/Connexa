@@ -1,4 +1,7 @@
 import { ConnexaLogo } from "@/components/connexa-logo";
+import { getVisiblePublicPackages } from "@/lib/platform-packages";
+
+export const dynamic = "force-dynamic";
 
 const navItems = [
   { href: "#features", label: "Features" },
@@ -51,29 +54,9 @@ const whyCards = [
   }
 ];
 
-const pricingPlans = [
-  {
-    name: "Starter",
-    price: "RM79/mo",
-    features: ["1 shared inbox", "Basic assignments", "Contact tags", "Quick replies"],
-    registerPlan: "starter"
-  },
-  {
-    name: "Growth",
-    price: "RM149/mo",
-    features: ["Everything in Starter", "Automations", "Team notes", "Hot lead indicators"],
-    featured: true,
-    registerPlan: "growth"
-  },
-  {
-    name: "Pro",
-    price: "RM299/mo",
-    features: ["Everything in Growth", "Campaigns", "Advanced roles", "Priority support"],
-    registerPlan: "enterprise"
-  }
-];
+export default async function ConnexaLandingPage() {
+  const pricingPlans = await getVisiblePublicPackages();
 
-export default function ConnexaLandingPage() {
   return (
     <main className="connexa-dark-shell">
       <div className="connexa-dark-bg" aria-hidden="true">
@@ -105,7 +88,7 @@ export default function ConnexaLandingPage() {
             <a className="connexa-button connexa-button-glass" href="/login">
               Log In
             </a>
-            <a className="connexa-button connexa-button-primary" href="/register">
+            <a className="connexa-button connexa-button-primary" href="/packages">
               Start Free Trial
             </a>
           </div>
@@ -128,7 +111,7 @@ export default function ConnexaLandingPage() {
           </p>
 
           <div className="connexa-hero-actions">
-            <a className="connexa-button connexa-button-primary connexa-button-large" href="/register">
+            <a className="connexa-button connexa-button-primary connexa-button-large" href="/packages">
               Start Free Trial
             </a>
             <a className="connexa-button connexa-button-glass connexa-button-large" href="#contact">
@@ -279,9 +262,9 @@ export default function ConnexaLandingPage() {
               </div>
               <a
                 className={`connexa-button${plan.featured ? " connexa-button-white" : " connexa-button-glass"}`}
-                href={`/register?plan=${plan.registerPlan}`}
+                href={`/packages`}
               >
-                Get Started
+                View Package
               </a>
             </article>
           ))}
@@ -300,7 +283,7 @@ export default function ConnexaLandingPage() {
           </div>
 
           <div className="connexa-contact-actions">
-            <a className="connexa-button connexa-button-primary connexa-button-large" href="/register">
+            <a className="connexa-button connexa-button-primary connexa-button-large" href="/packages">
               Start Free Trial
             </a>
             <a className="connexa-button connexa-button-glass connexa-button-large" href="#contact">

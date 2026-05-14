@@ -1,292 +1,130 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { FullEmojiPicker } from "@/components/full-emoji-picker";
+import { ScheduleSendDialog } from "@/components/inbox/schedule-send-dialog";
 import {
   AttachmentIcon,
-  ButtonsIcon,
   EmojiIcon,
-  ListIcon,
   NoteIcon,
+  SnoozeIcon,
   SendIcon,
   TemplateIcon
 } from "@/components/inbox/icons";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
-import type { InboxQuickReply } from "@/components/inbox/types";
+import type {
+  InboxMediaAsset,
+  InboxMentionCandidate,
+  InboxQuickReply,
+  InboxSelectedMention
+} from "@/components/inbox/types";
+import { getMediaKindLabel } from "@/lib/media-library-shared";
 
 type ReplyComposerProps = {
   error: string | null;
-  attachmentName: string | null;
-  interactiveButtons: string[];
-  interactiveListButtonText: string;
-  interactiveListOptions: string[];
-  isButtonsEnabled: boolean;
+  canTakeOverConversation: boolean;
   isInternalNote: boolean;
-  isListEnabled: boolean;
   isPending: boolean;
+  mediaAssets: InboxMediaAsset[];
   messageBody: string;
+  mentionCandidates: InboxMentionCandidate[];
+  replyingToMessage: {
+    id: string;
+    sender: string;
+    body: string | null;
+    attachmentName: string | null;
+  } | null;
   canSendPublicReply: boolean;
+  selectedMentions: InboxSelectedMention[];
+  selectedAttachmentIds: string[];
   whatsappMode: "live" | "mock" | "webjs";
-  onAttachmentChange: (file: File | null) => void;
-  onInteractiveButtonsChange: (buttons: string[]) => void;
-  onInteractiveListButtonTextChange: (value: string) => void;
-  onInteractiveListOptionsChange: (buttons: string[]) => void;
-  onInsertEmoji: (emoji: string) => void;
-  onInsertQuickReply: (body: string) => void;
-  onToggleButtons: () => void;
-  onToggleList: () => void;
+  onAttachmentChange: (attachmentIds: string[]) => void;
+  onClearReply: () => void;
+  onInsertQuickReply: (quickReply: InboxQuickReply) => void;
   onMessageBodyChange: (value: string) => void;
+  onSelectedMentionsChange: (mentions: InboxSelectedMention[]) => void;
   onSendMessage: () => void;
+  onScheduleMessage: (value: string) => void;
+  onTakeOverConversation: () => void;
   onToggleInternalNote: () => void;
   quickReplies: InboxQuickReply[];
-};
-
-const emojiGroups = {
-  smileys: {
-    icon: "\u{1F642}",
-    label: "Smileys",
-    items: [
-      "\u{1F600}",
-      "\u{1F603}",
-      "\u{1F604}",
-      "\u{1F601}",
-      "\u{1F606}",
-      "\u{1F605}",
-      "\u{1F602}",
-      "\u{1F923}",
-      "\u{1F60A}",
-      "\u{1F60D}",
-      "\u{1F618}",
-      "\u{1F917}",
-      "\u{1F60E}",
-      "\u{1F970}",
-      "\u{1F914}",
-      "\u{1F972}"
-    ]
-  },
-  gestures: {
-    icon: "\u{1F44B}",
-    label: "Gestures",
-    items: [
-      "\u{1F44D}",
-      "\u{1F44E}",
-      "\u{1F44F}",
-      "\u{1F64C}",
-      "\u{1F64F}",
-      "\u{1F91D}",
-      "\u{270C}\u{FE0F}",
-      "\u{1F91E}",
-      "\u{1F90C}",
-      "\u{1F44C}",
-      "\u{1F91F}",
-      "\u{1F4AA}"
-    ]
-  },
-  hearts: {
-    icon: "\u{2764}\u{FE0F}",
-    label: "Hearts",
-    items: [
-      "\u{2764}\u{FE0F}",
-      "\u{1FA77}",
-      "\u{1F9E1}",
-      "\u{1F49B}",
-      "\u{1F49A}",
-      "\u{1F499}",
-      "\u{1F49C}",
-      "\u{1F90D}",
-      "\u{1F497}",
-      "\u{1F49E}",
-      "\u{1F495}",
-      "\u{1F496}"
-    ]
-  },
-  symbols: {
-    icon: "\u{2705}",
-    label: "Symbols",
-    items: [
-      "\u{2705}",
-      "\u{2714}\u{FE0F}",
-      "\u{26A0}\u{FE0F}",
-      "\u{2757}",
-      "\u{2753}",
-      "\u{2728}",
-      "\u{1F389}",
-      "\u{1F4AF}",
-      "\u{1F525}",
-      "\u{1F680}",
-      "\u{1F4CC}",
-      "\u{1F4A1}"
-    ]
-  },
-  nature: {
-    icon: "\u{1F31F}",
-    label: "Nature",
-    items: [
-      "\u{1F31E}",
-      "\u{1F31D}",
-      "\u{1F31F}",
-      "\u{2B50}",
-      "\u{2601}\u{FE0F}",
-      "\u{26C5}",
-      "\u{1F308}",
-      "\u{1F33A}",
-      "\u{1F338}",
-      "\u{1F33B}",
-      "\u{1F340}",
-      "\u{1F98B}"
-    ]
-  }
-} as const;
-
-type EmojiGroupKey = keyof typeof emojiGroups;
-
-const emojiKeywords: Record<string, string[]> = {
-  "\u{1F600}": ["grinning", "smile", "happy"],
-  "\u{1F603}": ["smile", "happy", "open"],
-  "\u{1F604}": ["smile", "happy", "laugh"],
-  "\u{1F601}": ["grin", "smile"],
-  "\u{1F606}": ["laugh", "happy"],
-  "\u{1F605}": ["sweat", "laugh"],
-  "\u{1F602}": ["tears", "laugh"],
-  "\u{1F923}": ["rofl", "laugh"],
-  "\u{1F60A}": ["blush", "smile"],
-  "\u{1F60D}": ["love", "heart eyes"],
-  "\u{1F618}": ["kiss", "love"],
-  "\u{1F917}": ["hug"],
-  "\u{1F60E}": ["cool", "sunglasses"],
-  "\u{1F970}": ["hearts", "love"],
-  "\u{1F914}": ["thinking"],
-  "\u{1F972}": ["relieved", "happy tears"],
-  "\u{1F44D}": ["thumbs up", "approve", "ok"],
-  "\u{1F44E}": ["thumbs down", "no"],
-  "\u{1F44F}": ["clap", "applause"],
-  "\u{1F64C}": ["celebrate", "raised hands"],
-  "\u{1F64F}": ["pray", "thanks", "please"],
-  "\u{1F91D}": ["handshake", "deal"],
-  "\u{270C}\u{FE0F}": ["peace", "victory"],
-  "\u{1F91E}": ["crossed fingers", "hope"],
-  "\u{1F90C}": ["pinched fingers"],
-  "\u{1F44C}": ["ok hand"],
-  "\u{1F91F}": ["love you"],
-  "\u{1F4AA}": ["strong", "muscle"],
-  "\u{2764}\u{FE0F}": ["heart", "love"],
-  "\u{1FA77}": ["pink heart"],
-  "\u{1F9E1}": ["orange heart"],
-  "\u{1F49B}": ["yellow heart"],
-  "\u{1F49A}": ["green heart"],
-  "\u{1F499}": ["blue heart"],
-  "\u{1F49C}": ["purple heart"],
-  "\u{1F90D}": ["white heart"],
-  "\u{1F497}": ["growing heart"],
-  "\u{1F49E}": ["revolving heart"],
-  "\u{1F495}": ["two hearts"],
-  "\u{1F496}": ["sparkling heart"],
-  "\u{2705}": ["check", "done", "approved"],
-  "\u{2714}\u{FE0F}": ["tick", "done"],
-  "\u{26A0}\u{FE0F}": ["warning"],
-  "\u{2757}": ["exclamation"],
-  "\u{2753}": ["question"],
-  "\u{2728}": ["sparkles"],
-  "\u{1F389}": ["party", "celebrate"],
-  "\u{1F4AF}": ["hundred", "100"],
-  "\u{1F525}": ["fire", "hot"],
-  "\u{1F680}": ["rocket", "launch"],
-  "\u{1F4CC}": ["pin"],
-  "\u{1F4A1}": ["idea", "light bulb"],
-  "\u{1F31E}": ["sun"],
-  "\u{1F31D}": ["moon"],
-  "\u{1F31F}": ["glowing star"],
-  "\u{2B50}": ["star"],
-  "\u{2601}\u{FE0F}": ["cloud"],
-  "\u{26C5}": ["sun cloud"],
-  "\u{1F308}": ["rainbow"],
-  "\u{1F33A}": ["flower"],
-  "\u{1F338}": ["blossom"],
-  "\u{1F33B}": ["sunflower"],
-  "\u{1F340}": ["clover", "luck"],
-  "\u{1F98B}": ["butterfly"]
+  requiresTakeOverForPublicReply: boolean;
+  takeoverOwnerName: string | null;
 };
 
 export function ReplyComposer({
-  attachmentName,
   error,
-  interactiveButtons,
-  interactiveListButtonText,
-  interactiveListOptions,
-  isButtonsEnabled,
+  canTakeOverConversation,
   isInternalNote,
-  isListEnabled,
   isPending,
+  mediaAssets,
   messageBody,
+  mentionCandidates,
+  replyingToMessage,
   canSendPublicReply,
+  selectedMentions,
+  selectedAttachmentIds,
   whatsappMode,
   onAttachmentChange,
-  onInteractiveButtonsChange,
-  onInteractiveListButtonTextChange,
-  onInteractiveListOptionsChange,
-  onInsertEmoji,
+  onClearReply,
   onInsertQuickReply,
-  onToggleButtons,
-  onToggleList,
   onMessageBodyChange,
+  onSelectedMentionsChange,
   onSendMessage,
+  onScheduleMessage,
+  onTakeOverConversation,
   onToggleInternalNote,
-  quickReplies
+  quickReplies,
+  requiresTakeOverForPublicReply,
+  takeoverOwnerName
 }: ReplyComposerProps) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const attachmentButtonRef = useRef<HTMLButtonElement | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const templateButtonRef = useRef<HTMLButtonElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [isMediaMenuOpen, setIsMediaMenuOpen] = useState(false);
   const [isEmojiMenuOpen, setIsEmojiMenuOpen] = useState(false);
   const [isTemplateMenuOpen, setIsTemplateMenuOpen] = useState(false);
-  const [emojiSearch, setEmojiSearch] = useState("");
+  const [isScheduleDialogOpen, setIsScheduleDialogOpen] = useState(false);
+  const [isClient, setIsClient] = useState(false);
+  const [mediaSearch, setMediaSearch] = useState("");
   const [templateSearch, setTemplateSearch] = useState("");
   const [templateCategory, setTemplateCategory] = useState("All");
-  const [activeEmojiGroup, setActiveEmojiGroup] = useState<EmojiGroupKey>("smileys");
+  const [activeMentionQuery, setActiveMentionQuery] = useState("");
+  const [activeMentionStart, setActiveMentionStart] = useState<number | null>(null);
+  const [activeMentionIndex, setActiveMentionIndex] = useState(0);
+  const [mentionMenuPosition, setMentionMenuPosition] = useState<{
+    left: number;
+    top: number;
+    placement: "above" | "below";
+  }>({
+    left: 12,
+    top: 12,
+    placement: "above"
+  });
   const isSendDisabled = isPending || (!isInternalNote && !canSendPublicReply);
-  const activeButtons = interactiveButtons.filter((entry) => entry.trim());
-  const activeListOptions = interactiveListOptions.filter((entry) => entry.trim());
+  const canMention = !isInternalNote && canSendPublicReply;
+  const showTakeoverCallout = !isInternalNote && requiresTakeOverForPublicReply && canTakeOverConversation;
+  const selectedMedia = selectedAttachmentIds
+    .map((id) => mediaAssets.find((asset) => asset.id === id) ?? null)
+    .filter((asset): asset is InboxMediaAsset => Boolean(asset));
+  const visibleSelectedMedia = selectedMedia.slice(0, 4);
+  const hiddenSelectedMediaCount = Math.max(0, selectedMedia.length - visibleSelectedMedia.length);
   const helperCopy = isInternalNote
     ? "Internal note only. This stays inside your workspace and is not sent to WhatsApp."
-    : isButtonsEnabled
-      ? "Public reply with WhatsApp buttons. Customers can tap one of the reply options."
-    : isListEnabled
-      ? "Public reply with a WhatsApp list. Customers can open the list and tap an option."
+    : showTakeoverCallout
+      ? `Public reply is locked while this conversation is owned by ${takeoverOwnerName ?? "another teammate"}. Take over to reply.`
     : canSendPublicReply && whatsappMode === "mock"
       ? "Mock reply. This is simulated locally for testing and does not send a real WhatsApp message."
       : canSendPublicReply
       ? "Public reply. This sends a real WhatsApp message to the customer."
       : "Public reply is disabled until the WhatsApp channel is configured and ready.";
 
-  const visibleEmojis = useMemo(() => {
-    const query = emojiSearch.trim().toLowerCase();
-    const groups = Object.entries(emojiGroups) as Array<
-      [EmojiGroupKey, (typeof emojiGroups)[EmojiGroupKey]]
-    >;
-
-    if (query) {
-      return groups.flatMap(([groupKey, group]) =>
-        group.items.filter((emoji) => {
-          const keywords = emojiKeywords[emoji] ?? [];
-          const haystack = [group.label, ...keywords].join(" ").toLowerCase();
-          return haystack.includes(query);
-        })
-      );
-    }
-
-    return emojiGroups[activeEmojiGroup].items;
-  }, [activeEmojiGroup, emojiSearch]);
-
   const templateCategories = useMemo(
     () => Array.from(new Set(quickReplies.map((item) => item.category))).sort((left, right) => left.localeCompare(right)),
     [quickReplies]
   );
-
-  const pinnedTemplates = useMemo(() => quickReplies.filter((item) => item.isPinned), [quickReplies]);
-  const quickStripTemplates = useMemo(
-    () => (pinnedTemplates.length ? pinnedTemplates : quickReplies).slice(0, 3),
-    [pinnedTemplates, quickReplies]
-  );
-  const hiddenPinnedCount = Math.max(0, pinnedTemplates.length - quickStripTemplates.length);
 
   const visibleTemplates = useMemo(() => {
     const query = templateSearch.trim().toLowerCase();
@@ -303,6 +141,21 @@ export function ReplyComposer({
     });
   }, [quickReplies, templateCategory, templateSearch]);
 
+  const visibleMediaAssets = useMemo(() => {
+    const query = mediaSearch.trim().toLowerCase();
+    if (!query) {
+      return mediaAssets;
+    }
+
+    return mediaAssets.filter((asset) =>
+      [asset.title, asset.kind, asset.mimeType].join(" ").toLowerCase().includes(query)
+    );
+  }, [mediaAssets, mediaSearch]);
+
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
+
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) {
@@ -313,6 +166,135 @@ export function ReplyComposer({
     const nextHeight = Math.min(Math.max(textarea.scrollHeight, 88), 220);
     textarea.style.height = `${nextHeight}px`;
   }, [messageBody]);
+
+  useEffect(() => {
+    setActiveMentionIndex(0);
+  }, [activeMentionQuery]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || activeMentionStart === null) {
+      return;
+    }
+
+    const nextPosition = getTextareaCaretMenuPosition(textarea, activeMentionStart + 1);
+    setMentionMenuPosition(nextPosition);
+  }, [activeMentionStart, activeMentionQuery, messageBody]);
+
+  const visibleMentionCandidates = useMemo(() => {
+    if (!canMention || !mentionCandidates.length) {
+      return [] as InboxMentionCandidate[];
+    }
+
+    const query = activeMentionQuery.trim().toLowerCase();
+    return mentionCandidates
+      .filter((candidate) => {
+        if (!query) {
+          return true;
+        }
+
+        return [candidate.label, candidate.phone ?? "", candidate.name ?? "", candidate.pushname ?? "", candidate.token]
+          .join(" ")
+          .toLowerCase()
+          .includes(query);
+      })
+      .slice(0, 8);
+  }, [activeMentionQuery, canMention, mentionCandidates]);
+
+  const syncSelectedMentions = (nextBody: string) => {
+    onSelectedMentionsChange(
+      selectedMentions.filter((mention) => nextBody.includes(`@${mention.label}`))
+    );
+  };
+
+  const updateMentionQuery = (value: string, caretPosition: number) => {
+    if (!canMention) {
+      setActiveMentionQuery("");
+      setActiveMentionStart(null);
+      return;
+    }
+
+    const prefix = value.slice(0, caretPosition);
+    const match = prefix.match(/(?:^|\s)@([^\s@]*)$/);
+
+    if (!match || match.index === undefined) {
+      setActiveMentionQuery("");
+      setActiveMentionStart(null);
+      return;
+    }
+
+    const atIndex = prefix.lastIndexOf("@");
+    setActiveMentionQuery(match[1] ?? "");
+    setActiveMentionStart(atIndex);
+  };
+
+  const insertEmojiAtCursor = (emoji: string) => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      onMessageBodyChange(`${messageBody}${emoji}`);
+      return;
+    }
+
+    const start = textarea.selectionStart ?? messageBody.length;
+    const end = textarea.selectionEnd ?? messageBody.length;
+    const nextValue = `${messageBody.slice(0, start)}${emoji}${messageBody.slice(end)}`;
+
+    onMessageBodyChange(nextValue);
+
+    queueMicrotask(() => {
+      textarea.focus();
+      const nextCaret = start + emoji.length;
+      textarea.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
+
+  const handleBodyChange = (value: string, caretPosition?: number | null) => {
+    onMessageBodyChange(value);
+    syncSelectedMentions(value);
+    updateMentionQuery(value, caretPosition ?? value.length);
+  };
+
+  const handleMentionSelect = (candidate: InboxMentionCandidate) => {
+    const textarea = textareaRef.current;
+    const caretPosition = textarea?.selectionStart ?? messageBody.length;
+    const mentionStart = activeMentionStart ?? messageBody.lastIndexOf("@", caretPosition);
+    const mentionEnd = caretPosition;
+
+    if (mentionStart < 0) {
+      return;
+    }
+
+    const insertion = `@${candidate.label} `;
+    const nextValue = `${messageBody.slice(0, mentionStart)}${insertion}${messageBody.slice(mentionEnd)}`;
+
+    onMessageBodyChange(nextValue);
+    onSelectedMentionsChange(
+      Array.from(
+        new Map(
+          [
+            ...selectedMentions.filter((mention) => nextValue.includes(`@${mention.label}`)),
+            {
+              id: candidate.id,
+              label: candidate.label,
+              token: candidate.token
+            }
+          ].map((mention) => [mention.id, mention])
+        ).values()
+      )
+    );
+    setActiveMentionQuery("");
+    setActiveMentionStart(null);
+
+    queueMicrotask(() => {
+      if (!textarea) {
+        return;
+      }
+
+      textarea.focus();
+      const nextCaret = mentionStart + insertion.length;
+      textarea.setSelectionRange(nextCaret, nextCaret);
+    });
+  };
 
   return (
     <div className="composer inbox-composer whatsapp-composer">
@@ -327,169 +309,143 @@ export function ReplyComposer({
         </button>
       </div>
 
-      <div className="whatsapp-quick-strip">
-        {quickStripTemplates.map((item) => (
-          <button className="inbox-quick-reply" key={item.id} onClick={() => onInsertQuickReply(item.body)} type="button">
-            <span>{item.shortcut}</span>
-            <strong>{item.title}</strong>
+      {showTakeoverCallout ? (
+        <div className="inbox-snooze-banner">
+          <strong>Take over required</strong>
+          <span>{takeoverOwnerName ? `${takeoverOwnerName} is the current owner.` : "Another teammate is the current owner."}</span>
+          <button className="button button-secondary" onClick={onTakeOverConversation} type="button">
+            Take over conversation
           </button>
-        ))}
-        {hiddenPinnedCount > 0 ? (
-          <button
-            className="inbox-quick-reply inbox-quick-reply-more"
-            onClick={() => {
-              setIsTemplateMenuOpen(true);
-              setIsEmojiMenuOpen(false);
-            }}
-            type="button"
-          >
-            <span>More</span>
-            <strong>+{hiddenPinnedCount} pinned</strong>
+        </div>
+      ) : null}
+
+      {replyingToMessage ? (
+        <div className="inbox-reply-context">
+          <div className="inbox-reply-context-copy">
+            <span>Replying to {replyingToMessage.sender}</span>
+            <strong>{replyingToMessage.body?.trim() || replyingToMessage.attachmentName || "Attachment"}</strong>
+          </div>
+          <button className="inbox-attachment-clear" onClick={onClearReply} type="button">
+            Clear
           </button>
-        ) : null}
+        </div>
+      ) : null}
+
+      <div className="inbox-composer-input-shell">
+        <textarea
+          className={`composer-textarea${isInternalNote ? " note-mode" : ""}`}
+          id="reply-body"
+          onChange={(event) => handleBodyChange(event.target.value, event.target.selectionStart)}
+          onClick={(event) => updateMentionQuery(messageBody, event.currentTarget.selectionStart ?? messageBody.length)}
+          onKeyDown={(event) => {
+            if (!visibleMentionCandidates.length) {
+              return;
+            }
+
+            if (event.key === "ArrowDown") {
+              event.preventDefault();
+              setActiveMentionIndex((current) => (current + 1) % visibleMentionCandidates.length);
+              return;
+            }
+
+            if (event.key === "ArrowUp") {
+              event.preventDefault();
+              setActiveMentionIndex((current) => (current - 1 + visibleMentionCandidates.length) % visibleMentionCandidates.length);
+              return;
+            }
+
+            if (event.key === "Enter" && activeMentionStart !== null) {
+              event.preventDefault();
+              handleMentionSelect(visibleMentionCandidates[activeMentionIndex] ?? visibleMentionCandidates[0]);
+              return;
+            }
+
+            if (event.key === "Escape") {
+              setActiveMentionQuery("");
+              setActiveMentionStart(null);
+            }
+          }}
+          placeholder={isInternalNote ? "Add an internal note for your team..." : "Write a WhatsApp reply..."}
+          ref={textareaRef}
+          rows={1}
+          value={messageBody}
+        />
       </div>
 
-      <textarea
-        className={`composer-textarea${isInternalNote ? " note-mode" : ""}`}
-        id="reply-body"
-        onChange={(event) => onMessageBodyChange(event.target.value)}
-        placeholder={isInternalNote ? "Add an internal note for your team..." : "Write a WhatsApp reply..."}
-        ref={textareaRef}
-        rows={1}
-        value={messageBody}
-      />
+      {isClient && activeMentionStart !== null && visibleMentionCandidates.length
+        ? createPortal(
+            <div
+              className={`inbox-mention-menu inbox-mention-menu-${mentionMenuPosition.placement}`}
+              role="listbox"
+              aria-label="Mention suggestions"
+              style={{
+                left: `${mentionMenuPosition.left}px`,
+                top: `${mentionMenuPosition.top}px`
+              }}
+            >
+              {visibleMentionCandidates.map((candidate, index) => (
+                <button
+                  className={`inbox-mention-option${index === activeMentionIndex ? " active" : ""}`}
+                  key={candidate.id}
+                  onClick={() => handleMentionSelect(candidate)}
+                  type="button"
+                >
+                  <strong>{candidate.label}</strong>
+                  <span>{candidate.phone ?? candidate.token}</span>
+                </button>
+              ))}
+            </div>,
+            document.body
+          )
+        : null}
 
-      {attachmentName ? (
-        <div className="inbox-attachment-row">
-          <span className="inbox-attachment-chip" title={attachmentName}>
-            <AttachmentIcon />
-            <span>{attachmentName}</span>
-          </span>
-          <button className="inbox-attachment-clear" onClick={() => onAttachmentChange(null)} type="button">
-            Remove
-          </button>
-        </div>
-      ) : null}
-
-      {isButtonsEnabled ? (
-        <div className="inbox-buttons-panel">
-          <div className="inbox-buttons-panel-head">
-            <strong>Reply buttons</strong>
-            <span>{activeButtons.length}/3 active</span>
+      {selectedMedia.length ? (
+        <div className="inbox-attachment-tray">
+          <div className="inbox-attachment-tray-head">
+            <div className="inbox-attachment-tray-copy">
+              <strong>{selectedMedia.length} attachment{selectedMedia.length === 1 ? "" : "s"} selected</strong>
+              <span>
+                {selectedMedia.length > 4
+                  ? `Showing 4 of ${selectedMedia.length}. The rest stay attached.`
+                  : "Attachments stay separate from the send controls."}
+              </span>
+            </div>
+            <button className="inbox-attachment-clear" onClick={() => onAttachmentChange([])} type="button">
+              Clear
+            </button>
           </div>
-          <div className="inbox-buttons-grid inbox-buttons-grid-compact">
-            {[0, 1, 2].map((index) => (
-              <label className="lead-record-field" key={index}>
-                <span>{`Button ${index + 1}`}</span>
-                <input
-                  className="lead-record-input"
-                  maxLength={20}
-                  onChange={(event) => {
-                    const next = [...interactiveButtons];
-                    next[index] = event.target.value;
-                    onInteractiveButtonsChange(next);
-                  }}
-                  placeholder={index === 0 ? "Yes" : `Button ${index + 1}`}
-                  value={interactiveButtons[index] ?? ""}
-                />
-              </label>
+          <div className="inbox-attachment-row">
+            {visibleSelectedMedia.map((asset, index) => (
+              <span className="inbox-attachment-chip" key={asset.id} title={asset.title}>
+                <AttachmentIcon />
+                <span>{`${index + 1}. ${asset.title} · ${getMediaKindLabel(asset.kind, asset.mimeType)}`}</span>
+              </span>
             ))}
-          </div>
-        </div>
-      ) : null}
-
-      {isListEnabled ? (
-        <div className="inbox-buttons-panel">
-          <div className="inbox-buttons-panel-head">
-            <strong>Reply list</strong>
-            <span>{activeListOptions.length}/10 active</span>
-          </div>
-          <label className="lead-record-field">
-            <span>Open list button text</span>
-            <input
-              className="lead-record-input"
-              maxLength={20}
-              onChange={(event) => onInteractiveListButtonTextChange(event.target.value)}
-              placeholder="Choose option"
-              value={interactiveListButtonText}
-            />
-          </label>
-          <div className="inbox-buttons-grid">
-            {[0, 1, 2, 3, 4].map((index) => (
-              <label className="lead-record-field" key={index}>
-                <span>{`Option ${index + 1}`}</span>
-                <input
-                  className="lead-record-input"
-                  maxLength={24}
-                  onChange={(event) => {
-                    const next = [...interactiveListOptions];
-                    next[index] = event.target.value;
-                    onInteractiveListOptionsChange(next);
-                  }}
-                  placeholder={index === 0 ? "Option 1" : `Option ${index + 1}`}
-                  value={interactiveListOptions[index] ?? ""}
-                />
-              </label>
-            ))}
+            {hiddenSelectedMediaCount ? (
+              <span className="inbox-attachment-chip inbox-attachment-chip-summary">
+                <AttachmentIcon />
+                <span>{`+${hiddenSelectedMediaCount} more`}</span>
+              </span>
+            ) : null}
           </div>
         </div>
       ) : null}
 
       <div className="inbox-composer-footer whatsapp-composer-footer">
         <div className="whatsapp-composer-actions">
-          <input
-            accept="image/*,application/pdf"
-            className="inbox-hidden-file-input"
-            onChange={(event) => {
-              const file = event.target.files?.[0] ?? null;
-              onAttachmentChange(file);
-              event.target.value = "";
-            }}
-            ref={fileInputRef}
-            type="file"
-          />
           <button
             aria-label="Choose attachment"
             className="whatsapp-circle-button"
-            disabled={isButtonsEnabled || isListEnabled}
-            onClick={() => fileInputRef.current?.click()}
+            disabled={isInternalNote}
+            onClick={() => {
+              setIsMediaMenuOpen((current) => !current);
+              setIsEmojiMenuOpen(false);
+              setIsTemplateMenuOpen(false);
+            }}
+            ref={attachmentButtonRef}
             type="button"
           >
             <AttachmentIcon />
-          </button>
-          <button
-            aria-label="Toggle reply buttons"
-            className={`whatsapp-circle-button${isButtonsEnabled ? " active" : ""}`}
-            disabled={isInternalNote}
-            onClick={onToggleButtons}
-            type="button"
-          >
-            <ButtonsIcon />
-          </button>
-          <button
-            aria-label="Toggle reply list"
-            className={`whatsapp-circle-button${isListEnabled ? " active" : ""}`}
-            disabled={isInternalNote}
-            onClick={onToggleList}
-            type="button"
-          >
-            <ListIcon />
-          </button>
-          <button
-            className={`inbox-interactive-chip${isButtonsEnabled ? " active" : ""}`}
-            disabled={isInternalNote}
-            onClick={onToggleButtons}
-            type="button"
-          >
-            Buttons
-          </button>
-          <button
-            className={`inbox-interactive-chip${isListEnabled ? " active" : ""}`}
-            disabled={isInternalNote}
-            onClick={onToggleList}
-            type="button"
-          >
-            List
           </button>
           <button
             aria-label="Open template picker"
@@ -497,6 +453,7 @@ export function ReplyComposer({
             onClick={() => {
               setIsTemplateMenuOpen((current) => !current);
               setIsEmojiMenuOpen(false);
+              setIsMediaMenuOpen(false);
             }}
             ref={templateButtonRef}
             type="button"
@@ -509,6 +466,7 @@ export function ReplyComposer({
             onClick={() => {
               setIsEmojiMenuOpen((current) => !current);
               setIsTemplateMenuOpen(false);
+              setIsMediaMenuOpen(false);
             }}
             ref={emojiButtonRef}
             type="button"
@@ -517,18 +475,82 @@ export function ReplyComposer({
           </button>
         </div>
 
-        <button
-          className="button button-primary inbox-send-button"
-          disabled={isSendDisabled}
-          onClick={onSendMessage}
-          type="button"
-        >
-          <SendIcon />
-          <span>{isPending ? "Sending..." : isInternalNote ? "Save note" : "Send reply"}</span>
-        </button>
+        <div className="inbox-send-actions">
+          {!isInternalNote ? (
+            <button
+              className="button button-secondary inbox-send-button"
+              disabled={isSendDisabled}
+              onClick={() => setIsScheduleDialogOpen(true)}
+              type="button"
+            >
+              <SnoozeIcon />
+              <span>Schedule</span>
+            </button>
+          ) : null}
+
+          <button
+            className="button button-primary inbox-send-button"
+            disabled={isSendDisabled}
+            onClick={onSendMessage}
+            type="button"
+          >
+            <SendIcon />
+            <span>{isPending ? "Sending..." : isInternalNote ? "Save note" : "Send reply"}</span>
+          </button>
+        </div>
       </div>
 
       {error ? <div className="form-error">{error}</div> : null}
+
+      <PortalDropdown
+        align="start"
+        anchorRef={attachmentButtonRef}
+        className="inbox-portal-menu"
+        onClose={() => setIsMediaMenuOpen(false)}
+        open={isMediaMenuOpen}
+        side="top"
+      >
+        <div className="inbox-media-menu">
+          <div className="inbox-template-menu-head">
+            <strong>Media library</strong>
+            <span>{mediaAssets.length} shared assets</span>
+          </div>
+          <input
+            className="inbox-template-search"
+            onChange={(event) => setMediaSearch(event.target.value)}
+            placeholder="Search media"
+            type="text"
+            value={mediaSearch}
+          />
+          <div className="inbox-media-list">
+            {visibleMediaAssets.length ? (
+              visibleMediaAssets.map((asset) => (
+                <button
+                  className={`inbox-media-option${selectedAttachmentIds.includes(asset.id) ? " active" : ""}`}
+                  key={asset.id}
+                  onClick={() => {
+                    onAttachmentChange([...selectedAttachmentIds, asset.id]);
+                    setIsMediaMenuOpen(false);
+                    setMediaSearch("");
+                  }}
+                  type="button"
+                >
+                  <div className="inbox-media-option-head">
+                    <strong>{asset.title}</strong>
+                    <span>{getMediaKindLabel(asset.kind, asset.mimeType)}</span>
+                  </div>
+                  <div className="inbox-media-option-meta">
+                    <span>{asset.sizeLabel}</span>
+                    <span>{asset.mimeType}</span>
+                  </div>
+                </button>
+              ))
+            ) : (
+              <div className="inbox-template-empty">No shared media matches your search.</div>
+            )}
+          </div>
+        </div>
+      </PortalDropdown>
 
       <PortalDropdown
         align="start"
@@ -541,7 +563,7 @@ export function ReplyComposer({
         <div className="inbox-template-menu">
           <div className="inbox-template-menu-head">
             <strong>Templates</strong>
-            <span>{pinnedTemplates.length} pinned · {quickReplies.length} saved replies</span>
+            <span>{quickReplies.length} saved replies</span>
           </div>
           <input
             className="inbox-template-search"
@@ -569,7 +591,7 @@ export function ReplyComposer({
                   className="inbox-template-option"
                   key={item.id}
                   onClick={() => {
-                    onInsertQuickReply(item.body);
+                    onInsertQuickReply(item);
                     setIsTemplateMenuOpen(false);
                     setTemplateSearch("");
                   }}
@@ -580,7 +602,7 @@ export function ReplyComposer({
                     <div className="quick-replies-library-badges">
                       <span>{item.shortcut}</span>
                       <span>{item.category}</span>
-                      {item.isPinned ? <span>Pinned</span> : null}
+                      {item.mediaAssetIds.length ? <span>{item.mediaAssetIds.length} media</span> : null}
                     </div>
                   </div>
                   <p>{item.body}</p>
@@ -601,53 +623,87 @@ export function ReplyComposer({
         open={isEmojiMenuOpen}
         side="top"
       >
-        <div className="inbox-emoji-menu">
-          <div className="inbox-emoji-search-row">
-            <input
-              className="inbox-emoji-search"
-              onChange={(event) => setEmojiSearch(event.target.value)}
-              placeholder="Search emoji"
-              type="text"
-              value={emojiSearch}
-            />
-          </div>
-
-          <div className="inbox-emoji-group-tabs">
-            {(Object.entries(emojiGroups) as Array<
-              [EmojiGroupKey, (typeof emojiGroups)[EmojiGroupKey]]
-            >).map(([groupKey, group]) => (
-              <button
-                className={`inbox-emoji-group-tab${activeEmojiGroup === groupKey && !emojiSearch ? " active" : ""}`}
-                key={groupKey}
-                onClick={() => {
-                  setActiveEmojiGroup(groupKey);
-                  setEmojiSearch("");
-                }}
-                title={group.label}
-                type="button"
-              >
-                {group.icon}
-              </button>
-            ))}
-          </div>
-
-          <div className="inbox-emoji-grid">
-            {visibleEmojis.map((emoji) => (
-              <button
-                className="inbox-emoji-option"
-                key={emoji}
-                onClick={() => {
-                  onInsertEmoji(emoji);
-                  setIsEmojiMenuOpen(false);
-                }}
-                type="button"
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
+        <div className="automation-emoji-picker-shell">
+          <FullEmojiPicker
+            onEmojiSelect={(emoji) => {
+              insertEmojiAtCursor(emoji);
+              setIsEmojiMenuOpen(false);
+            }}
+          />
         </div>
       </PortalDropdown>
+
+      <ScheduleSendDialog
+        isOpen={isScheduleDialogOpen}
+        isPending={isPending}
+        onClose={() => setIsScheduleDialogOpen(false)}
+        onSave={(value) => {
+          setIsScheduleDialogOpen(false);
+          onScheduleMessage(value);
+        }}
+      />
     </div>
   );
+}
+
+function getTextareaCaretMenuPosition(
+  textarea: HTMLTextAreaElement,
+  caretIndex: number
+): { left: number; top: number; placement: "above" | "below" } {
+  const computed = window.getComputedStyle(textarea);
+  const mirror = document.createElement("div");
+  const marker = document.createElement("span");
+  const shellRect = textarea.getBoundingClientRect();
+  const valueBeforeCaret = textarea.value.slice(0, caretIndex);
+  const estimatedMenuHeight = 236;
+  const verticalGap = 12;
+
+  mirror.style.position = "absolute";
+  mirror.style.visibility = "hidden";
+  mirror.style.pointerEvents = "none";
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.wordBreak = "break-word";
+  mirror.style.overflowWrap = "break-word";
+  mirror.style.boxSizing = "border-box";
+  mirror.style.font = computed.font;
+  mirror.style.fontFamily = computed.fontFamily;
+  mirror.style.fontSize = computed.fontSize;
+  mirror.style.fontWeight = computed.fontWeight;
+  mirror.style.fontStyle = computed.fontStyle;
+  mirror.style.letterSpacing = computed.letterSpacing;
+  mirror.style.lineHeight = computed.lineHeight;
+  mirror.style.padding = computed.padding;
+  mirror.style.border = computed.border;
+  mirror.style.width = `${textarea.clientWidth}px`;
+  mirror.style.maxWidth = `${textarea.clientWidth}px`;
+  mirror.style.left = `${shellRect.left + window.scrollX}px`;
+  mirror.style.top = `${shellRect.top + window.scrollY}px`;
+
+  mirror.textContent = valueBeforeCaret;
+  marker.textContent = "\u200b";
+  mirror.appendChild(marker);
+  document.body.appendChild(mirror);
+
+  const markerRect = marker.getBoundingClientRect();
+  const textareaRect = textarea.getBoundingClientRect();
+  const viewportPadding = 12;
+  const menuWidth = Math.min(320, window.innerWidth - viewportPadding * 2);
+  const left = Math.min(
+    Math.max(viewportPadding, markerRect.left),
+    window.innerWidth - menuWidth - viewportPadding
+  );
+  const caretTop = markerRect.top;
+  const caretBottom = markerRect.bottom;
+  const spaceAbove = caretTop - viewportPadding;
+  const spaceBelow = window.innerHeight - caretBottom - viewportPadding;
+  const shouldPlaceBelow = spaceAbove < estimatedMenuHeight && spaceBelow > spaceAbove;
+  const top = shouldPlaceBelow ? caretBottom : caretTop;
+
+  document.body.removeChild(mirror);
+
+  return {
+    left,
+    top,
+    placement: shouldPlaceBelow ? "below" : "above"
+  };
 }

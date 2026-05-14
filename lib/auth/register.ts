@@ -1,8 +1,13 @@
-import { AgentRole, AgentStatus } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
-import { hashPassword } from "@/lib/auth/password";
+import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createSession } from "@/lib/auth/session";
 import { createEmailVerification } from "@/lib/auth/verification";
+import {
+  getPackageBillingSnapshot,
+  getSubscriptionStatusForNewWorkspace,
+  normalizeWorkspacePackageKey
+} from "@/lib/billing";
+import { AgentRole, AgentStatus } from "@/lib/db-types";
+import { createAccountRecord, createWorkspaceAndManager, findAccountByEmail, findWorkspaceBySlug } from "@/lib/db-auth";
 import { normalizeWorkspacePlan } from "@/lib/workspace-plan";
 
 export async function registerWorkspace(input: {
@@ -27,44 +32,43 @@ export async function registerWorkspace(input: {
     throw new Error("Password must be at least 8 characters.");
   }
 
-  const existingAgent = await prisma.agent.findFirst({
-    where: {
-      email
-    },
-    select: {
-      id: true
-    }
-  });
+  const existingAccount = await findAccountByEmail(email);
 
-  if (existingAgent) {
-    throw new Error("An account with that email already exists.");
+  if (existingAccount && !verifyPassword(password, existingAccount.passwordHash)) {
+    throw new Error("This email already belongs to an existing account. Use the same password to add another workspace.");
   }
 
   const workspaceSlug = await generateWorkspaceSlug(workspaceName);
   const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  const packageSnapshot = await getPackageBillingSnapshot(normalizeWorkspacePackageKey(plan));
+  const passwordHash = existingAccount?.passwordHash ?? hashPassword(password);
+  const account =
+    existingAccount ??
+    (await createAccountRecord({
+      email,
+      passwordHash
+    }));
 
-  const agent = await prisma.$transaction(async (tx) => {
-    const workspace = await tx.workspace.create({
-      data: {
-        name: workspaceName,
-        slug: workspaceSlug,
-        plan,
-        trialEndsAt
-      }
-    });
-
-    return tx.agent.create({
-      data: {
-        workspaceId: workspace.id,
-        name,
-        email,
-        passwordHash: hashPassword(password),
-        inviteAcceptedAt: new Date(),
-        role: AgentRole.MANAGER,
-        status: AgentStatus.ACTIVE
-      }
-    });
+  const result = await createWorkspaceAndManager({
+      accountId: account?.id ?? null,
+      workspaceName,
+      slug: workspaceSlug,
+      plan,
+      trialEndsAt,
+      packageCode: packageSnapshot.code,
+      packageName: packageSnapshot.name,
+      packageDescription: packageSnapshot.description,
+      packagePriceAmount: packageSnapshot.priceAmount,
+      packageCurrency: packageSnapshot.currency,
+      packageBillingPeriod: packageSnapshot.billingPeriod,
+      subscriptionStatus: getSubscriptionStatusForNewWorkspace(true),
+      agentName: name,
+      agentEmail: email,
+      passwordHash,
+    role: AgentRole.MANAGER,
+    status: AgentStatus.ACTIVE
   });
+  const agent = result.agent;
 
   await createSession({
     agentId: agent.id,
@@ -72,7 +76,9 @@ export async function registerWorkspace(input: {
     remember: input.remember
   });
 
-  await createEmailVerification(agent.id);
+  if (!existingAccount?.emailVerifiedAt) {
+    await createEmailVerification(agent.id);
+  }
 
   return {
     agent
@@ -90,14 +96,7 @@ async function generateWorkspaceSlug(workspaceName: string) {
 
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const slug = attempt === 0 ? fallbackSlug : `${fallbackSlug}-${attempt + 1}`;
-    const existingWorkspace = await prisma.workspace.findUnique({
-      where: {
-        slug
-      },
-      select: {
-        id: true
-      }
-    });
+    const existingWorkspace = await findWorkspaceBySlug(slug);
 
     if (!existingWorkspace) {
       return slug;

@@ -18,9 +18,14 @@ export async function POST(request: NextRequest) {
   }
 
   const url = new URL(request.url);
+  const workspaceId = url.searchParams.get("workspaceId")?.trim() ?? "";
+  if (!workspaceId) {
+    return NextResponse.json({ error: "workspaceId is required." }, { status: 400 });
+  }
+
   const rawLimit = Number(url.searchParams.get("limit") ?? "10");
   const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 10;
-  const result = await processPendingOutboundMessageJobs(limit);
+  const result = await processPendingOutboundMessageJobs(limit, workspaceId);
 
   return NextResponse.json(result);
 }

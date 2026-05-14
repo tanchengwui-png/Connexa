@@ -1,8 +1,17 @@
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
-import { prisma } from "@/lib/prisma";
 import { renderEmailTemplate } from "@/lib/email-template";
 import { sendEmail } from "@/lib/mail";
+import { getResolvedPlatformEmailConfig } from "@/lib/platform-config";
+import {
+  createVerificationTokenRecord,
+  deleteVerificationTokenById,
+  deleteVerificationTokensByAgentId,
+  findAgentByIdWithWorkspace,
+  findAgentVerificationStatus,
+  findVerificationTokenWithAgent,
+  verifyAgentEmailAndClearTokens
+} from "@/lib/db-auth";
 
 const VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -14,42 +23,25 @@ function getBaseUrl() {
   return process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
 }
 
-function getSupportEmail() {
-  return process.env.SUPPORT_EMAIL ?? process.env.SMTP_FROM ?? "Connexa <no-reply@connexa.local>";
-}
-
 export async function createEmailVerification(agentId: string) {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + VERIFICATION_TTL_MS);
-  const agent = await prisma.agent.findUnique({
-    where: {
-      id: agentId
-    },
-    include: {
-      workspace: true
-    }
-  });
+  const agent = await findAgentByIdWithWorkspace(agentId);
 
   if (!agent) {
     throw new Error("Account not found.");
   }
 
-  await prisma.emailVerificationToken.deleteMany({
-    where: {
-      agentId
-    }
-  });
-
-  await prisma.emailVerificationToken.create({
-    data: {
-      agentId,
-      tokenHash: hashToken(token),
-      expiresAt
-    }
+  await deleteVerificationTokensByAgentId(agentId);
+  await createVerificationTokenRecord({
+    agentId,
+    tokenHash: hashToken(token),
+    expiresAt
   });
 
   const verificationUrl = `${getBaseUrl()}/verify-email?token=${token}`;
-  const supportEmail = getSupportEmail();
+  const emailConfig = await getResolvedPlatformEmailConfig();
+  const supportEmail = emailConfig.supportEmail || emailConfig.smtpFrom || "Connexa <no-reply@connexa.local>";
   const logoPath = path.join(process.cwd(), "public", "recurvos_connexa_transparent.png");
 
   await sendEmail({
@@ -60,7 +52,7 @@ export async function createEmailVerification(agentId: string) {
       "",
       "Welcome to Connexa.",
       "",
-      `Please verify your email address to finish setting up your account for "${agent.workspace.name}".`,
+      `Please verify your email address to finish setting up your account for "${agent.workspaceName}".`,
       "",
       "Use the link below to confirm your email:",
       verificationUrl,
@@ -73,8 +65,8 @@ export async function createEmailVerification(agentId: string) {
       "",
       "Connexa"
     ].join("\n"),
-    html: renderEmailTemplate({
-      preheader: `Verify your email address to finish setting up ${agent.workspace.name}.`,
+    html: await renderEmailTemplate({
+      preheader: `Verify your email address to finish setting up ${agent.workspaceName}.`,
       eyebrow: "Account verification",
       title: "Verify your email address",
       intro: `Hi ${escapeHtml(agent.name)},`,
@@ -83,14 +75,14 @@ export async function createEmailVerification(agentId: string) {
       bodyHtml: `
         <p style="margin:0 0 16px">
           Welcome to Connexa. Please verify your email address to finish setting up your account for
-          <strong> ${escapeHtml(agent.workspace.name)}</strong>.
+          <strong> ${escapeHtml(agent.workspaceName)}</strong>.
         </p>
         <p style="margin:0 0 24px;color:#cbd5e1">
           This confirmation helps protect your account and ensures you can receive important product and security updates.
         </p>
         <div style="margin:0 0 24px;padding:16px 18px;border:1px solid rgba(255,255,255,0.08);border-radius:16px;background:rgba(255,255,255,0.04)">
           <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;color:#a5f3fc;margin-bottom:8px">Workspace</div>
-          <div style="font-size:18px;font-weight:700;color:#ffffff">${escapeHtml(agent.workspace.name)}</div>
+          <div style="font-size:18px;font-weight:700;color:#ffffff">${escapeHtml(agent.workspaceName)}</div>
         </div>
         <p style="margin:0 0 24px">
           <a
@@ -124,57 +116,24 @@ export async function createEmailVerification(agentId: string) {
 
 export async function verifyEmailToken(token: string) {
   const tokenHash = hashToken(token);
-  const record = await prisma.emailVerificationToken.findUnique({
-    where: {
-      tokenHash
-    },
-    include: {
-      agent: true
-    }
-  });
+  const record = await findVerificationTokenWithAgent(tokenHash);
 
   if (!record) {
     throw new Error("Invalid verification link.");
   }
 
   if (record.expiresAt <= new Date()) {
-    await prisma.emailVerificationToken.delete({
-      where: {
-        id: record.id
-      }
-    });
+    await deleteVerificationTokenById(record.id);
     throw new Error("This verification link has expired.");
   }
 
-  await prisma.$transaction([
-    prisma.agent.update({
-      where: {
-        id: record.agentId
-      },
-      data: {
-        emailVerifiedAt: new Date()
-      }
-    }),
-    prisma.emailVerificationToken.deleteMany({
-      where: {
-        agentId: record.agentId
-      }
-    })
-  ]);
+  await verifyAgentEmailAndClearTokens(record.agentId);
 
   return record.agent;
 }
 
 export async function resendEmailVerification(agentId: string) {
-  const agent = await prisma.agent.findUnique({
-    where: {
-      id: agentId
-    },
-    select: {
-      id: true,
-      emailVerifiedAt: true
-    }
-  });
+  const agent = await findAgentVerificationStatus(agentId);
 
   if (!agent) {
     throw new Error("Account not found.");

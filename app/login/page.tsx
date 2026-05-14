@@ -1,13 +1,14 @@
 import { redirect } from "next/navigation";
 import { ConnexaLogo } from "@/components/connexa-logo";
 import { LoginForm } from "@/components/login-form";
+import { getAgentEntryPath } from "@/lib/auth/entry-path";
 import { getCurrentAgent } from "@/lib/auth/current-user";
 
 export default async function LoginPage() {
   const agent = await getCurrentAgent();
 
   if (agent) {
-    redirect(agent.emailVerifiedAt ? "/inbox" : "/verify-email");
+    redirect(await getAgentEntryPath(agent));
   }
 
   return (
@@ -47,8 +48,8 @@ export default async function LoginPage() {
 
           <div className="metrica-login-footer">
             <span className="muted">Don&apos;t have an account?</span>
-            <a className="auth-inline-link" href="/register">
-              Create your workspace
+            <a className="auth-inline-link" href="/packages">
+              View available packages
             </a>
           </div>
         </section>

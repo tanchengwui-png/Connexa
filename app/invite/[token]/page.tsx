@@ -19,10 +19,10 @@ export default async function InvitePage({ params }: InvitePageProps) {
 
         <div className="auth-top-copy auth-top-copy-balanced invite-top-copy">
           <span className="badge auth-badge">Workspace invitation</span>
-          <h1>{invite ? `Join ${invite.workspace.name}` : "Invitation unavailable"}</h1>
+          <h1>{invite ? `Join ${invite.workspaceName}` : "Invitation unavailable"}</h1>
           <p className="muted">
             {invite
-              ? `${invite.invitedBy.name} invited ${invite.email} to join this workspace as ${invite.role.toLowerCase()}.`
+              ? `${invite.invitedByName} invited ${invite.email} to join this workspace as ${invite.role.toLowerCase()}.`
               : "This invite is invalid, expired, or has already been used."}
           </p>
         </div>
@@ -39,7 +39,7 @@ export default async function InvitePage({ params }: InvitePageProps) {
               <div className="invite-summary-row">
                 <div className="invite-summary-item">
                   <span className="preview-label">Invited by</span>
-                  <strong>{invite.invitedBy.name}</strong>
+                  <strong>{invite.invitedByName}</strong>
                 </div>
                 <div className="invite-summary-item">
                   <span className="preview-label">Role</span>

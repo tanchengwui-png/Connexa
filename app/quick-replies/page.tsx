@@ -3,7 +3,7 @@ import { QuickRepliesManager } from "@/components/quick-replies-manager";
 import { getQuickRepliesData } from "@/lib/quick-replies";
 
 export default async function QuickRepliesPage() {
-  const { quickReplies, summary, categories } = await getQuickRepliesData();
+  const { quickReplies, summary, categories, mediaAssets } = await getQuickRepliesData();
 
   return (
     <DashboardShell currentPath="/quick-replies">
@@ -25,13 +25,13 @@ export default async function QuickRepliesPage() {
           <div className="table-subtle">Reusable templates available to the workspace</div>
         </article>
         <article className="content-card metric-card">
-          <div className="metric-label">Pinned replies</div>
-          <div className="metric-value">{summary.pinned}</div>
-          <div className="table-subtle">Always kept near the top for faster access</div>
+          <div className="metric-label">Replies with media</div>
+          <div className="metric-value">{summary.withMedia}</div>
+          <div className="table-subtle">Templates that include shared media attachments</div>
         </article>
       </section>
 
-      <QuickRepliesManager categories={categories} quickReplies={quickReplies} />
+      <QuickRepliesManager categories={categories} mediaAssets={mediaAssets} quickReplies={quickReplies} />
     </DashboardShell>
   );
 }

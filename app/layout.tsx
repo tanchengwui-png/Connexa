@@ -1,20 +1,9 @@
 import type { Metadata } from "next";
 import { ConfirmationProvider } from "@/components/confirmation-provider";
 import { ToastProvider } from "@/components/toast-provider";
-import { Inter, Space_Grotesk } from "next/font/google";
 import "sequential-workflow-designer/css/designer.css";
 import "sequential-workflow-designer/css/designer-dark.css";
 import "./globals.css";
-
-const inter = Inter({
-  subsets: ["latin"],
-  variable: "--font-body"
-});
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-display"
-});
 
 export const metadata: Metadata = {
   title: "Connexa",
@@ -28,7 +17,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${inter.variable} ${spaceGrotesk.variable}`}>
+      <body>
         <ToastProvider>
           <ConfirmationProvider>{children}</ConfirmationProvider>
         </ToastProvider>

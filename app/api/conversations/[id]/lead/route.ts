@@ -23,6 +23,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       sourceDetail?: string | null;
       stage:
         | "NEW_LEAD"
+        | "CONTACTED"
         | "QUALIFIED"
         | "SITE_VISIT_BOOKED"
         | "FOLLOW_UP"
@@ -54,7 +55,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
             ? "Unauthorized."
             : error instanceof Error
               ? error.message
-              : "Unable to save property lead."
+              : "Unable to save lead."
       },
       { status: error instanceof Error && error.message === "UNAUTHORIZED" ? 401 : 400 }
     );

@@ -49,13 +49,24 @@ export function InboxConversationRow({
 
           <div className="inbox-list-preview">{conversation.lastMessagePreview}</div>
 
+          {conversation.snoozedUntil ? (
+            <div className="inbox-list-reminder">
+              <span className="inbox-list-reminder-label">Reminder</span>
+              <span>{conversation.snoozedUntil}</span>
+            </div>
+          ) : null}
+
           <div className="inbox-list-item-meta inbox-row-chip-row">
             <MetadataChip tone={conversation.assigneeId ? "owner" : "unassigned"}>
               {conversation.assigneeId ? conversation.assignee : "Unassigned"}
             </MetadataChip>
             <MetadataChip tone="channel">WhatsApp</MetadataChip>
+            {conversation.scheduledCount ? (
+              <a className="inbox-list-scheduled-chip" href={`/scheduled-messages?conversationId=${conversation.id}`} onClick={(event) => event.stopPropagation()}>
+                {conversation.scheduledCount} scheduled
+              </a>
+            ) : null}
             {conversation.isHotLead ? <MetadataChip tone="hot">Hot lead</MetadataChip> : null}
-            {conversation.snoozedUntil ? <MetadataChip>{conversation.snoozedUntil}</MetadataChip> : null}
             <StatusChip>{conversation.status}</StatusChip>
           </div>
         </div>

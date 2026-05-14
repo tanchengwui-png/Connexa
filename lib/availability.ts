@@ -1,6 +1,6 @@
-import { AvailabilityOverrideType } from "@prisma/client";
-import { prisma } from "@/lib/prisma";
+import { findAgentAvailability, listWorkspaceAvailabilityAgents, replaceAgentAvailability } from "@/lib/db-availability";
 import { AVAILABILITY_OVERRIDE_OPTIONS, WEEKDAY_OPTIONS } from "@/lib/availability-constants";
+import { AvailabilityOverrideType } from "@/lib/db-types";
 
 const AVAILABILITY_TIME_ZONE = "Asia/Kuala_Lumpur";
 
@@ -30,23 +30,7 @@ export type AvailabilityOverrideInput = {
 };
 
 export async function getAgentAvailability(agentId: string) {
-  const agent = await prisma.agent.findUnique({
-    where: {
-      id: agentId
-    },
-    select: {
-      availabilityRules: {
-        orderBy: {
-          dayOfWeek: "asc"
-        }
-      },
-      availabilityOverrides: {
-        orderBy: {
-          startAt: "asc"
-        }
-      }
-    }
-  });
+  const agent = await findAgentAvailability(agentId);
 
   if (!agent) {
     throw new Error("Agent not found.");
@@ -88,78 +72,30 @@ export async function saveAgentAvailability(
   validateWeeklyRules(input.weeklyRules);
   validateOverrides(input.overrides);
 
-  await prisma.$transaction(async (tx) => {
-    await tx.agentAvailabilityRule.deleteMany({
-      where: {
-        agentId
-      }
-    });
-
-    await tx.agentAvailabilityOverride.deleteMany({
-      where: {
-        agentId
-      }
-    });
-
-    if (input.weeklyRules.length > 0) {
-      await tx.agentAvailabilityRule.createMany({
-        data: input.weeklyRules.map((rule) => ({
-          agentId,
-          dayOfWeek: rule.dayOfWeek,
-          enabled: rule.enabled,
-          startTime: rule.startTime,
-          endTime: rule.endTime
-        }))
-      });
-    }
-
-    if (input.overrides.length > 0) {
-      await tx.agentAvailabilityOverride.createMany({
-        data: input.overrides.map((override) => ({
-          agentId,
-          type: override.type,
-          startAt: new Date(override.startAt),
-          endAt: new Date(override.endAt),
-          note: cleanNullableText(override.note)
-        }))
-      });
-    }
+  await replaceAgentAvailability(agentId, {
+    weeklyRules: input.weeklyRules.map((rule) => ({
+      dayOfWeek: rule.dayOfWeek,
+      enabled: rule.enabled,
+      startTime: rule.startTime,
+      endTime: rule.endTime
+    })),
+    overrides: input.overrides.map((override) => ({
+      type: override.type,
+      startAt: new Date(override.startAt),
+      endAt: new Date(override.endAt),
+      note: cleanNullableText(override.note)
+    }))
   });
 }
 
 export async function getWorkspaceAvailabilitySummary(workspaceId: string) {
-  const agents = await prisma.agent.findMany({
-    where: {
-      workspaceId
-    },
-    include: {
-      availabilityRules: true,
-      availabilityOverrides: {
-        where: {
-          endAt: {
-            gte: new Date()
-          }
-        },
-        orderBy: {
-          startAt: "asc"
-        }
-      }
-    },
-    orderBy: {
-      name: "asc"
-    }
-  });
+  const agents = await listWorkspaceAvailabilityAgents(workspaceId);
 
   return agents.map((agent) => ({
-    agentId: agent.id,
-    agentName: agent.name,
+    agentId: agent.agentId,
+    agentName: agent.agentName,
     status: deriveAvailabilityStatus({
-      rules: agent.availabilityRules.map((rule) => ({
-        dayOfWeek: rule.dayOfWeek,
-        enabled: rule.enabled,
-        startTime: rule.startTime,
-        endTime: rule.endTime
-      })),
+      rules: agent.availabilityRules,
       overrides: agent.availabilityOverrides.map((override) => ({
         type: override.type,
         startAt: override.startAt,

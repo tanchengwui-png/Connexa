@@ -1,24 +1,21 @@
 import nodemailer from "nodemailer";
 import type Mail from "nodemailer/lib/mailer";
+import { getResolvedPlatformEmailConfig } from "@/lib/platform-config";
 
-function getRequiredEnv(name: string) {
-  const value = process.env[name];
+async function createTransport() {
+  const config = await getResolvedPlatformEmailConfig();
 
-  if (!value) {
-    throw new Error(`Missing ${name} environment variable.`);
+  if (!config.smtpHost || !config.smtpUser || !config.smtpPass) {
+    throw new Error("SMTP is not configured.");
   }
 
-  return value;
-}
-
-function createTransport() {
   return nodemailer.createTransport({
-    host: getRequiredEnv("SMTP_HOST"),
-    port: Number(process.env.SMTP_PORT ?? "587"),
-    secure: process.env.SMTP_SECURE === "true",
+    host: config.smtpHost,
+    port: config.smtpPort,
+    secure: config.smtpSecure,
     auth: {
-      user: getRequiredEnv("SMTP_USER"),
-      pass: getRequiredEnv("SMTP_PASS")
+      user: config.smtpUser,
+      pass: config.smtpPass
     }
   });
 }
@@ -30,10 +27,15 @@ export async function sendEmail(input: {
   text: string;
   attachments?: Mail.Attachment[];
 }) {
-  const transporter = createTransport();
+  const transporter = await createTransport();
+  const config = await getResolvedPlatformEmailConfig();
+
+  if (!config.smtpFrom) {
+    throw new Error("SMTP from address is not configured.");
+  }
 
   await transporter.sendMail({
-    from: getRequiredEnv("SMTP_FROM"),
+    from: config.smtpFrom,
     to: input.to,
     subject: input.subject,
     text: input.text,

@@ -1,8 +1,8 @@
-import { AgentRole } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiManager } from "@/lib/auth/current-user";
 import { createInvite } from "@/lib/auth/invites";
-import { prisma } from "@/lib/prisma";
+import { AgentRole } from "@/lib/db-types";
+import { findWorkspaceNameById } from "@/lib/db-auth";
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,14 +16,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid role." }, { status: 400 });
     }
 
-    const workspace = await prisma.workspace.findUnique({
-      where: {
-        id: manager.workspaceId
-      },
-      select: {
-        name: true
-      }
-    });
+    const workspace = await findWorkspaceNameById(manager.workspaceId);
 
     if (!workspace) {
       return NextResponse.json({ error: "Workspace not found." }, { status: 400 });

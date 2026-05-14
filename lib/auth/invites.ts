@@ -1,11 +1,22 @@
-import { AgentRole, AgentStatus } from "@prisma/client";
 import { createHash, randomBytes } from "node:crypto";
-import { prisma } from "@/lib/prisma";
-import { hashPassword } from "@/lib/auth/password";
+import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createSession } from "@/lib/auth/session";
 import { assertWorkspaceHasAcceptanceCapacity, assertWorkspaceHasInviteCapacity } from "@/lib/team-capacity";
+import { AgentRole, AgentStatus } from "@/lib/db-types";
+import {
+  acceptInviteAndCreateAgent,
+  createAccountRecord,
+  createInviteRecord,
+  deletePendingInvitesByWorkspaceEmail,
+  findAccountByEmail,
+  findAgentInWorkspaceByEmail,
+  findAgentsByEmail,
+  findValidInviteByTokenHash,
+  listPendingInvites
+} from "@/lib/db-auth";
 import { renderEmailTemplate } from "@/lib/email-template";
 import { sendEmail } from "@/lib/mail";
+import { getResolvedPlatformEmailConfig } from "@/lib/platform-config";
 
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -15,10 +26,6 @@ function hashToken(token: string) {
 
 function getBaseUrl() {
   return process.env.APP_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-}
-
-function getSupportEmail() {
-  return process.env.SUPPORT_EMAIL ?? process.env.SMTP_FROM ?? "Connexa <no-reply@connexa.local>";
 }
 
 export async function createInvite(input: {
@@ -35,15 +42,7 @@ export async function createInvite(input: {
     throw new Error("Invite email is required.");
   }
 
-  const existingAgent = await prisma.agent.findFirst({
-    where: {
-      workspaceId: input.workspaceId,
-      email
-    },
-    select: {
-      id: true
-    }
-  });
+  const existingAgent = await findAgentInWorkspaceByEmail(input.workspaceId, email);
 
   if (existingAgent) {
     throw new Error("That user is already a member of this workspace.");
@@ -56,27 +55,19 @@ export async function createInvite(input: {
   const token = randomBytes(32).toString("hex");
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
 
-  await prisma.invite.deleteMany({
-    where: {
-      workspaceId: input.workspaceId,
-      email,
-      acceptedAt: null
-    }
-  });
-
-  await prisma.invite.create({
-    data: {
-      workspaceId: input.workspaceId,
-      invitedById: input.invitedById,
-      email,
-      role: input.role,
-      tokenHash: hashToken(token),
-      expiresAt
-    }
+  await deletePendingInvitesByWorkspaceEmail(input.workspaceId, email);
+  await createInviteRecord({
+    workspaceId: input.workspaceId,
+    invitedById: input.invitedById,
+    email,
+    role: input.role,
+    tokenHash: hashToken(token),
+    expiresAt
   });
 
   const inviteUrl = `${getBaseUrl()}/invite/${token}`;
-  const supportEmail = getSupportEmail();
+  const emailConfig = await getResolvedPlatformEmailConfig();
+  const supportEmail = emailConfig.supportEmail || emailConfig.smtpFrom || "Connexa <no-reply@connexa.local>";
 
   await sendEmail({
     to: email,
@@ -94,7 +85,7 @@ export async function createInvite(input: {
       "",
       `Need help? Contact ${supportEmail}.`
     ].join("\n"),
-    html: renderEmailTemplate({
+    html: await renderEmailTemplate({
       preheader: `You have been invited to join ${input.workspaceName} on Connexa.`,
       eyebrow: "Team invitation",
       title: "You have been invited",
@@ -129,37 +120,11 @@ export async function createInvite(input: {
 }
 
 export async function listWorkspaceInvites(workspaceId: string) {
-  return prisma.invite.findMany({
-    where: {
-      workspaceId,
-      acceptedAt: null
-    },
-    orderBy: {
-      createdAt: "desc"
-    }
-  });
+  return listPendingInvites(workspaceId);
 }
 
 export async function getInviteByToken(token: string) {
-  const invite = await prisma.invite.findUnique({
-    where: {
-      tokenHash: hashToken(token)
-    },
-    include: {
-      workspace: true,
-      invitedBy: true
-    }
-  });
-
-  if (!invite) {
-    return null;
-  }
-
-  if (invite.acceptedAt || invite.expiresAt <= new Date()) {
-    return null;
-  }
-
-  return invite;
+  return findValidInviteByTokenHash(hashToken(token));
 }
 
 export async function acceptInvite(input: {
@@ -183,30 +148,45 @@ export async function acceptInvite(input: {
     throw new Error("Name and an 8-character password are required.");
   }
 
-  const agent = await prisma.$transaction(async (tx) => {
-    const createdAgent = await tx.agent.create({
-      data: {
-        workspaceId: invite.workspaceId,
-        name,
-        email: invite.email,
-        passwordHash: hashPassword(password),
-        emailVerifiedAt: new Date(),
-        inviteAcceptedAt: new Date(),
-        role: invite.role,
-        status: AgentStatus.ACTIVE
-      }
-    });
+  const existingAgents = await findAgentsByEmail(invite.email);
+  const existingAccount = await findAccountByEmail(invite.email);
+  const matchingExistingAgent = existingAgents.find(
+    (agent) => agent.effectivePasswordHash && verifyPassword(password, agent.effectivePasswordHash)
+  );
+  const matchingExistingAccount =
+    existingAccount && verifyPassword(password, existingAccount.passwordHash) ? existingAccount : null;
 
-    await tx.invite.update({
-      where: {
-        id: invite.id
-      },
-      data: {
-        acceptedAt: new Date()
-      }
-    });
+  if ((existingAgents.length > 0 || existingAccount) && !matchingExistingAgent && !matchingExistingAccount) {
+    throw new Error(
+      "This email already belongs to an existing account. Sign in with the same password used in your other workspace invite or account."
+    );
+  }
 
-    return createdAgent;
+  const accountEmailVerifiedAt =
+    matchingExistingAccount?.emailVerifiedAt ?? matchingExistingAgent?.effectiveEmailVerifiedAt ?? new Date();
+  const passwordHash =
+    matchingExistingAccount?.passwordHash ??
+    matchingExistingAgent?.effectivePasswordHash ??
+    hashPassword(password);
+  const account =
+    matchingExistingAccount ??
+    existingAccount ??
+    (await createAccountRecord({
+      email: invite.email,
+      passwordHash,
+      emailVerifiedAt: accountEmailVerifiedAt
+    }));
+
+  const agent = await acceptInviteAndCreateAgent({
+    inviteId: invite.id,
+    accountId: account?.id ?? null,
+    workspaceId: invite.workspaceId,
+    name,
+    email: invite.email,
+    passwordHash,
+    emailVerifiedAt: accountEmailVerifiedAt,
+    role: invite.role,
+    status: AgentStatus.ACTIVE
   });
 
   await createSession({

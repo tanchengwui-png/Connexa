@@ -13,7 +13,10 @@ import type {
   InboxConversation,
   InboxCurrentAgent,
   InboxFilterKey,
+  InboxMediaAsset,
+  InboxMentionCandidate,
   InboxQuickReply,
+  InboxSelectedMention,
   InboxSelectedConversation,
   InboxSummary,
   InboxWhatsAppStatus
@@ -22,6 +25,7 @@ import type {
 type InboxWorkspaceProps = {
   conversations: InboxConversation[];
   quickReplies: InboxQuickReply[];
+  mediaAssets: InboxMediaAsset[];
   whatsapp: InboxWhatsAppStatus;
   agents: InboxAgent[];
   currentAgent: InboxCurrentAgent;
@@ -33,6 +37,7 @@ type InboxWorkspaceProps = {
 export function InboxWorkspace({
   conversations,
   quickReplies,
+  mediaAssets,
   whatsapp,
   agents,
   currentAgent,
@@ -45,23 +50,45 @@ export function InboxWorkspace({
   const [liveConversations, setLiveConversations] = useState(conversations);
   const [liveSelectedConversation, setLiveSelectedConversation] = useState(selectedConversation);
   const [messageBody, setMessageBody] = useState("");
-  const [interactiveButtons, setInteractiveButtons] = useState<string[]>(["", "", ""]);
-  const [interactiveListButtonText, setInteractiveListButtonText] = useState("Choose option");
-  const [interactiveListOptions, setInteractiveListOptions] = useState<string[]>(["", "", "", "", ""]);
-  const [selectedAttachment, setSelectedAttachment] = useState<File | null>(null);
+  const [mentionCandidates, setMentionCandidates] = useState<InboxMentionCandidate[]>([]);
+  const [selectedMentions, setSelectedMentions] = useState<InboxSelectedMention[]>([]);
+  const [selectedAttachmentIds, setSelectedAttachmentIds] = useState<string[]>([]);
+  const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
+  const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<InboxFilterKey>("all");
   const [searchValue, setSearchValue] = useState("");
   const [isInternalNote, setIsInternalNote] = useState(false);
-  const [isButtonsEnabled, setIsButtonsEnabled] = useState(false);
-  const [isListEnabled, setIsListEnabled] = useState(false);
-  const [isSnoozeDialogOpen, setIsSnoozeDialogOpen] = useState(false);
   const [isSimulateInboundOpen, setIsSimulateInboundOpen] = useState(false);
+  const [isSnoozeDialogOpen, setIsSnoozeDialogOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
   const [isRoutingPending, startRoutingTransition] = useTransition();
   const [pendingConversationId, setPendingConversationId] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [isDetailsVisible, setIsDetailsVisible] = useState(true);
+  const hasDisconnectedWhatsAppSession =
+    whatsapp.mode !== "mock" &&
+    (whatsapp.runtimeStatus === "DISCONNECTED" || whatsapp.runtimeStatus === "AUTH_FAILED");
+  const isWhatsAppReady = whatsapp.isConfigured && !hasDisconnectedWhatsAppSession;
+  const inboxConnectionLabel =
+    whatsapp.mode === "mock"
+      ? "Mock mode"
+      : hasDisconnectedWhatsAppSession
+        ? "Connection lost"
+        : isWhatsAppReady
+          ? "Connected"
+          : "Setup needed";
+  const inboxConnectionMeta =
+    whatsapp.mode === "mock"
+      ? "Automation replies are simulated locally"
+      : hasDisconnectedWhatsAppSession
+        ? "Session is disconnected. Existing conversations stay visible until you relink WhatsApp."
+        : `Phone ID ${whatsapp.phoneNumberId ?? "Not set"}`;
+  const inboxWhatsAppWarning = hasDisconnectedWhatsAppSession
+    ? whatsapp.runtimeStatus === "AUTH_FAILED"
+      ? "WhatsApp session failed authentication. Existing conversations remain visible, but sending and sync are paused until you reconnect."
+      : "WhatsApp session ended on the linked phone. Existing conversations remain visible, but sending and sync are paused until you reconnect."
+    : null;
 
   const activeConversationId = liveSelectedConversation?.id ?? liveConversations[0]?.id ?? null;
 
@@ -167,19 +194,80 @@ export function InboxWorkspace({
   }, [activeConversationId]);
 
   useEffect(() => {
-    setIsSnoozeDialogOpen(false);
-    setSelectedAttachment(null);
-    setInteractiveButtons(["", "", ""]);
-    setInteractiveListButtonText("Choose option");
-    setInteractiveListOptions(["", "", "", "", ""]);
-    setIsButtonsEnabled(false);
-    setIsListEnabled(false);
+    if (!activeConversationId) {
+      return;
+    }
+
+    const activeConversation = liveConversations.find((conversation) => conversation.id === activeConversationId);
+    if (!activeConversation || activeConversation.unreadCount === 0) {
+      return;
+    }
+
+    setLiveConversations((current) =>
+      current.map((conversation) =>
+        conversation.id === activeConversationId
+          ? {
+              ...conversation,
+              unreadCount: 0
+            }
+          : conversation
+      )
+    );
+
+    void fetch(`/api/conversations/${activeConversationId}`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        markAsRead: true
+      })
+    });
+  }, [activeConversationId, liveConversations]);
+
+  useEffect(() => {
+    setSelectedAttachmentIds([]);
+    setReplyToMessageId(null);
+    setSelectedMentions([]);
   }, [activeConversationId]);
+
+  useEffect(() => {
+    if (!activeConversationId || !liveSelectedConversation?.isGroup || isInternalNote) {
+      setMentionCandidates([]);
+      return;
+    }
+
+    const abortController = new AbortController();
+    const loadMentionCandidates = async () => {
+      const response = await fetch(`/api/conversations/${activeConversationId}/mentions`, {
+        method: "GET",
+        cache: "no-store",
+        signal: abortController.signal
+      }).catch(() => null);
+
+      if (!response?.ok) {
+        return;
+      }
+
+      const payload = (await response.json().catch(() => null)) as
+        | { candidates?: InboxMentionCandidate[] }
+        | null;
+
+      setMentionCandidates(payload?.candidates ?? []);
+    };
+
+    void loadMentionCandidates();
+
+    return () => abortController.abort();
+  }, [activeConversationId, isInternalNote, liveSelectedConversation?.isGroup]);
 
   const filterCounts = useMemo(
     () => ({
       all: liveConversations.length,
-      mine: liveConversations.filter((item) => item.assigneeId === currentAgent.id).length,
+      mine: liveConversations.filter((item) => item.assigneeId === currentAgent.id || item.teammateIds.includes(currentAgent.id)).length,
+      "assigned-others": liveConversations.filter(
+        (item) => Boolean(item.assigneeId) && item.assigneeId !== currentAgent.id && !item.teammateIds.includes(currentAgent.id)
+      ).length,
       unassigned: liveConversations.filter((item) => !item.assigneeId).length,
       unread: liveConversations.filter((item) => item.unreadCount > 0).length,
       hot: liveConversations.filter((item) => item.isHotLead).length
@@ -190,7 +278,10 @@ export function InboxWorkspace({
   const initialFilterCounts = useMemo(
     () => ({
       all: conversations.length,
-      mine: conversations.filter((item) => item.assigneeId === currentAgent.id).length,
+      mine: conversations.filter((item) => item.assigneeId === currentAgent.id || item.teammateIds.includes(currentAgent.id)).length,
+      "assigned-others": conversations.filter(
+        (item) => Boolean(item.assigneeId) && item.assigneeId !== currentAgent.id && !item.teammateIds.includes(currentAgent.id)
+      ).length,
       unassigned: conversations.filter((item) => !item.assigneeId).length,
       unread: conversations.filter((item) => item.unreadCount > 0).length,
       hot: conversations.filter((item) => item.isHotLead).length
@@ -203,10 +294,19 @@ export function InboxWorkspace({
 
     return liveConversations.filter((conversation) => {
       if (filter === "mine" && conversation.assigneeId !== currentAgent.id) {
-        return false;
+        if (!conversation.teammateIds.includes(currentAgent.id)) {
+          return false;
+        }
       }
 
       if (filter === "unassigned" && conversation.assigneeId) {
+        return false;
+      }
+
+      if (
+        filter === "assigned-others" &&
+        (!conversation.assigneeId || conversation.assigneeId === currentAgent.id || conversation.teammateIds.includes(currentAgent.id))
+      ) {
         return false;
       }
 
@@ -239,6 +339,17 @@ export function InboxWorkspace({
   const displayedActiveConversationId = hasHydrated
     ? activeConversationId
     : selectedConversation?.id ?? conversations[0]?.id ?? null;
+  const canReplyToSelectedConversation = Boolean(
+    !liveSelectedConversation?.assigneeId ||
+      liveSelectedConversation.assigneeId === currentAgent.id ||
+      currentAgent.role === "MANAGER"
+  );
+  const requiresTakeOverForPublicReply = Boolean(isWhatsAppReady && !canReplyToSelectedConversation && liveSelectedConversation);
+  const canTakeOverSelectedConversation = Boolean(
+    liveSelectedConversation?.assigneeId && liveSelectedConversation.assigneeId !== currentAgent.id
+  );
+  const replyingToMessage =
+    liveSelectedConversation?.messages.find((message) => message.id === replyToMessageId) ?? null;
 
   const openConversation = (conversationId: string) => {
     setPendingConversationId(conversationId);
@@ -249,59 +360,21 @@ export function InboxWorkspace({
     });
   };
 
-  const insertQuickReply = (body: string) => {
-    setMessageBody((current) => (current ? `${current}\n${body}` : body));
+  const insertQuickReply = (quickReply: InboxQuickReply) => {
+    setMessageBody((current) => (current ? `${current}\n${quickReply.body}` : quickReply.body));
+    setSelectedAttachmentIds(quickReply.mediaAssetIds);
   };
 
-  const insertEmoji = (emoji: string) => {
-    setMessageBody((current) => `${current}${emoji}`);
-  };
-
-  const sendMessage = async () => {
+  const sendMessage = async (scheduledFor?: string) => {
     if (!activeConversationId) {
       return;
     }
 
     const trimmedBody = messageBody.trim();
-    const normalizedButtons = interactiveButtons.map((entry) => entry.trim()).filter(Boolean).slice(0, 3);
-    const normalizedListOptions = interactiveListOptions.map((entry) => entry.trim()).filter(Boolean).slice(0, 10);
-    if (!trimmedBody && !selectedAttachment) {
-      setError("Message body is required.");
+    const activeMentions = selectedMentions.filter((mention) => messageBody.includes(`@${mention.label}`));
+    if (!trimmedBody && !selectedAttachmentIds.length) {
+      setError("Message body or media is required.");
       return;
-    }
-
-    if (!isInternalNote && isButtonsEnabled) {
-      if (!trimmedBody) {
-        setError("Button messages need a message body.");
-        return;
-      }
-
-      if (selectedAttachment) {
-        setError("Button messages cannot include attachments yet.");
-        return;
-      }
-
-      if (!normalizedButtons.length) {
-        setError("Add at least one button.");
-        return;
-      }
-    }
-
-    if (!isInternalNote && isListEnabled) {
-      if (!trimmedBody) {
-        setError("List messages need a message body.");
-        return;
-      }
-
-      if (selectedAttachment) {
-        setError("List messages cannot include attachments yet.");
-        return;
-      }
-
-      if (!normalizedListOptions.length) {
-        setError("Add at least one list option.");
-        return;
-      }
     }
 
     setError(null);
@@ -327,15 +400,17 @@ export function InboxWorkspace({
           : (() => {
               const formData = new FormData();
               formData.append("body", trimmedBody);
-              if (isButtonsEnabled && normalizedButtons.length) {
-                formData.append("interactiveButtons", JSON.stringify(normalizedButtons));
+              if (selectedAttachmentIds.length) {
+                formData.append("mediaAssetIds", JSON.stringify(selectedAttachmentIds));
               }
-              if (isListEnabled && normalizedListOptions.length) {
-                formData.append("interactiveListButtonText", interactiveListButtonText.trim() || "Choose option");
-                formData.append("interactiveListOptions", JSON.stringify(normalizedListOptions));
+              if (activeMentions.length) {
+                formData.append("mentions", JSON.stringify(activeMentions));
               }
-              if (selectedAttachment) {
-                formData.append("attachment", selectedAttachment);
+              if (replyToMessageId) {
+                formData.append("replyToMessageId", replyToMessageId);
+              }
+              if (scheduledFor) {
+                formData.append("scheduledFor", scheduledFor);
               }
 
               return {
@@ -352,12 +427,9 @@ export function InboxWorkspace({
       }
 
       setMessageBody("");
-      setSelectedAttachment(null);
-      setInteractiveButtons(["", "", ""]);
-      setInteractiveListButtonText("Choose option");
-      setInteractiveListOptions(["", "", "", "", ""]);
-      setIsButtonsEnabled(false);
-      setIsListEnabled(false);
+      setSelectedAttachmentIds([]);
+      setSelectedMentions([]);
+      setReplyToMessageId(null);
       setIsInternalNote(false);
       await refreshInboxPanels(activeConversationId);
     });
@@ -366,6 +438,7 @@ export function InboxWorkspace({
   const updateConversation = (updates: {
     status?: "OPEN" | "PENDING" | "CLOSED";
     assigneeId?: string | null;
+    teammateIds?: string[];
     snoozedUntil?: string | null;
     tags?: string[];
   }) => {
@@ -394,6 +467,17 @@ export function InboxWorkspace({
     });
   };
 
+  const takeOverConversation = () => {
+    if (!liveSelectedConversation) {
+      return;
+    }
+
+    updateConversation({
+      assigneeId: currentAgent.id,
+      teammateIds: liveSelectedConversation.teammateIds.filter((id) => id !== currentAgent.id)
+    });
+  };
+
   const addTag = (presetTag?: string) => {
     if (!liveSelectedConversation) {
       return;
@@ -408,6 +492,45 @@ export function InboxWorkspace({
 
     updateConversation({
       tags: Array.from(new Set([...liveSelectedConversation.tags, nextTag]))
+    });
+  };
+
+  const deleteMessage = (messageId: string) => {
+    if (!activeConversationId) {
+      return;
+    }
+
+    const targetMessage = liveSelectedConversation?.messages.find((message) => message.id === messageId);
+    if (!targetMessage) {
+      return;
+    }
+
+    setPendingDeleteMessageId(messageId);
+  };
+
+  const confirmDeleteMessage = () => {
+    if (!activeConversationId || !pendingDeleteMessageId) {
+      return;
+    }
+
+    setError(null);
+    startTransition(async () => {
+      const response = await fetch(`/api/conversations/${activeConversationId}/messages/${pendingDeleteMessageId}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        setError(payload?.error ?? "Unable to delete message.");
+        return;
+      }
+
+      if (replyToMessageId === pendingDeleteMessageId) {
+        setReplyToMessageId(null);
+      }
+
+      setPendingDeleteMessageId(null);
+      await refreshInboxPanels(activeConversationId);
     });
   };
 
@@ -438,7 +561,7 @@ export function InboxWorkspace({
 
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-      throw new Error(payload?.error ?? "Unable to create property record.");
+      throw new Error(payload?.error ?? "Unable to create lead.");
     }
 
     const payload = (await response.json()) as { lead?: { id?: string } };
@@ -448,16 +571,7 @@ export function InboxWorkspace({
       throw new Error("Lead record was created without an id.");
     }
 
-    router.push(`/leads/${leadId}`);
     await refreshInboxPanels(activeConversationId);
-  };
-
-  const snoozeConversation = () => {
-    if (!liveSelectedConversation) {
-      return;
-    }
-
-    setIsSnoozeDialogOpen(true);
   };
 
   const simulateInboundMessage = (input: {
@@ -505,23 +619,26 @@ export function InboxWorkspace({
 
   return (
     <section className="inbox-workspace premium-inbox-workspace">
+      {inboxWhatsAppWarning ? (
+        <div className="inbox-snooze-banner">
+          <strong>WhatsApp connection lost</strong>
+          <span>{inboxWhatsAppWarning}</span>
+          <a className="button button-secondary" href="/settings/whatsapp">
+            Start fresh session
+          </a>
+        </div>
+      ) : null}
+
       <div className="inbox-reference-topbar">
         <div className="inbox-reference-topbar-main">
-          <span className={`inbox-reference-state${whatsapp.isConfigured ? " ready" : ""}`}>
-            {whatsapp.mode === "mock" ? "Mock mode" : whatsapp.isConfigured ? "Connected" : "Setup needed"}
+          <span className={`inbox-reference-state${isWhatsAppReady ? " ready" : ""}`}>
+            {inboxConnectionLabel}
           </span>
           <span className="inbox-reference-channel">WhatsApp</span>
-          <span className="inbox-reference-meta">
-            {whatsapp.mode === "mock" ? "Automation replies are simulated locally" : `Phone ID ${whatsapp.phoneNumberId ?? "Not set"}`}
-          </span>
+          <span className="inbox-reference-meta">{inboxConnectionMeta}</span>
           <span className="inbox-reference-meta">Last sync {whatsapp.updatedAt ?? "Not available"}</span>
         </div>
         <div className="inbox-reference-topbar-actions">
-          {currentAgent.role === "MANAGER" ? (
-            <button className="inbox-reference-pill-button" onClick={() => setIsSimulateInboundOpen(true)} type="button">
-              Simulate inbound
-            </button>
-          ) : null}
           <span className="inbox-reference-pill">{filterCounts.all} conversations</span>
           <span className="inbox-reference-pill">{filterCounts.unread} unread</span>
           <span className="inbox-reference-pill">{summary.unassigned} unassigned</span>
@@ -546,66 +663,54 @@ export function InboxWorkspace({
 
         <InboxThreadPanel
           agents={agents}
-          attachmentName={selectedAttachment?.name ?? null}
-          canSendPublicReply={whatsapp.isConfigured}
+          mediaAssets={mediaAssets}
+          selectedAttachmentIds={selectedAttachmentIds}
+          mentionCandidates={mentionCandidates}
+          canSendPublicReply={isWhatsAppReady && canReplyToSelectedConversation}
+          canTakeOverConversation={canTakeOverSelectedConversation}
+          currentAgent={currentAgent}
           error={error}
           hasHydrated={hasHydrated}
-          interactiveButtons={interactiveButtons}
-          interactiveListButtonText={interactiveListButtonText}
-          interactiveListOptions={interactiveListOptions}
-          isButtonsEnabled={isButtonsEnabled}
           isInternalNote={isInternalNote}
-          isListEnabled={isListEnabled}
           isPending={isPending}
           messageBody={messageBody}
+          selectedMentions={selectedMentions}
           onAddTag={addTag}
-          onAttachmentChange={(file) => {
-            setSelectedAttachment(file);
+          onAttachmentChange={(attachmentIds) => {
+            setSelectedAttachmentIds(attachmentIds);
             setError(null);
           }}
-          onInteractiveButtonsChange={(buttons) => {
-            setInteractiveButtons(buttons);
-            setError(null);
-          }}
-          onInteractiveListButtonTextChange={(value) => {
-            setInteractiveListButtonText(value);
-            setError(null);
-          }}
-          onInteractiveListOptionsChange={(options) => {
-            setInteractiveListOptions(options);
-            setError(null);
-          }}
-          onInsertEmoji={insertEmoji}
+          onDeleteMessage={deleteMessage}
           onInsertQuickReply={insertQuickReply}
           onMessageBodyChange={setMessageBody}
-          onSendMessage={sendMessage}
-          onSnooze={snoozeConversation}
-          onToggleButtons={() => {
-            setIsButtonsEnabled((current) => !current);
-            setIsListEnabled(false);
-            setInteractiveListButtonText("Choose option");
-            setInteractiveListOptions(["", "", "", "", ""]);
-            setSelectedAttachment(null);
+          onSelectedMentionsChange={setSelectedMentions}
+          onReplyToMessage={(messageId) => {
+            setReplyToMessageId(messageId || null);
             setError(null);
           }}
-          onToggleList={() => {
-            setIsListEnabled((current) => !current);
-            setIsButtonsEnabled(false);
-            setInteractiveButtons(["", "", ""]);
-            setSelectedAttachment(null);
-            setError(null);
-          }}
+          replyingToMessage={
+            replyingToMessage
+              ? {
+                  id: replyingToMessage.id,
+                  sender: replyingToMessage.sender,
+                  body: replyingToMessage.body,
+                  attachmentName: replyingToMessage.attachmentName
+                }
+              : null
+          }
+          onScheduleMessage={(value) => void sendMessage(value)}
+          onSendMessage={() => void sendMessage()}
+          onSnoozeConversation={() => setIsSnoozeDialogOpen(true)}
+          onTakeOverConversation={takeOverConversation}
           onToggleInternalNote={() => {
             setIsInternalNote((current) => !current);
-            setIsButtonsEnabled(false);
-            setIsListEnabled(false);
-            setInteractiveButtons(["", "", ""]);
-            setInteractiveListButtonText("Choose option");
-            setInteractiveListOptions(["", "", "", "", ""]);
+            setSelectedAttachmentIds([]);
+            setSelectedMentions([]);
             setError(null);
           }}
           onUpdateConversation={updateConversation}
           quickReplies={quickReplies}
+          requiresTakeOverForPublicReply={requiresTakeOverForPublicReply}
           selectedConversation={liveSelectedConversation}
           whatsappMode={whatsapp.mode}
         />
@@ -633,20 +738,37 @@ export function InboxWorkspace({
         )}
       </section>
 
-      <SnoozeDialog
-        initialValue={liveSelectedConversation?.snoozedUntilIso ?? null}
-        isOpen={isSnoozeDialogOpen}
-        isPending={isPending}
-        onClear={() => {
-          updateConversation({ snoozedUntil: null });
-          setIsSnoozeDialogOpen(false);
-        }}
-        onClose={() => setIsSnoozeDialogOpen(false)}
-        onSave={(value) => {
-          updateConversation({ snoozedUntil: value });
-          setIsSnoozeDialogOpen(false);
-        }}
-      />
+      {pendingDeleteMessageId ? (
+        <div className="inbox-dialog-backdrop" onClick={() => setPendingDeleteMessageId(null)}>
+          <div
+            aria-modal="true"
+            className="inbox-dialog"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="inbox-dialog-head">
+              <div>
+                <strong>Delete for everyone</strong>
+                <p>This will attempt to remove the message from WhatsApp for all participants.</p>
+              </div>
+              <button className="inbox-dialog-close" onClick={() => setPendingDeleteMessageId(null)} type="button">
+                ×
+              </button>
+            </div>
+            <div className="lead-record-panel">
+              <p className="muted">WhatsApp may reject this if the message is no longer eligible for revoke.</p>
+            </div>
+            <div className="inbox-dialog-actions">
+              <button className="inbox-dialog-secondary" onClick={() => setPendingDeleteMessageId(null)} type="button">
+                Cancel
+              </button>
+              <button className="inbox-dialog-primary" disabled={isPending} onClick={confirmDeleteMessage} type="button">
+                {isPending ? "Deleting..." : "Delete for everyone"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <SimulateInboundDialog
         isOpen={isSimulateInboundOpen}
@@ -654,6 +776,21 @@ export function InboxWorkspace({
         onClose={() => setIsSimulateInboundOpen(false)}
         onSubmit={simulateInboundMessage}
         selectedConversation={liveSelectedConversation}
+      />
+
+      <SnoozeDialog
+        initialValue={liveSelectedConversation?.snoozedUntilIso ?? null}
+        isOpen={isSnoozeDialogOpen}
+        isPending={isPending}
+        onClear={() => {
+          setIsSnoozeDialogOpen(false);
+          updateConversation({ snoozedUntil: null });
+        }}
+        onClose={() => setIsSnoozeDialogOpen(false)}
+        onSave={(value) => {
+          setIsSnoozeDialogOpen(false);
+          updateConversation({ snoozedUntil: value });
+        }}
       />
     </section>
   );

@@ -2,6 +2,8 @@
 
 import { useEffect, useState, useTransition } from "react";
 
+const DISPLAY_TIME_ZONE = "Asia/Kuala_Lumpur";
+
 type OutboundWorkerStatus = {
   pending: number;
   running: number;
@@ -223,5 +225,16 @@ function formatRelativeTime(value: string) {
 
 function formatAbsolute(value: string) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("en-MY", {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: true,
+        timeZone: DISPLAY_TIME_ZONE
+      }).format(date);
 }

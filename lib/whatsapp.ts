@@ -3,6 +3,7 @@ import { ConversationStatus, MessageDirection } from "@prisma/client";
 import { processInboundAutomation } from "@/lib/automation-engine";
 import { prisma } from "@/lib/prisma";
 import { normalizeStoredPhone } from "@/lib/phone";
+import { upsertWhatsAppMessageEnvelopeFromPayload } from "@/lib/whatsapp-message-envelope";
 
 type WhatsAppWebhookPayload = {
   entry?: Array<{
@@ -117,6 +118,7 @@ export async function ingestWhatsappWebhook(
         await createInboundConversationMessage({
           workspaceId,
           providerMessageId: message.id,
+          direction: "INBOUND",
           body: message.text.body,
           sentAt,
           phone: contactSeed.phone,
@@ -142,6 +144,7 @@ export async function ingestSimulatedInboundMessage(input: {
   conversationId?: string | null;
   sentAt?: Date | null;
   ignoreAutomationPause?: boolean;
+  isTest?: boolean;
 }) {
   const normalizedBody = input.body.trim();
   if (!normalizedBody) {
@@ -154,14 +157,16 @@ export async function ingestSimulatedInboundMessage(input: {
   return createInboundConversationMessage({
     workspaceId: input.workspaceId,
     providerMessageId,
+    direction: "INBOUND",
     body: normalizedBody,
     sentAt,
     phone: input.phone ? normalizeStoredPhone(input.phone) : undefined,
     displayName: input.displayName?.trim() || undefined,
     conversationId: input.conversationId ?? undefined,
     ignoreAutomationPause: input.ignoreAutomationPause,
+    isTest: input.isTest,
     rawPayload: {
-      source: "simulated-inbound",
+      source: input.isTest ? "automation-test" : "simulated-inbound",
       body: normalizedBody
     }
   });
@@ -171,6 +176,10 @@ export async function ingestWhatsAppClientMessage(input: {
   workspaceId: string;
   providerMessageId: string;
   body: string;
+  direction?: "INBOUND" | "OUTBOUND";
+  attachmentMimeType?: string | null;
+  attachmentName?: string | null;
+  attachmentUrl?: string | null;
   phone?: string | null;
   displayName?: string | null;
   photoUrl?: string | null;
@@ -178,7 +187,18 @@ export async function ingestWhatsAppClientMessage(input: {
   rawPayload: unknown;
 }) {
   const normalizedBody = input.body.trim();
-  if (!normalizedBody) {
+  const resolvedBody = sanitizeSyncedMessageText(
+    getSyncedMessageBody({
+      body: normalizedBody,
+      type: readStringField(input.rawPayload, "type"),
+      caption: readStringField(input.rawPayload, "caption"),
+      mimetype: readStringField(input.rawPayload, "mimetype"),
+      hasMedia: readBooleanField(input.rawPayload, "hasMedia") ?? Boolean(input.attachmentUrl),
+      rawPayload: input.rawPayload
+    })
+  );
+
+  if (!resolvedBody) {
     throw new Error("Message body is required.");
   }
 
@@ -189,7 +209,11 @@ export async function ingestWhatsAppClientMessage(input: {
   return createInboundConversationMessage({
     workspaceId: input.workspaceId,
     providerMessageId: input.providerMessageId,
-    body: normalizedBody,
+    direction: input.direction ?? "INBOUND",
+    body: resolvedBody,
+    attachmentMimeType: input.attachmentMimeType ?? null,
+    attachmentName: input.attachmentName ?? null,
+    attachmentUrl: input.attachmentUrl ?? null,
     sentAt: input.sentAt ?? new Date(),
     phone: normalizeStoredPhone(input.phone),
     displayName: input.displayName?.trim() || undefined,
@@ -206,6 +230,11 @@ export async function syncWhatsAppHistoryConversation(input: {
   unreadCount?: number;
   messages: Array<{
     id: string;
+    author?: string | null;
+    chatId?: string | null;
+    attachmentMimeType?: string | null;
+    attachmentName?: string | null;
+    attachmentUrl?: string | null;
     body?: string | null;
     fromMe: boolean;
     timestamp?: number | null;
@@ -222,6 +251,28 @@ export async function syncWhatsAppHistoryConversation(input: {
   if (!phone) {
     return { conversationId: null, importedCount: 0 };
   }
+  const latestInboundRemoteId = [...input.messages]
+    .reverse()
+    .map((message) => extractWhatsAppRemoteId(message.rawPayload ?? message, phone))
+    .find((value): value is string => Boolean(value));
+  const existingConversationByRemote = latestInboundRemoteId
+    ? await prisma.conversation.findFirst({
+        where: {
+          workspaceId: input.workspaceId,
+          whatsAppRemoteId: latestInboundRemoteId
+        },
+        select: {
+          id: true,
+          contactId: true,
+          contact: {
+            select: {
+              id: true,
+              phone: true
+            }
+          }
+        }
+      })
+    : null;
 
   const existingContact = await prisma.contact.findUnique({
     where: {
@@ -236,12 +287,33 @@ export async function syncWhatsAppHistoryConversation(input: {
       syncedTags: true,
       tagsManualOverride: true,
       photoUrl: true,
+      phone: true,
       displayName: true,
       syncedDisplayName: true,
       displayNameManualOverride: true,
       lastInteractionAt: true
     }
   });
+  const remoteMatchedContact = existingConversationByRemote?.contact ?? null;
+  const contactPhoneConflict =
+    remoteMatchedContact && remoteMatchedContact.phone !== phone
+      ? await prisma.contact.findUnique({
+          where: {
+            workspaceId_phone: {
+              workspaceId: input.workspaceId,
+              phone
+            }
+          },
+          select: {
+            id: true
+          }
+        })
+      : null;
+  const shouldRepairRemoteMatchedPhone = Boolean(
+    remoteMatchedContact &&
+      remoteMatchedContact.phone !== phone &&
+      (!contactPhoneConflict || contactPhoneConflict.id === remoteMatchedContact.id)
+  );
 
   const sortedMessages = [...input.messages].sort(
     (left, right) => (left.timestamp ?? 0) - (right.timestamp ?? 0)
@@ -282,7 +354,10 @@ export async function syncWhatsAppHistoryConversation(input: {
     }
   });
 
-  const conversation =
+  const latestMessagePreview = sortedMessages[sortedMessages.length - 1]
+    ? sanitizeSyncedMessageText(getSyncedMessageBody(sortedMessages[sortedMessages.length - 1]))
+    : null;
+  const existingConversation =
     (await prisma.conversation.findFirst({
       where: {
         workspaceId: input.workspaceId,
@@ -292,22 +367,23 @@ export async function syncWhatsAppHistoryConversation(input: {
         updatedAt: "desc"
       }
     })) ??
+    null;
+  const conversation =
+    existingConversation ??
     (await prisma.conversation.create({
       data: {
         workspaceId: input.workspaceId,
         contactId: contact.id,
+        whatsAppRemoteId: latestInboundRemoteId ?? null,
         status: ConversationStatus.OPEN,
         unreadCount: 0,
         isHotLead: false,
-        lastMessagePreview: sortedMessages[sortedMessages.length - 1]
-          ? getSyncedMessageBody(sortedMessages[sortedMessages.length - 1])
-          : null,
+        lastMessagePreview: latestMessagePreview,
         lastMessageAt: sortedMessages.length
           ? new Date((sortedMessages[sortedMessages.length - 1].timestamp ?? Date.now() / 1000) * 1000)
           : new Date()
       }
     }));
-
   let importedCount = 0;
 
   for (const message of sortedMessages) {
@@ -326,21 +402,55 @@ export async function syncWhatsAppHistoryConversation(input: {
     });
 
     if (exists) {
+      await upsertWhatsAppMessageEnvelopeFromPayload({
+        workspaceId: input.workspaceId,
+        conversationId: conversation.id,
+        messageId: exists.id,
+        providerMessageId,
+        body: sanitizeSyncedMessageText(getSyncedMessageBody(message)) || message.body || null,
+        direction: message.fromMe ? "OUTBOUND" : "INBOUND",
+        sentAt: new Date((message.timestamp ?? Date.now() / 1000) * 1000),
+        attachmentMimeType: message.attachmentMimeType ?? null,
+        attachmentName: message.attachmentName ?? null,
+        attachmentUrl: message.attachmentUrl ?? null,
+        rawPayload: message.rawPayload ?? message
+      });
       continue;
     }
 
-    const body = getSyncedMessageBody(message);
+    const body = sanitizeSyncedMessageText(getSyncedMessageBody(message));
+    if (!body) {
+      continue;
+    }
+
     const sentAt = new Date((message.timestamp ?? Date.now() / 1000) * 1000);
 
-    await prisma.message.create({
+    const createdMessage = await prisma.message.create({
       data: {
         conversationId: conversation.id,
         providerMessageId,
         direction: message.fromMe ? MessageDirection.OUTBOUND : MessageDirection.INBOUND,
         body,
+        attachmentMimeType: message.attachmentMimeType ?? null,
+        attachmentName: message.attachmentName ?? null,
+        attachmentUrl: message.attachmentUrl ?? null,
         rawPayload: JSON.stringify(message.rawPayload ?? message),
         sentAt
       }
+    });
+
+    await upsertWhatsAppMessageEnvelopeFromPayload({
+      workspaceId: input.workspaceId,
+      conversationId: conversation.id,
+      messageId: createdMessage.id,
+      providerMessageId,
+      body,
+      direction: message.fromMe ? "OUTBOUND" : "INBOUND",
+      sentAt,
+      attachmentMimeType: message.attachmentMimeType ?? null,
+      attachmentName: message.attachmentName ?? null,
+      attachmentUrl: message.attachmentUrl ?? null,
+      rawPayload: message.rawPayload ?? message
     });
 
     importedCount += 1;
@@ -357,22 +467,24 @@ export async function syncWhatsAppHistoryConversation(input: {
   const hotLead = inboundCount >= 3;
   const mergedTags = mergeWhatsappTag(contact.syncedTags ?? contact.tags);
 
-  await prisma.$transaction([
-    prisma.conversation.update({
+  await prisma.$transaction(async (tx) => {
+    await tx.conversation.update({
       where: {
         id: conversation.id
       },
       data: {
+        whatsAppRemoteId: latestInboundRemoteId ?? conversation.whatsAppRemoteId ?? null,
         status: ConversationStatus.OPEN,
         unreadCount: input.unreadCount ?? conversation.unreadCount,
         isHotLead: hotLead,
-        lastMessagePreview: latestMessage ? getSyncedMessageBody(latestMessage) : conversation.lastMessagePreview,
+        lastMessagePreview: latestMessage ? sanitizeSyncedMessageText(getSyncedMessageBody(latestMessage)) : conversation.lastMessagePreview,
         lastMessageAt: latestMessage
           ? new Date((latestMessage.timestamp ?? Date.now() / 1000) * 1000)
           : conversation.lastMessageAt
       }
-    }),
-    prisma.contact.update({
+    });
+
+    await tx.contact.update({
       where: {
         id: contact.id
       },
@@ -389,8 +501,19 @@ export async function syncWhatsAppHistoryConversation(input: {
           ? new Date((latestMessage.timestamp ?? Date.now() / 1000) * 1000)
           : contact.lastInteractionAt
       }
-    })
-  ]);
+    });
+
+    if (shouldRepairRemoteMatchedPhone && remoteMatchedContact) {
+      await tx.contact.update({
+        where: {
+          id: remoteMatchedContact.id
+        },
+        data: {
+          phone
+        }
+      });
+    }
+  });
 
   return {
     conversationId: conversation.id,
@@ -401,13 +524,18 @@ export async function syncWhatsAppHistoryConversation(input: {
 async function createInboundConversationMessage(input: {
   workspaceId: string;
   providerMessageId: string;
+  direction: "INBOUND" | "OUTBOUND";
   body: string;
+  attachmentMimeType?: string | null;
+  attachmentName?: string | null;
+  attachmentUrl?: string | null;
   sentAt: Date;
   phone?: string;
   displayName?: string;
   photoUrl?: string;
   conversationId?: string;
   ignoreAutomationPause?: boolean;
+  isTest?: boolean;
   rawPayload: unknown;
 }) {
   const existingMessage = await prisma.message.findUnique({
@@ -425,8 +553,71 @@ async function createInboundConversationMessage(input: {
 
   let contactId = "";
   let conversationId = "";
+  const inboundRemoteId = extractWhatsAppRemoteId(input.rawPayload, input.phone);
 
-  if (input.conversationId) {
+  if (!input.conversationId && inboundRemoteId) {
+    const existingConversationByRemote = await prisma.conversation.findFirst({
+      where: {
+        workspaceId: input.workspaceId,
+        whatsAppRemoteId: inboundRemoteId
+      },
+      include: {
+        contact: true
+      }
+    });
+
+    if (existingConversationByRemote) {
+      contactId = existingConversationByRemote.contactId;
+      conversationId = existingConversationByRemote.id;
+
+      if (input.displayName || input.photoUrl) {
+        const syncedDisplayName = input.displayName;
+        await prisma.contact.update({
+          where: {
+            id: existingConversationByRemote.contactId
+          },
+          data: {
+            ...(input.displayName
+              ? {
+                  ...(existingConversationByRemote.contact.displayNameManualOverride
+                    ? {}
+                    : { displayName: syncedDisplayName }),
+                  syncedDisplayName
+                }
+              : {}),
+            ...(input.photoUrl ? { photoUrl: input.photoUrl } : {})
+          }
+        });
+      }
+
+      if (input.phone && input.phone !== existingConversationByRemote.contact.phone) {
+        const conflictingContact = await prisma.contact.findUnique({
+          where: {
+            workspaceId_phone: {
+              workspaceId: input.workspaceId,
+              phone: input.phone
+            }
+          },
+          select: {
+            id: true
+          }
+        });
+
+        if (!conflictingContact || conflictingContact.id === existingConversationByRemote.contactId) {
+          await prisma.contact.update({
+            where: {
+              id: existingConversationByRemote.contactId
+            },
+            data: {
+              phone: input.phone
+            }
+          });
+        }
+      }
+    }
+  }
+
+  if (!conversationId && input.conversationId) {
     const existingConversation = await prisma.conversation.findFirst({
       where: {
         id: input.conversationId,
@@ -444,22 +635,26 @@ async function createInboundConversationMessage(input: {
     contactId = existingConversation.contactId;
     conversationId = existingConversation.id;
 
-    if (input.displayName && input.displayName !== existingConversation.contact.displayName) {
+    if (input.displayName || input.photoUrl) {
       const syncedDisplayName = input.displayName;
       await prisma.contact.update({
         where: {
           id: existingConversation.contactId
         },
         data: {
-          ...(existingConversation.contact.displayNameManualOverride
-            ? {}
-            : { displayName: syncedDisplayName }),
-          syncedDisplayName,
+          ...(input.displayName
+            ? {
+                ...(existingConversation.contact.displayNameManualOverride
+                  ? {}
+                  : { displayName: syncedDisplayName }),
+                syncedDisplayName
+              }
+            : {}),
           ...(input.photoUrl ? { photoUrl: input.photoUrl } : {})
         }
       });
     }
-  } else {
+  } else if (!conversationId) {
     if (!input.phone) {
       throw new Error("Phone is required when no conversation is selected.");
     }
@@ -497,6 +692,12 @@ async function createInboundConversationMessage(input: {
             }
           : {}),
         ...(input.photoUrl ? { photoUrl: input.photoUrl } : existingContact?.photoUrl ? { photoUrl: existingContact.photoUrl } : {}),
+        ...(input.isTest
+          ? {
+              tags: mergeTags(existingContact?.tags ?? null, ["whatsapp", "simulated", "automation-test"]).join(", "),
+              syncedTags: mergeTags(existingContact?.syncedTags ?? null, ["whatsapp", "simulated", "automation-test"]).join(", ")
+            }
+          : {}),
         lastInteractionAt: input.sentAt
       },
       create: {
@@ -505,8 +706,8 @@ async function createInboundConversationMessage(input: {
         syncedDisplayName: input.displayName || input.phone,
         phone: input.phone,
         photoUrl: input.photoUrl || null,
-        tags: "whatsapp, simulated",
-        syncedTags: "whatsapp, simulated",
+        tags: input.isTest ? "whatsapp, simulated, automation-test" : "whatsapp, simulated",
+        syncedTags: input.isTest ? "whatsapp, simulated, automation-test" : "whatsapp, simulated",
         lastInteractionAt: input.sentAt
       }
     });
@@ -525,6 +726,7 @@ async function createInboundConversationMessage(input: {
         data: {
           workspaceId: input.workspaceId,
           contactId: contact.id,
+          whatsAppRemoteId: inboundRemoteId ?? null,
           status: ConversationStatus.OPEN,
           unreadCount: 0,
           isHotLead: false,
@@ -536,6 +738,8 @@ async function createInboundConversationMessage(input: {
     contactId = contact.id;
     conversationId = conversation.id;
   }
+
+  let createdMessageId = "";
 
   await prisma.$transaction(async (tx) => {
     const conversation = await tx.conversation.findUnique({
@@ -551,18 +755,24 @@ async function createInboundConversationMessage(input: {
       throw new Error("Conversation not found.");
     }
 
-    await tx.message.create({
+    const createdMessage = await tx.message.create({
       data: {
         conversationId,
         providerMessageId: input.providerMessageId,
-        direction: MessageDirection.INBOUND,
+        direction:
+          input.direction === "OUTBOUND" ? MessageDirection.OUTBOUND : MessageDirection.INBOUND,
         body: input.body,
+        attachmentMimeType: input.attachmentMimeType ?? null,
+        attachmentName: input.attachmentName ?? null,
+        attachmentUrl: input.attachmentUrl ?? null,
         rawPayload: JSON.stringify(input.rawPayload),
         sentAt: input.sentAt
       }
     });
+    createdMessageId = createdMessage.id;
 
-    const nextUnreadCount = conversation.unreadCount + 1;
+    const nextUnreadCount =
+      input.direction === "OUTBOUND" ? conversation.unreadCount : conversation.unreadCount + 1;
     const hotLead = await shouldMarkHotLead(tx, input.workspaceId, conversationId, contactId);
 
     await tx.conversation.update({
@@ -570,6 +780,7 @@ async function createInboundConversationMessage(input: {
         id: conversationId
       },
       data: {
+        whatsAppRemoteId: inboundRemoteId ?? undefined,
         status: ConversationStatus.OPEN,
         unreadCount: nextUnreadCount,
         isHotLead: hotLead,
@@ -589,17 +800,33 @@ async function createInboundConversationMessage(input: {
     });
   });
 
+  await upsertWhatsAppMessageEnvelopeFromPayload({
+    workspaceId: input.workspaceId,
+    conversationId,
+    messageId: createdMessageId || null,
+    providerMessageId: input.providerMessageId,
+    body: input.body,
+    direction: input.direction ?? "INBOUND",
+    sentAt: input.sentAt,
+    attachmentMimeType: input.attachmentMimeType ?? null,
+    attachmentName: input.attachmentName ?? null,
+    attachmentUrl: input.attachmentUrl ?? null,
+    rawPayload: input.rawPayload
+  });
+
   await processInboundAutomation({
     workspaceId: input.workspaceId,
     conversationId,
     inboundText: input.body,
     sentAt: input.sentAt,
-    ignorePausedState: input.ignoreAutomationPause
+    ignorePausedState: input.ignoreAutomationPause,
+    includeDisabledRules: input.isTest
   });
 
   return {
     conversationId,
-    providerMessageId: input.providerMessageId
+    providerMessageId: input.providerMessageId,
+    messageId: createdMessageId || null
   };
 }
 
@@ -632,12 +859,52 @@ async function shouldMarkHotLead(
 
 function getSyncedMessageBody(message: {
   body?: string | null;
+  caption?: string | null;
+  mimetype?: string | null;
   type?: string | null;
   hasMedia?: boolean;
+  rawPayload?: unknown;
 }) {
   const body = message.body?.trim();
   if (body) {
+    if (isRestrictedPrimaryDeviceOnlyMessage(body)) {
+      return "[Security message visible only on primary device]";
+    }
+
+    if (!isEmbeddedMediaPreviewText(body)) {
+      return body;
+    }
+  }
+
+  const caption = message.caption?.trim();
+  if (caption) {
+    return caption;
+  }
+
+  const mimetype = message.mimetype?.trim().toLowerCase();
+  if (mimetype?.startsWith("video/")) {
+    return "[Video]";
+  }
+
+  if (mimetype?.startsWith("image/")) {
+    return "[Image]";
+  }
+
+  if (mimetype?.startsWith("audio/")) {
+    return "[Audio]";
+  }
+
+  if (mimetype === "application/pdf" || mimetype?.startsWith("application/")) {
+    return "[Document]";
+  }
+
+  if (body) {
     return body;
+  }
+
+  const callPreview = getSyncedCallPreview(message);
+  if (callPreview) {
+    return callPreview;
   }
 
   switch (message.type) {
@@ -654,9 +921,123 @@ function getSyncedMessageBody(message: {
       return "[Sticker]";
     case "location":
       return "[Location]";
+    case "contact":
+    case "vcard":
+    case "multi_vcard":
+      return "[Contact]";
+    case "poll_creation":
+    case "poll":
+      return "[Poll]";
+    case "revoked":
+      return "[Deleted message]";
+    case "reaction":
+      return "[Reaction]";
+    case "call_log":
+      return "[Call]";
+    case "e2e_notification":
+    case "notification_template":
+      return "[System message or security content visible only on primary device]";
     default:
-      return message.hasMedia ? "[Media]" : "[Unsupported message]";
+      return message.hasMedia ? "[Media]" : formatUnknownSyncedMessageType(message.type);
   }
+}
+
+function isRestrictedPrimaryDeviceOnlyMessage(body: string) {
+  const normalized = body.trim().toLowerCase();
+
+  return (
+    normalized === "[biz content placeholder]" ||
+    normalized.includes("you received a one-time passcode") ||
+    normalized.includes("you can only see it on your primary device") ||
+    normalized.includes("for added security")
+  );
+}
+
+function isEmbeddedMediaPreviewText(body: string) {
+  const compact = body.replace(/\s+/g, "");
+
+  if (compact.length < 512) {
+    return false;
+  }
+
+  return (
+    compact.startsWith("/9j/") ||
+    compact.startsWith("iVBORw0KGgo") ||
+    compact.startsWith("R0lGOD") ||
+    compact.startsWith("UklGR")
+  );
+}
+
+function formatUnknownSyncedMessageType(type?: string | null) {
+  const normalized = type?.trim();
+  if (!normalized) {
+    return "[Unsupported message]";
+  }
+
+  const parts = normalized
+    .split(/[_-]+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return "[Unsupported message]";
+  }
+
+  return `[${parts
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")}]`;
+}
+
+function sanitizeSyncedMessageText(value?: string | null) {
+  const source = value?.replace(/\r\n/g, "\n").trim() ?? "";
+  if (!source) {
+    return "";
+  }
+
+  const cleaned = source
+    .replace(/\[\s*\]/g, " ")
+    .replace(/\[biz content placeholder\]/gi, " ")
+    .replace(/\[security message visible only on primary device\]/gi, " ")
+    .replace(/\[system message or security content visible only on primary device\]/gi, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  return cleaned;
+}
+
+function getSyncedCallPreview(message: {
+  type?: string | null;
+  rawPayload?: unknown;
+}) {
+  const rawPayload =
+    message.rawPayload && typeof message.rawPayload === "object"
+      ? (message.rawPayload as Record<string, unknown>)
+      : null;
+  const normalizedType = message.type?.trim().toLowerCase() ?? "";
+
+  const isExplicitCallType =
+    normalizedType === "call_log" || normalizedType === "call" || normalizedType.endsWith("_call");
+  const isUntypedCallPayload =
+    !normalizedType &&
+    Boolean(
+      rawPayload &&
+        (rawPayload.callDuration !== undefined ||
+          rawPayload.callCreator !== undefined ||
+          rawPayload.callParticipants !== undefined ||
+          rawPayload.callSilenceReason !== undefined ||
+          rawPayload.isCallLink !== undefined)
+    );
+  const isCallPayload = isExplicitCallType || isUntypedCallPayload;
+
+  if (!isCallPayload) {
+    return null;
+  }
+
+  return rawPayload?.isVideoCall === true || normalizedType.includes("video")
+    ? "[Video call]"
+    : "[Voice call]";
 }
 
 function mergeWhatsappTag(current?: string | null) {
@@ -668,4 +1049,70 @@ function mergeWhatsappTag(current?: string | null) {
   );
   tags.add("whatsapp");
   return Array.from(tags).join(", ");
+}
+
+function mergeTags(current?: string | null, next: string[] = []) {
+  return Array.from(
+    new Set(
+      [
+        ...(current ?? "")
+          .split(",")
+          .map((tag) => tag.trim())
+          .filter(Boolean),
+        ...next.map((tag) => tag.trim()).filter(Boolean)
+      ].filter(Boolean)
+    )
+  );
+}
+
+function extractWhatsAppRemoteId(rawPayload: unknown, phone?: string | null) {
+  const parsed = rawPayload && typeof rawPayload === "object" ? (rawPayload as Record<string, unknown>) : null;
+  const candidates = [
+    parsed?.chatId,
+    parsed?.remote,
+    parsed?.from,
+    parsed?.author,
+    parsed?.id && typeof parsed.id === "object" ? (parsed.id as Record<string, unknown>).remote : null,
+    parsed?.id && typeof parsed.id === "object" ? (parsed.id as Record<string, unknown>)._serialized : null
+  ];
+  const resolvedCandidates: string[] = [];
+
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") {
+      continue;
+    }
+
+    const trimmed = candidate.trim();
+    if (/@(?:lid|c\.us|g\.us)$/.test(trimmed)) {
+      resolvedCandidates.push(trimmed);
+      continue;
+    }
+
+    const serializedMatch = trimmed.match(/^false_(.+@(?:lid|c\.us|g\.us))_/);
+    if (serializedMatch) {
+      resolvedCandidates.push(serializedMatch[1]);
+    }
+  }
+
+  const preferredGroupCandidate = resolvedCandidates.find((candidate) => candidate.endsWith("@g.us"));
+  if (preferredGroupCandidate) {
+    return preferredGroupCandidate;
+  }
+
+  if (resolvedCandidates.length > 0) {
+    return resolvedCandidates[0];
+  }
+
+  const normalizedPhone = phone ? normalizeStoredPhone(phone) : null;
+  return normalizedPhone ? `${normalizedPhone}@c.us` : null;
+}
+
+function readStringField(value: unknown, key: string) {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  return typeof record?.[key] === "string" ? (record[key] as string) : null;
+}
+
+function readBooleanField(value: unknown, key: string) {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+  return typeof record?.[key] === "boolean" ? (record[key] as boolean) : null;
 }

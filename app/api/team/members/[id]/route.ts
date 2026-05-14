@@ -1,6 +1,6 @@
-import { AgentRole, AgentStatus } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { removeWorkspaceMember, updateWorkspaceMember } from "@/lib/team";
+import { AgentRole, AgentStatus } from "@/lib/db-types";
 
 type RouteContext = {
   params: Promise<{
@@ -14,6 +14,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const body = (await request.json()) as {
       role?: AgentRole;
       status?: AgentStatus;
+      phone?: string | null;
     };
 
     if (!body.role || !Object.values(AgentRole).includes(body.role)) {
@@ -27,7 +28,8 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const member = await updateWorkspaceMember({
       agentId: id,
       role: body.role,
-      status: body.status
+      status: body.status,
+      phone: body.phone ?? null
     });
 
     return NextResponse.json({ member }, { status: 200 });

@@ -9,6 +9,7 @@ type TeamMember = {
   id: string;
   name: string;
   email: string;
+  phone: string | null;
   role: string;
   status: string;
   isCurrentManager: boolean;
@@ -27,7 +28,7 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
   const { success } = useToast();
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, { role: string; status: string }>>({});
+  const [drafts, setDrafts] = useState<Record<string, { role: string; status: string; phone: string }>>({});
 
   useEffect(() => {
     setDrafts(
@@ -36,30 +37,33 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
           member.id,
           {
             role: member.role,
-            status: member.status
+            status: member.status,
+            phone: member.phone ?? ""
           }
         ])
       )
     );
   }, [members]);
 
-  const updateDraft = (memberId: string, patch: Partial<{ role: string; status: string }>) => {
+  const updateDraft = (memberId: string, patch: Partial<{ role: string; status: string; phone: string }>) => {
     setDrafts((current) => ({
       ...current,
       [memberId]: {
         role: current[memberId]?.role ?? members.find((member) => member.id === memberId)?.role ?? "AGENT",
         status: current[memberId]?.status ?? members.find((member) => member.id === memberId)?.status ?? "ACTIVE",
+        phone: current[memberId]?.phone ?? members.find((member) => member.id === memberId)?.phone ?? "",
         ...patch
       }
     }));
   };
 
   const saveMember = async (member: TeamMember) => {
-    const draft = drafts[member.id] ?? { role: member.role, status: member.status };
+    const draft = drafts[member.id] ?? { role: member.role, status: member.status, phone: member.phone ?? "" };
     const nextRole = draft.role;
     const nextStatus = draft.status;
+    const nextPhone = draft.phone.trim();
 
-    if (nextRole === member.role && nextStatus === member.status) {
+    if (nextRole === member.role && nextStatus === member.status && nextPhone === (member.phone ?? "")) {
       return;
     }
 
@@ -82,7 +86,8 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
         },
         body: JSON.stringify({
           role: nextRole,
-          status: nextStatus
+          status: nextStatus,
+          phone: nextPhone || null
         })
       });
 
@@ -148,6 +153,7 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
             <div className="team-member-identity">
               <strong>{member.name}</strong>
               <span className="table-subtle">{member.email}</span>
+              <span className="table-subtle">{member.phone ? `WhatsApp: ${member.phone}` : "WhatsApp not set"}</span>
               <span className={`team-availability-pill ${member.availabilityTone}`}>{member.availabilityLabel}</span>
             </div>
             <div className="team-member-controls">
@@ -175,6 +181,16 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
                   <option value="AWAY">Away</option>
                 </select>
               </label>
+              <label className="contact-assignment-label">
+                <span>WhatsApp</span>
+                <input
+                  className="lead-record-input contact-assignment-select"
+                  disabled={isPending}
+                  onChange={(event) => updateDraft(member.id, { phone: event.target.value })}
+                  placeholder="+60123456789"
+                  value={drafts[member.id]?.phone ?? member.phone ?? ""}
+                />
+              </label>
             </div>
             <div className="team-member-actions">
               <button
@@ -182,7 +198,8 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
                 disabled={
                   isPending ||
                   ((drafts[member.id]?.role ?? member.role) === member.role &&
-                    (drafts[member.id]?.status ?? member.status) === member.status)
+                    (drafts[member.id]?.status ?? member.status) === member.status &&
+                    (drafts[member.id]?.phone ?? member.phone ?? "") === (member.phone ?? ""))
                 }
                 onClick={() => saveMember(member)}
                 type="button"

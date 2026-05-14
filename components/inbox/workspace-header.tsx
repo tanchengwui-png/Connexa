@@ -13,6 +13,7 @@ type WorkspaceHeaderProps = {
 
 const FILTER_COPY: Record<InboxFilterKey, string> = {
   all: "All live conversations across the shared inbox.",
+  "assigned-others": "Threads currently owned by other teammates.",
   hot: "Priority conversations that need operator attention now.",
   mine: "Threads currently assigned to you.",
   unassigned: "Threads waiting for ownership.",
@@ -38,16 +39,11 @@ export function WorkspaceHeader({
       </div>
 
       <div className="inbox-topbar-side">
-        {canSimulateInbound || onToggleDetails ? (
+        {onToggleDetails ? (
           <div className="inbox-topbar-actions">
             {onToggleDetails ? (
               <button className="button button-secondary compact-button" onClick={onToggleDetails} type="button">
                 {isDetailsVisible ? "Hide details" : "Show details"}
-              </button>
-            ) : null}
-            {canSimulateInbound ? (
-              <button className="button button-secondary compact-button" onClick={onOpenSimulateInbound} type="button">
-                Simulate inbound
               </button>
             ) : null}
           </div>

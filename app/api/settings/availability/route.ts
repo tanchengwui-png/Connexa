@@ -1,8 +1,8 @@
-import { AvailabilityOverrideType } from "@prisma/client";
 import { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
 import { saveAgentAvailability } from "@/lib/availability";
+import { AvailabilityOverrideType } from "@/lib/db-types";
 
 export async function POST(request: NextRequest) {
   try {

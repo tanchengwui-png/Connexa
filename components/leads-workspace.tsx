@@ -7,21 +7,29 @@ type LeadSummary = {
   id: string;
   name: string;
   phone: string;
+  title: string;
   project: string;
   stage: string;
+  pipelineId: string | null;
+  pipelineStageKey: string | null;
   stageLabel: string;
   priority: string;
   priorityLabel: string;
   ownerId: string | null;
   ownerName: string | null;
   preferredArea: string | null;
-  budget: number | null;
+  budget: string | null;
   financingStatus: string | null;
+  source: string;
   sourceDetail: string;
+  value: number | null;
+  currency: string;
+  note: string | null;
   nextActionAtIso: string | null;
   nextActionLabel: string;
   lastActivityLabel: string;
   productName: string | null;
+  customSummary: string;
   signal: string;
 };
 
@@ -39,8 +47,8 @@ type LeadsWorkspaceProps = {
 const STAGE_OPTIONS = [
   { value: "ALL", label: "All stages" },
   { value: "NEW_LEAD", label: "New lead" },
+  { value: "CONTACTED", label: "Contacted" },
   { value: "QUALIFIED", label: "Qualified" },
-  { value: "SITE_VISIT_BOOKED", label: "Site visit booked" },
   { value: "FOLLOW_UP", label: "Follow-up" },
   { value: "NEGOTIATION", label: "Negotiation" },
   { value: "CLOSED_WON", label: "Closed won" },
@@ -69,9 +77,9 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
       const matchesQuery =
         !normalizedQuery ||
         lead.name.toLowerCase().includes(normalizedQuery) ||
-        lead.project.toLowerCase().includes(normalizedQuery) ||
+        lead.title.toLowerCase().includes(normalizedQuery) ||
         lead.phone.toLowerCase().includes(normalizedQuery) ||
-        (lead.preferredArea ?? "").toLowerCase().includes(normalizedQuery);
+        (lead.customSummary ?? "").toLowerCase().includes(normalizedQuery);
 
       const matchesStage = stageFilter === "ALL" || lead.stage === stageFilter;
       const matchesOwner = ownerFilter === "ALL" || (ownerFilter === "UNASSIGNED" ? !lead.ownerId : lead.ownerId === ownerFilter);
@@ -94,8 +102,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
         body: JSON.stringify({
           ownerId: patch.ownerId !== undefined ? patch.ownerId : lead.ownerId,
           priority: patch.priority ?? lead.priority,
-          stage: patch.stage ?? lead.stage,
-          project: lead.project
+          stage: patch.stage ?? lead.stage
         })
       });
 
@@ -125,7 +132,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
         <input
           className="search-input"
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search lead, phone, project, or area..."
+          placeholder="Search lead, phone, source, or custom fields..."
           type="search"
           value={query}
         />
@@ -165,12 +172,13 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
                 <div className="lead-workspace-project">
                   <span className="lead-chip">{lead.stageLabel}</span>
                   <span className="lead-chip">{lead.priorityLabel}</span>
+                  {lead.value ? <span className="lead-chip">{lead.currency} {lead.value.toLocaleString()}</span> : null}
                   {lead.productName ? <span className="lead-chip">{lead.productName}</span> : null}
                 </div>
 
                 <div className="lead-workspace-copy">
-                  <strong>{lead.project}</strong>
-                  <span>{lead.preferredArea ?? "Area not captured"} • {lead.financingStatus ?? "Financing not captured"}</span>
+                  <strong>{lead.title}</strong>
+                  <span>{lead.customSummary || "No custom fields captured"}</span>
                   <span>{lead.nextActionLabel} • {lead.sourceDetail}</span>
                   <p>{lead.signal}</p>
                 </div>

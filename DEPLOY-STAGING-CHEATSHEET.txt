@@ -11,7 +11,6 @@ git clone https://github.com/tanchengwui-png/Connexa.git repo
 cd repo
 git checkout develop
 
-mkdir -p ../data/prisma
 mkdir -p ../data/wwebjs_auth
 
 Pull latest from staging branch
@@ -30,7 +29,6 @@ Update at least:
 - APP_ENCRYPTION_KEY
 - OUTBOUND_WORKER_TOKEN
 - SENDER_SERVICE_TOKEN
-- WORKSPACE_ID after seed
 
 Start staging stack
 
@@ -39,15 +37,7 @@ docker compose -f docker-compose.stg.yml --env-file .env up -d --build
 
 Seed database first time
 
-docker compose -f docker-compose.stg.yml --env-file .env exec web npm run db:seed
-
-Get workspace id
-
-docker compose -f docker-compose.stg.yml --env-file .env exec web node -e "const Database=require('better-sqlite3'); const db=new Database('prisma/dev.db'); console.log(db.prepare('select id from Workspace limit 1').get().id)"
-
-Put that value into .env as WORKSPACE_ID, then rebuild/restart:
-
-docker compose -f docker-compose.stg.yml --env-file .env up -d --build
+docker compose -f docker-compose.stg.yml --env-file .env exec web npm run db:seed:demo
 
 Check logs
 
@@ -82,7 +72,7 @@ WhatsApp setup after deploy
 Important persistent paths
 
 DB:
-/srv/recurvos/staging/connexa/data/prisma
+docker volume inspect connexa_stg_postgres_data
 
 WhatsApp auth:
 /srv/recurvos/staging/connexa/data/wwebjs_auth

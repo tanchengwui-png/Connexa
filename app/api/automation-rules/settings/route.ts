@@ -24,6 +24,7 @@ export async function PATCH(request: NextRequest) {
       decisionFlowYesTags?: string[];
       decisionFlowNoTags?: string[];
       workflowFlowEnabled?: boolean;
+      activeWorkflowIds?: string[];
       activeWorkflowId?: string | null;
       propertyFlowEnabled?: boolean;
       propertyFlowPromptPurpose?: string;
@@ -51,6 +52,7 @@ export async function PATCH(request: NextRequest) {
       decisionFlowYesTags: body.decisionFlowYesTags ?? [],
       decisionFlowNoTags: body.decisionFlowNoTags ?? [],
       workflowFlowEnabled: body.workflowFlowEnabled ?? false,
+      activeWorkflowIds: body.activeWorkflowIds ?? [],
       activeWorkflowId: body.activeWorkflowId ?? null,
       propertyFlowEnabled: body.propertyFlowEnabled ?? false,
       propertyFlowPromptPurpose: body.propertyFlowPromptPurpose ?? "",

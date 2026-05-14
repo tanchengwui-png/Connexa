@@ -11,7 +11,7 @@ type WorkflowDraft = {
   }>;
   steps: Array<{
     id: string;
-    type: "ask" | "question" | "choice" | "action" | "end";
+    type: "ask" | "question" | "choice" | "action" | "delay" | "end";
     title?: string;
     prompt?: string;
     saveAs?: string | null;
@@ -22,6 +22,10 @@ type WorkflowDraft = {
     tags?: string[];
     assignOwnerId?: string | null;
     leadStage?: string | null;
+    delayMinutes?: number | null;
+    businessHoursOnly?: boolean;
+    cancelOnInbound?: boolean;
+    cancelOnHumanReply?: boolean;
     nextStepId?: string | null;
     fallbackReply?: string | null;
     fallbackNextStepId?: string | null;
@@ -107,6 +111,15 @@ export function WorkflowTestPanel({ value }: WorkflowTestPanelProps) {
           kind: "automation",
           text: formatActionStep(step),
           stepId: step.id
+        });
+        cursor = step.nextStepId ?? WORKFLOW_END_ID;
+        continue;
+      }
+
+      if (step.type === "delay") {
+        nextEntries.push({
+          kind: "system",
+          text: `Delay ${step.delayMinutes ?? 60} minute${(step.delayMinutes ?? 60) === 1 ? "" : "s"}, then continue.`
         });
         cursor = step.nextStepId ?? WORKFLOW_END_ID;
         continue;

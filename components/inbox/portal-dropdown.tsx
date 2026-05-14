@@ -15,6 +15,7 @@ type PortalDropdownProps = {
   onClose: () => void;
   open: boolean;
   side?: "bottom" | "top";
+  zIndex?: number;
 };
 
 type DropdownPosition = {
@@ -35,7 +36,8 @@ export function PortalDropdown({
   offset = 10,
   onClose,
   open,
-  side = "bottom"
+  side = "bottom",
+  zIndex = INBOX_LAYERS.dropdown
 }: PortalDropdownProps) {
   const dropdownRef = useRef<HTMLDivElement | null>(null);
   const [mounted, setMounted] = useState(false);
@@ -169,7 +171,7 @@ export function PortalDropdown({
         position: "fixed",
         top: position?.top ?? VIEWPORT_PADDING,
         visibility: position ? "visible" : "hidden",
-        zIndex: INBOX_LAYERS.dropdown
+        zIndex
       }}
     >
       {children}
