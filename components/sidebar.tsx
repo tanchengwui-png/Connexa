@@ -3,7 +3,7 @@ import { LogoutButton } from "@/components/logout-button";
 import { WorkspaceSwitcher } from "@/components/workspace-switcher";
 import { getCurrentAgent, getCurrentAgentMemberships } from "@/lib/auth/current-user";
 
-const workspaceNavItems = [
+export const workspaceNavItems = [
   { label: "Overview", href: "/workspace" },
   { label: "Inbox", href: "/inbox" },
   { label: "Scheduled", href: "/scheduled-messages" },
@@ -15,7 +15,7 @@ const workspaceNavItems = [
   { label: "Calendar", href: "/calendar" }
 ];
 
-const setupNavItems = [
+export const setupNavItems = [
   { label: "Team", href: "/team" },
   { label: "Quick Replies", href: "/quick-replies" },
   { label: "Media Library", href: "/media-library" },

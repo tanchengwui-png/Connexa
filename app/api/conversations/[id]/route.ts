@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
-import { deleteConversation, updateConversation, updateConversationTags } from "@/lib/conversations";
+import { deleteConversation, updateConversation, updateConversationMute, updateConversationTags } from "@/lib/conversations";
 import { findAgentInWorkspace } from "@/lib/db-contacts";
 import { getInboxData } from "@/lib/inbox";
 import { ConversationStatus } from "@/lib/db-types";
+import { isConversationWhatsAppIncognitoModeEnabled } from "@/lib/whatsapp-channel";
+import { sendWhatsAppChatSeen } from "@/lib/whatsapp-runtime";
 
 type RouteContext = {
   params: Promise<{
@@ -11,11 +13,12 @@ type RouteContext = {
   }>;
 };
 
-export async function GET(_request: NextRequest, context: RouteContext) {
+export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const agent = await requireCurrentApiAgent();
     const { id } = await context.params;
-    const { selectedConversation: conversation } = await getInboxData(id);
+    const channelId = request.nextUrl.searchParams.get("channelId");
+    const { selectedConversation: conversation } = await getInboxData(id, channelId);
 
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found." }, { status: 404 });
@@ -44,12 +47,31 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       assigneeId?: string | null;
       teammateIds?: string[];
       snoozedUntil?: string | null;
+      snoozeReason?: string | null;
+      muteDuration?: "8h" | "1w" | "always" | null;
       tags?: string[];
       markAsRead?: boolean;
     };
 
     if (body.status !== undefined && !Object.values(ConversationStatus).includes(body.status)) {
       return NextResponse.json({ error: "Invalid conversation status." }, { status: 400 });
+    }
+
+    if (body.snoozedUntil) {
+      const nextSnoozeDate = new Date(body.snoozedUntil);
+      if (Number.isNaN(nextSnoozeDate.getTime()) || nextSnoozeDate.getTime() <= Date.now()) {
+        return NextResponse.json({ error: "Snooze time must be in the future." }, { status: 400 });
+      }
+    }
+
+    if (
+      body.muteDuration !== undefined &&
+      body.muteDuration !== null &&
+      body.muteDuration !== "8h" &&
+      body.muteDuration !== "1w" &&
+      body.muteDuration !== "always"
+    ) {
+      return NextResponse.json({ error: "Invalid mute duration." }, { status: 400 });
     }
 
     const teammateIds = Array.from(
@@ -63,17 +85,42 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       }
     }
 
+    const shouldSuppressReadState = body.markAsRead
+      ? await isConversationWhatsAppIncognitoModeEnabled({
+          workspaceId: agent.workspaceId,
+          conversationId: id
+        })
+      : false;
+
     const conversation = await updateConversation(id, {
       status: body.status,
       assigneeId: body.assigneeId,
       teammateIds: body.teammateIds === undefined ? undefined : teammateIds,
       snoozedUntil: body.snoozedUntil === undefined ? undefined : body.snoozedUntil ? new Date(body.snoozedUntil) : null,
-      unreadCount: body.markAsRead ? 0 : undefined
+      snoozeReason: body.snoozeReason,
+      unreadCount: body.markAsRead && !shouldSuppressReadState ? 0 : undefined
     });
+
+    const mutedConversation =
+      body.muteDuration !== undefined ? await updateConversationMute(id, body.muteDuration) : null;
 
     const tags = body.tags !== undefined ? await updateConversationTags(id, body.tags) : undefined;
 
-    return NextResponse.json({ conversation, tags });
+    if (body.markAsRead && !shouldSuppressReadState) {
+      void sendWhatsAppChatSeen({
+        workspaceId: agent.workspaceId,
+        channelId: typeof conversation?.channelId === "string" ? conversation.channelId : null,
+        conversationId: id
+      }).catch((error) => {
+        console.warn(
+          `[inbox] sendSeen failed for conversation ${id}: ${
+            error instanceof Error ? error.message : "Unknown sendSeen error."
+          }`
+        );
+      });
+    }
+
+    return NextResponse.json({ conversation: mutedConversation ?? conversation, tags });
   } catch (error) {
     return NextResponse.json(
       {

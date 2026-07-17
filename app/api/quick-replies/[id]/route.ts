@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
-import { deleteQuickReply, updateQuickReply } from "@/lib/quick-replies";
+import { deleteQuickReply, getQuickReplyById, updateQuickReply } from "@/lib/quick-replies";
 
 type RouteContext = {
   params: Promise<{
@@ -21,6 +21,30 @@ export async function DELETE(_request: Request, context: RouteContext) {
           error instanceof Error && error.message === "UNAUTHORIZED"
             ? "Unauthorized."
             : "Unable to delete quick reply."
+      },
+      { status: error instanceof Error && error.message === "UNAUTHORIZED" ? 401 : 400 }
+    );
+  }
+}
+
+export async function GET(_request: Request, context: RouteContext) {
+  try {
+    await requireCurrentApiAgent();
+    const { id } = await context.params;
+    const quickReply = await getQuickReplyById(id);
+
+    if (!quickReply) {
+      return NextResponse.json({ error: "Quick reply not found." }, { status: 404 });
+    }
+
+    return NextResponse.json({ quickReply });
+  } catch (error) {
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error && error.message === "UNAUTHORIZED"
+            ? "Unauthorized."
+            : "Unable to load quick reply."
       },
       { status: error instanceof Error && error.message === "UNAUTHORIZED" ? 401 : 400 }
     );

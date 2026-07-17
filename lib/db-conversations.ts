@@ -3,26 +3,55 @@ import { execute, queryMany, queryOne, transaction } from "@/lib/db";
 import { prisma } from "@/lib/prisma";
 
 const INBOX_VISIBLE_CONDITION = `COALESCE(c.tags, '') NOT ILIKE '%automation-test%'`;
-
+const SELF_CHAT_CONVERSATION_CONDITION = `NOT (
+  conv."whatsAppRemoteId" IS NOT NULL
+  AND conv."whatsAppRemoteId" NOT LIKE '%@g.us'
+  AND wac."phoneNumber" IS NOT NULL
+  AND regexp_replace(split_part(conv."whatsAppRemoteId", '@', 1), '[^0-9]', '', 'g')
+    = regexp_replace(wac."phoneNumber", '[^0-9]', '', 'g')
+)`;
+const ACTIVE_SNOOZE_CONDITION = `conv."snoozeStatus" = 'ACTIVE' AND conv."snoozedUntil" IS NOT NULL AND conv."snoozedUntil" > NOW()`;
+const CONVERSATION_HAS_VISIBLE_MESSAGE_CONDITION = `EXISTS (
+  SELECT 1
+  FROM "Message" visible_message
+  WHERE visible_message."conversationId" = conv.id
+    AND visible_message."deletedAt" IS NULL
+)`;
+const INBOX_ROW_CONDITION = `${INBOX_VISIBLE_CONDITION} AND ${SELF_CHAT_CONVERSATION_CONDITION} AND ${CONVERSATION_HAS_VISIBLE_MESSAGE_CONDITION}`;
+const MISSING_CHAT_STATE_COLUMNS = ['"isMuted"', '"muteExpiration"', '"isArchived"', '"isPinned"'] as const;
 export type ConversationListRow = {
   id: string;
+  channelId: string | null;
+  channelLabel: string | null;
   contactName: string;
   photoUrl: string | null;
   phone: string;
   isGroup: boolean;
+  tags: string;
   status: string;
   snoozedUntil: Date | null;
+  snoozeReason: string | null;
+  snoozeStatus: string | null;
+  snoozedById: string | null;
+  snoozedByName: string | null;
+  isMuted: boolean;
+  muteExpiration: Date | null;
+  isArchived: boolean;
+  isPinned: boolean;
   unreadCount: number;
   assigneeId: string | null;
   assigneeName: string | null;
   isHotLead: boolean;
   lastMessagePreview: string | null;
+  lastMessageDirection: string | null;
   lastMessageAt: Date;
 };
 
 export type ConversationHeaderRow = {
   id: string;
   workspaceId: string;
+  channelId: string | null;
+  channelLabel: string | null;
   contactId: string;
   contactName: string;
   photoUrl: string | null;
@@ -31,6 +60,14 @@ export type ConversationHeaderRow = {
   tags: string;
   status: string;
   snoozedUntil: Date | null;
+  snoozeReason: string | null;
+  snoozeStatus: string | null;
+  snoozedById: string | null;
+  snoozedByName: string | null;
+  isMuted: boolean;
+  muteExpiration: Date | null;
+  isArchived: boolean;
+  isPinned: boolean;
   assigneeId: string | null;
   assigneeName: string | null;
 };
@@ -55,6 +92,9 @@ export type ConversationMessageRow = {
   outboundJobStatus: string | null;
   providerMessageId: string | null;
   rawPayload: string | null;
+  deliveryStatus: string;
+  ack: number | null;
+  ackUpdatedAt: Date | null;
   whatsAppEnvelopeMentionedIdsJson: unknown;
   whatsAppEnvelopeGroupMentionsJson: unknown;
   whatsAppEnvelopeRawJson: unknown;
@@ -100,55 +140,197 @@ export type AgentNameRow = {
 };
 
 export async function listConversationRows(workspaceId: string) {
-  return queryMany<ConversationListRow>(
-    `SELECT
-        conv.id,
-        c."displayName" AS "contactName",
-        c."photoUrl" AS "photoUrl",
-        c.phone,
-        (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
-        conv.status,
-        conv."snoozedUntil",
-        conv."unreadCount",
-        a.id AS "assigneeId",
-        a.name AS "assigneeName",
-        (conv."isHotLead" OR c."isHotLead") AS "isHotLead",
-        conv."lastMessagePreview",
-        conv."lastMessageAt"
-      FROM "Conversation" conv
-      JOIN "Contact" c ON c.id = conv."contactId"
-      LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
-      WHERE conv."workspaceId" = $1
-        AND ${INBOX_VISIBLE_CONDITION}
-      ORDER BY conv."lastMessageAt" DESC`,
-    [workspaceId]
-  );
+  try {
+    return await queryMany<ConversationListRow>(
+      `SELECT
+          conv.id,
+          conv."channelId",
+          COALESCE(wac."displayName", wac."phoneNumber") AS "channelLabel",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us'
+              THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
+            ELSE c."displayName"
+          END AS "contactName",
+          c."photoUrl" AS "photoUrl",
+          c.phone,
+          (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
+          c.tags,
+          conv.status,
+          conv."snoozedUntil",
+          conv."snoozeReason",
+          conv."snoozeStatus",
+          conv."snoozedById",
+          sb.name AS "snoozedByName",
+          conv."isMuted",
+          conv."muteExpiration",
+          conv."isArchived",
+          conv."isPinned",
+          conv."unreadCount",
+          a.id AS "assigneeId",
+          a.name AS "assigneeName",
+          (conv."isHotLead" OR c."isHotLead") AS "isHotLead",
+          conv."lastMessagePreview",
+          lm.direction AS "lastMessageDirection",
+          conv."lastMessageAt"
+        FROM "Conversation" conv
+        JOIN "Contact" c ON c.id = conv."contactId"
+        LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+        LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
+        LEFT JOIN "Agent" sb ON sb.id = conv."snoozedById"
+        LEFT JOIN LATERAL (
+          SELECT m.direction
+          FROM "Message" m
+          WHERE m."conversationId" = conv.id
+          ORDER BY m."sentAt" DESC, m."createdAt" DESC, m.id DESC
+          LIMIT 1
+        ) lm ON TRUE
+        WHERE conv."workspaceId" = $1
+          AND ${INBOX_ROW_CONDITION}
+        ORDER BY conv."lastMessageAt" DESC`,
+      [workspaceId]
+    );
+  } catch (error) {
+    if (!isMissingConversationChatStateColumnError(error)) {
+      throw error;
+    }
+
+    return queryMany<ConversationListRow>(
+      `SELECT
+          conv.id,
+          conv."channelId",
+          COALESCE(wac."displayName", wac."phoneNumber") AS "channelLabel",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us'
+              THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
+            ELSE c."displayName"
+          END AS "contactName",
+          c."photoUrl" AS "photoUrl",
+          c.phone,
+          (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
+          c.tags,
+          conv.status,
+          conv."snoozedUntil",
+          conv."snoozeReason",
+          conv."snoozeStatus",
+          conv."snoozedById",
+          sb.name AS "snoozedByName",
+          false AS "isMuted",
+          NULL::timestamp AS "muteExpiration",
+          false AS "isArchived",
+          false AS "isPinned",
+          conv."unreadCount",
+          a.id AS "assigneeId",
+          a.name AS "assigneeName",
+          (conv."isHotLead" OR c."isHotLead") AS "isHotLead",
+          conv."lastMessagePreview",
+          lm.direction AS "lastMessageDirection",
+          conv."lastMessageAt"
+        FROM "Conversation" conv
+        JOIN "Contact" c ON c.id = conv."contactId"
+        LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+        LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
+        LEFT JOIN "Agent" sb ON sb.id = conv."snoozedById"
+        LEFT JOIN LATERAL (
+          SELECT m.direction
+          FROM "Message" m
+          WHERE m."conversationId" = conv.id
+          ORDER BY m."sentAt" DESC, m."createdAt" DESC, m.id DESC
+          LIMIT 1
+        ) lm ON TRUE
+        WHERE conv."workspaceId" = $1
+          AND ${INBOX_ROW_CONDITION}
+        ORDER BY conv."lastMessageAt" DESC`,
+      [workspaceId]
+    );
+  }
 }
 
 export async function findConversationHeader(conversationId: string, workspaceId: string, includeTest = false) {
-  return queryOne<ConversationHeaderRow>(
-    `SELECT
-        conv.id,
-        conv."workspaceId",
-        conv."contactId",
-        c."displayName" AS "contactName",
-        c."photoUrl" AS "photoUrl",
-        c.phone,
-        (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
-        c.tags,
-        conv.status,
-        conv."snoozedUntil",
-        a.id AS "assigneeId",
-        a.name AS "assigneeName"
-      FROM "Conversation" conv
-      JOIN "Contact" c ON c.id = conv."contactId"
-      LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
-      WHERE conv.id = $1
-        AND conv."workspaceId" = $2
-        ${includeTest ? "" : `AND ${INBOX_VISIBLE_CONDITION}`}
-      LIMIT 1`,
-    [conversationId, workspaceId]
-  );
+  try {
+    return await queryOne<ConversationHeaderRow>(
+      `SELECT
+          conv.id,
+          conv."workspaceId",
+          conv."channelId",
+          COALESCE(wac."displayName", wac."phoneNumber") AS "channelLabel",
+          conv."contactId",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us'
+              THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
+            ELSE c."displayName"
+          END AS "contactName",
+          c."photoUrl" AS "photoUrl",
+          c.phone,
+          (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
+          c.tags,
+          conv.status,
+          conv."snoozedUntil",
+          conv."snoozeReason",
+          conv."snoozeStatus",
+          conv."snoozedById",
+          sb.name AS "snoozedByName",
+          conv."isMuted",
+          conv."muteExpiration",
+          conv."isArchived",
+          conv."isPinned",
+          a.id AS "assigneeId",
+          a.name AS "assigneeName"
+        FROM "Conversation" conv
+        JOIN "Contact" c ON c.id = conv."contactId"
+        LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+        LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
+        LEFT JOIN "Agent" sb ON sb.id = conv."snoozedById"
+        WHERE conv.id = $1
+          AND conv."workspaceId" = $2
+          ${includeTest ? "" : `AND ${INBOX_ROW_CONDITION}`}
+        LIMIT 1`,
+      [conversationId, workspaceId]
+    );
+  } catch (error) {
+    if (!isMissingConversationChatStateColumnError(error)) {
+      throw error;
+    }
+
+    return queryOne<ConversationHeaderRow>(
+      `SELECT
+          conv.id,
+          conv."workspaceId",
+          conv."channelId",
+          COALESCE(wac."displayName", wac."phoneNumber") AS "channelLabel",
+          conv."contactId",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us'
+              THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
+            ELSE c."displayName"
+          END AS "contactName",
+          c."photoUrl" AS "photoUrl",
+          c.phone,
+          (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
+          c.tags,
+          conv.status,
+          conv."snoozedUntil",
+          conv."snoozeReason",
+          conv."snoozeStatus",
+          conv."snoozedById",
+          sb.name AS "snoozedByName",
+          false AS "isMuted",
+          NULL::timestamp AS "muteExpiration",
+          false AS "isArchived",
+          false AS "isPinned",
+          a.id AS "assigneeId",
+          a.name AS "assigneeName"
+        FROM "Conversation" conv
+        JOIN "Contact" c ON c.id = conv."contactId"
+        LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+        LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
+        LEFT JOIN "Agent" sb ON sb.id = conv."snoozedById"
+        WHERE conv.id = $1
+          AND conv."workspaceId" = $2
+          ${includeTest ? "" : `AND ${INBOX_ROW_CONDITION}`}
+        LIMIT 1`,
+      [conversationId, workspaceId]
+    );
+  }
 }
 
 export async function listConversationMessages(conversationId: string) {
@@ -167,14 +349,25 @@ export async function listConversationMessages(conversationId: string) {
         oj.status AS "outboundJobStatus",
         m."providerMessageId",
         m."rawPayload",
+        CASE
+          WHEN m.direction = 'OUTBOUND' AND COALESCE(we.ack, 0) >= 3 THEN 'read'
+          WHEN m.direction = 'OUTBOUND' AND COALESCE(we.ack, 0) >= 2 THEN 'delivered'
+          WHEN m.direction = 'OUTBOUND' AND COALESCE(we.ack, 0) >= 1 THEN 'sent'
+          WHEN m.direction = 'OUTBOUND' AND m."readAt" IS NOT NULL THEN 'read'
+          WHEN m.direction = 'OUTBOUND' AND m."deliveredAt" IS NOT NULL THEN 'delivered'
+          WHEN m.direction = 'OUTBOUND' AND m."providerMessageId" IS NOT NULL THEN 'sent'
+          ELSE 'pending'
+        END AS "deliveryStatus",
+        we.ack AS ack,
+        we."updatedAt" AS "ackUpdatedAt",
         we."mentionedIdsJson" AS "whatsAppEnvelopeMentionedIdsJson",
         we."groupMentionsJson" AS "whatsAppEnvelopeGroupMentionsJson",
         we."rawJson" AS "whatsAppEnvelopeRawJson",
-        m."replyToMessageId",
-        rm.body AS "replyToBody",
-        rm."attachmentName" AS "replyToAttachmentName",
+        COALESCE(m."replyToMessageId", qrm.id) AS "replyToMessageId",
+        COALESCE(rm.body, qrm.body) AS "replyToBody",
+        COALESCE(rm."attachmentName", qrm."attachmentName") AS "replyToAttachmentName",
         CASE
-          WHEN rm.direction = 'OUTBOUND' THEN COALESCE(ra.name, 'Team')
+          WHEN COALESCE(rm.direction, qrm.direction) = 'OUTBOUND' THEN COALESCE(ra.name, qa.name, 'Team')
           ELSE c."displayName"
         END AS "replyToSender",
         CASE
@@ -186,10 +379,24 @@ export async function listConversationMessages(conversationId: string) {
       JOIN "Conversation" conv ON conv.id = m."conversationId"
       JOIN "Contact" c ON c.id = conv."contactId"
       LEFT JOIN "Agent" a ON a.id = m."senderId"
-      LEFT JOIN "Message" rm ON rm.id = m."replyToMessageId"
-      LEFT JOIN "Agent" ra ON ra.id = rm."senderId"
-      LEFT JOIN "OutboundMessageJob" oj ON oj."messageId" = m.id
       LEFT JOIN "WhatsAppMessageEnvelope" we ON we."messageId" = m.id OR we."providerMessageId" = m."providerMessageId"
+      LEFT JOIN "Message" rm ON rm.id = m."replyToMessageId"
+      LEFT JOIN LATERAL (
+        SELECT qm.id, qm.body, qm."attachmentName", qm.direction, qm."senderId"
+        FROM "Message" qm
+        WHERE m."replyToMessageId" IS NULL
+          AND qm."conversationId" = m."conversationId"
+          AND we."quotedMessageId" IS NOT NULL
+          AND (
+            qm."providerMessageId" = we."quotedMessageId"
+            OR split_part(COALESCE(qm."providerMessageId", ''), '_', 3) = we."quotedMessageId"
+          )
+        ORDER BY qm."sentAt" DESC
+        LIMIT 1
+      ) qrm ON true
+      LEFT JOIN "Agent" ra ON ra.id = rm."senderId"
+      LEFT JOIN "Agent" qa ON qa.id = qrm."senderId"
+      LEFT JOIN "OutboundMessageJob" oj ON oj."messageId" = m.id
       WHERE m."conversationId" = $1
       ORDER BY m."sentAt" ASC`,
     [conversationId]
@@ -227,13 +434,58 @@ export async function listConversationNotes(conversationId: string) {
 }
 
 export async function findConversationForWorkspace(conversationId: string, workspaceId: string) {
-  return queryOne<{ id: string; contactId: string; workspaceId: string; assigneeId: string | null }>(
-    `SELECT id, "contactId", "workspaceId", "assigneeId"
-     FROM "Conversation"
-     WHERE id = $1 AND "workspaceId" = $2
-     LIMIT 1`,
-    [conversationId, workspaceId]
-  );
+  try {
+    return await queryOne<{
+      id: string;
+      contactId: string;
+      workspaceId: string;
+      assigneeId: string | null;
+      channelId: string | null;
+      snoozedUntil: Date | null;
+      snoozeReason: string | null;
+      snoozeStatus: string | null;
+      isMuted: boolean;
+      muteExpiration: Date | null;
+      isArchived: boolean;
+      isPinned: boolean;
+      unreadCount: number;
+    }>(
+      `SELECT id, "contactId", "workspaceId", "assigneeId", "channelId", "snoozedUntil", "snoozeReason", "snoozeStatus",
+              "isMuted", "muteExpiration", "isArchived", "isPinned", "unreadCount"
+       FROM "Conversation"
+       WHERE id = $1 AND "workspaceId" = $2
+       LIMIT 1`,
+      [conversationId, workspaceId]
+    );
+  } catch (error) {
+    if (!isMissingConversationChatStateColumnError(error)) {
+      throw error;
+    }
+
+    return queryOne<{
+      id: string;
+      contactId: string;
+      workspaceId: string;
+      assigneeId: string | null;
+      channelId: string | null;
+      snoozedUntil: Date | null;
+      snoozeReason: string | null;
+      snoozeStatus: string | null;
+      isMuted: boolean;
+      muteExpiration: Date | null;
+      isArchived: boolean;
+      isPinned: boolean;
+      unreadCount: number;
+    }>(
+      `SELECT id, "contactId", "workspaceId", "assigneeId", "channelId", "snoozedUntil", "snoozeReason", "snoozeStatus",
+              false AS "isMuted", NULL::timestamp AS "muteExpiration", false AS "isArchived",
+              false AS "isPinned", "unreadCount"
+       FROM "Conversation"
+       WHERE id = $1 AND "workspaceId" = $2
+       LIMIT 1`,
+      [conversationId, workspaceId]
+    );
+  }
 }
 
 export async function updateConversationRecord(
@@ -242,6 +494,13 @@ export async function updateConversationRecord(
     status?: string;
     assigneeId?: string | null;
     snoozedUntil?: Date | null;
+    snoozedById?: string | null;
+    snoozeReason?: string | null;
+    snoozeStatus?: string | null;
+    isMuted?: boolean;
+    muteExpiration?: Date | null;
+    isArchived?: boolean;
+    isPinned?: boolean;
     unreadCount?: number;
   }
  ) {
@@ -263,6 +522,41 @@ export async function updateConversationRecord(
     fields.push(`"snoozedUntil" = $${values.length}`);
   }
 
+  if (updates.snoozedById !== undefined) {
+    values.push(updates.snoozedById);
+    fields.push(`"snoozedById" = $${values.length}`);
+  }
+
+  if (updates.snoozeReason !== undefined) {
+    values.push(updates.snoozeReason);
+    fields.push(`"snoozeReason" = $${values.length}`);
+  }
+
+  if (updates.snoozeStatus !== undefined) {
+    values.push(updates.snoozeStatus);
+    fields.push(`"snoozeStatus" = $${values.length}`);
+  }
+
+  if (updates.isMuted !== undefined) {
+    values.push(updates.isMuted);
+    fields.push(`"isMuted" = $${values.length}`);
+  }
+
+  if (updates.muteExpiration !== undefined) {
+    values.push(updates.muteExpiration);
+    fields.push(`"muteExpiration" = $${values.length}`);
+  }
+
+  if (updates.isArchived !== undefined) {
+    values.push(updates.isArchived);
+    fields.push(`"isArchived" = $${values.length}`);
+  }
+
+  if (updates.isPinned !== undefined) {
+    values.push(updates.isPinned);
+    fields.push(`"isPinned" = $${values.length}`);
+  }
+
   if (updates.unreadCount !== undefined) {
     values.push(updates.unreadCount);
     fields.push(`"unreadCount" = $${values.length}`);
@@ -278,6 +572,18 @@ export async function updateConversationRecord(
      WHERE id = $1
      RETURNING *`,
     values
+  );
+}
+
+function isMissingConversationChatStateColumnError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  return MISSING_CHAT_STATE_COLUMNS.some(
+    (columnName) =>
+      error.message.includes(`column ${columnName} does not exist`) ||
+      error.message.includes(`column conv.${columnName.replace(/"/g, "")} does not exist`)
   );
 }
 
@@ -341,13 +647,14 @@ export async function getInboxWorkspaceSummary(workspaceId: string) {
   return queryOne<InboxWorkspaceSummaryRow>(
     `SELECT
         w."industryType",
-        COUNT(*) FILTER (WHERE conv.status = 'OPEN' AND ${INBOX_VISIBLE_CONDITION})::int AS "openCount",
-        COUNT(*) FILTER (WHERE conv.status = 'PENDING' AND ${INBOX_VISIBLE_CONDITION})::int AS "pendingCount",
-        COUNT(*) FILTER (WHERE conv."assigneeId" IS NULL AND ${INBOX_VISIBLE_CONDITION})::int AS "unassignedCount",
-        COUNT(*) FILTER (WHERE conv."isHotLead" = TRUE AND ${INBOX_VISIBLE_CONDITION})::int AS "hotLeadCount"
+        COUNT(*) FILTER (WHERE conv.status = 'OPEN' AND ${INBOX_ROW_CONDITION} AND NOT (${ACTIVE_SNOOZE_CONDITION}))::int AS "openCount",
+        COUNT(*) FILTER (WHERE conv.status = 'PENDING' AND ${INBOX_ROW_CONDITION} AND NOT (${ACTIVE_SNOOZE_CONDITION}))::int AS "pendingCount",
+        COUNT(*) FILTER (WHERE conv."assigneeId" IS NULL AND ${INBOX_ROW_CONDITION} AND NOT (${ACTIVE_SNOOZE_CONDITION}))::int AS "unassignedCount",
+        COUNT(*) FILTER (WHERE conv."isHotLead" = TRUE AND ${INBOX_ROW_CONDITION} AND NOT (${ACTIVE_SNOOZE_CONDITION}))::int AS "hotLeadCount"
       FROM "Workspace" w
       LEFT JOIN "Conversation" conv ON conv."workspaceId" = w.id
       LEFT JOIN "Contact" c ON c.id = conv."contactId"
+      LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
       WHERE w.id = $1
       GROUP BY w.id`,
     [workspaceId]

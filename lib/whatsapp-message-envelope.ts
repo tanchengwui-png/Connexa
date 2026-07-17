@@ -24,6 +24,7 @@ type CapturedQuotedSnapshot = {
 };
 
 type CapturedMediaSnapshot = {
+  mediaAssetId: string | null;
   mimetype: string | null;
   filename: string | null;
   filesize: number | null;
@@ -72,6 +73,7 @@ type CapturedEnvelope = {
 
 export async function captureWhatsAppMessageEnvelope(input: {
   workspaceId: string;
+  channelId?: string | null;
   message: Message;
   rawData?: unknown;
   conversationId?: string | null;
@@ -96,6 +98,18 @@ export async function captureWhatsAppMessageEnvelope(input: {
         media: downloadedMedia
       }).catch(() => null)
     : null;
+  const storedMediaAsset =
+    storedMedia
+      ? await prisma.workspaceMediaAsset.findFirst({
+          where: {
+            workspaceId: input.workspaceId,
+            storagePath: storedMedia.storagePath
+          },
+          select: {
+            id: true
+          }
+        }).catch(() => null)
+      : null;
 
   const envelope: CapturedEnvelope = {
     providerMessageId,
@@ -119,6 +133,7 @@ export async function captureWhatsAppMessageEnvelope(input: {
     selectedButtonId: readString(message, "selectedButtonId") ?? readString(rawRecord, "selectedButtonId"),
     selectedRowId: readString(message, "selectedRowId") ?? readString(rawRecord, "selectedRowId"),
     media: {
+      mediaAssetId: storedMediaAsset?.id ?? null,
       mimetype:
         downloadedMedia?.mimetype ??
         readString(message, "mimetype") ??
@@ -191,6 +206,7 @@ export async function captureWhatsAppMessageEnvelope(input: {
 
   const record = buildEnvelopeWriteData({
     workspaceId: input.workspaceId,
+    channelId: input.channelId ?? null,
     conversationId: input.conversationId,
     storedMessageId: input.storedMessageId,
     envelope
@@ -199,7 +215,8 @@ export async function captureWhatsAppMessageEnvelope(input: {
 
   await execute(
     `INSERT INTO "WhatsAppMessageEnvelope" (
-      id, "workspaceId", "conversationId", "messageId", "providerMessageId",
+      id, "workspaceId", "channelId", "conversationId", "messageId", "providerMessageId",
+      "mediaAssetId",
       "from", "to", "author", ack, "messageTimestamp", "messageType", body,
       "fromMe", "hasMedia", "isForwarded", "isStatus", broadcast, "deviceType", "hasQuotedMsg",
       "mentionedIdsJson", "groupMentionsJson", "linksJson",
@@ -212,22 +229,25 @@ export async function captureWhatsAppMessageEnvelope(input: {
       "chatId", "chatName", "chatIsGroup",
       "contactSnapshotJson", "chatSnapshotJson", "rawJson", "updatedAt"
     ) VALUES (
-      $1, $2, $3, $4, $5,
-      $6, $7, $8, $9, $10, $11, $12,
-      $13, $14, $15, $16, $17, $18, $19,
-      $20::jsonb, $21::jsonb, $22::jsonb,
-      $23, $24,
-      $25, $26, $27, $28, $29, $30,
-      $31, $32, $33,
-      $34, $35, $36,
-      $37, $38,
-      $39, $40, $41, $42,
-      $43, $44, $45,
-      $46::jsonb, $47::jsonb, $48::jsonb, NOW()
+      $1, $2, $3, $4, $5, $6,
+      $7,
+      $8, $9, $10, $11, $12, $13, $14,
+      $15, $16, $17, $18, $19, $20, $21,
+      $22::jsonb, $23::jsonb, $24::jsonb,
+      $25, $26,
+      $27, $28, $29, $30, $31, $32,
+      $33, $34, $35,
+      $36, $37, $38,
+      $39, $40,
+      $41, $42, $43, $44,
+      $45, $46, $47,
+      $48::jsonb, $49::jsonb, $50::jsonb, NOW()
     )
     ON CONFLICT ("providerMessageId") DO UPDATE SET
+      "channelId" = COALESCE(EXCLUDED."channelId", "WhatsAppMessageEnvelope"."channelId"),
       "conversationId" = EXCLUDED."conversationId",
       "messageId" = COALESCE(EXCLUDED."messageId", "WhatsAppMessageEnvelope"."messageId"),
+      "mediaAssetId" = COALESCE(EXCLUDED."mediaAssetId", "WhatsAppMessageEnvelope"."mediaAssetId"),
       "from" = EXCLUDED."from",
       "to" = EXCLUDED."to",
       "author" = EXCLUDED."author",
@@ -275,9 +295,11 @@ export async function captureWhatsAppMessageEnvelope(input: {
     [
       envelopeId,
       record.workspaceId,
+      record.channelId,
       record.conversationId,
       record.messageId,
       record.providerMessageId,
+      record.mediaAssetId,
       record.from,
       record.to,
       record.author,
@@ -331,6 +353,7 @@ export async function captureWhatsAppMessageEnvelope(input: {
 
 export async function captureWhatsAppReactionEnvelope(input: {
   workspaceId: string;
+  channelId?: string | null;
   reaction: Reaction;
 }) {
   const providerMessageId = readSerializedId(input.reaction.id);
@@ -349,23 +372,29 @@ export async function captureWhatsAppReactionEnvelope(input: {
             workspaceId: input.workspaceId
           }
         },
-        select: {
-          conversationId: true
+      select: {
+          conversationId: true,
+          conversation: {
+            select: {
+              channelId: true
+            }
+          }
         }
       })
     : null;
 
   await execute(
     `INSERT INTO "WhatsAppMessageEnvelope" (
-      id, "workspaceId", "conversationId", "providerMessageId",
+      id, "workspaceId", "channelId", "conversationId", "providerMessageId",
       "from", "messageTimestamp", "messageType", body, "fromMe",
       "quotedMessageId", "rawJson", "updatedAt"
     ) VALUES (
-      $1, $2, $3, $4,
-      $5, $6, 'reaction', $7, $8,
-      $9, $10::jsonb, NOW()
+      $1, $2, $3, $4, $5,
+      $6, $7, 'reaction', $8, $9,
+      $10, $11::jsonb, NOW()
     )
     ON CONFLICT ("providerMessageId") DO UPDATE SET
+      "channelId" = COALESCE(EXCLUDED."channelId", "WhatsAppMessageEnvelope"."channelId"),
       "conversationId" = EXCLUDED."conversationId",
       "from" = EXCLUDED."from",
       "messageTimestamp" = EXCLUDED."messageTimestamp",
@@ -377,6 +406,7 @@ export async function captureWhatsAppReactionEnvelope(input: {
     [
       envelopeId,
       input.workspaceId,
+      input.channelId ?? parentMessage?.conversation?.channelId ?? null,
       parentMessage?.conversationId ?? null,
       providerMessageId,
       input.reaction.senderId ?? null,
@@ -403,12 +433,14 @@ export async function captureWhatsAppReactionEnvelope(input: {
 
 export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
   workspaceId: string;
+  channelId?: string | null;
   conversationId?: string | null;
   messageId?: string | null;
   providerMessageId: string;
   body?: string | null;
   direction?: "INBOUND" | "OUTBOUND" | null;
   sentAt?: Date | null;
+  mediaAssetId?: string | null;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
   attachmentUrl?: string | null;
@@ -452,7 +484,8 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
 
   await execute(
     `INSERT INTO "WhatsAppMessageEnvelope" (
-      id, "workspaceId", "conversationId", "messageId", "providerMessageId",
+      id, "workspaceId", "channelId", "conversationId", "messageId", "providerMessageId",
+      "mediaAssetId",
       "from", "to", "author", ack, "messageTimestamp", "messageType", body,
       "fromMe", "hasMedia", "isForwarded", "isStatus", broadcast, "deviceType", "hasQuotedMsg",
       "mentionedIdsJson", "groupMentionsJson", "linksJson",
@@ -463,20 +496,23 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
       "chatId", "chatName", "chatIsGroup",
       "contactSnapshotJson", "chatSnapshotJson", "rawJson", "updatedAt"
     ) VALUES (
-      $1, $2, $3, $4, $5,
-      $6, $7, $8, $9, $10, $11, $12,
-      $13, $14, $15, $16, $17, $18, $19,
-      $20::jsonb, $21::jsonb, $22::jsonb,
-      $23, $24,
-      $25, $26, $27, $28,
-      $29, $30,
-      $31, $32, $33, $34,
-      $35, $36, $37,
-      $38::jsonb, $39::jsonb, $40::jsonb, NOW()
+      $1, $2, $3, $4, $5, $6,
+      $7,
+      $8, $9, $10, $11, $12, $13, $14,
+      $15, $16, $17, $18, $19, $20, $21,
+      $22::jsonb, $23::jsonb, $24::jsonb,
+      $25, $26,
+      $27, $28, $29, $30,
+      $31, $32,
+      $33, $34, $35, $36,
+      $37, $38, $39,
+      $40::jsonb, $41::jsonb, $42::jsonb, NOW()
     )
     ON CONFLICT ("providerMessageId") DO UPDATE SET
+      "channelId" = COALESCE(EXCLUDED."channelId", "WhatsAppMessageEnvelope"."channelId"),
       "conversationId" = COALESCE(EXCLUDED."conversationId", "WhatsAppMessageEnvelope"."conversationId"),
       "messageId" = COALESCE(EXCLUDED."messageId", "WhatsAppMessageEnvelope"."messageId"),
+      "mediaAssetId" = COALESCE(EXCLUDED."mediaAssetId", "WhatsAppMessageEnvelope"."mediaAssetId"),
       "from" = COALESCE(EXCLUDED."from", "WhatsAppMessageEnvelope"."from"),
       "to" = COALESCE(EXCLUDED."to", "WhatsAppMessageEnvelope"."to"),
       "author" = COALESCE(EXCLUDED."author", "WhatsAppMessageEnvelope"."author"),
@@ -525,9 +561,11 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
     [
       envelopeId,
       input.workspaceId,
+      input.channelId ?? null,
       input.conversationId ?? null,
       input.messageId ?? null,
       providerMessageId,
+      input.mediaAssetId ?? null,
       readString(rawRecord, "from") ?? (parsedProviderId.fromMe ? null : parsedProviderId.remoteId),
       readString(rawRecord, "to") ?? (parsedProviderId.fromMe ? parsedProviderId.remoteId : null),
       readString(rawRecord, "author") ?? parsedProviderId.authorId,
@@ -575,14 +613,17 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
 
 function buildEnvelopeWriteData(input: {
   workspaceId: string;
+  channelId?: string | null;
   conversationId?: string | null;
   storedMessageId?: string | null;
   envelope: CapturedEnvelope;
 }) {
   return {
     workspaceId: input.workspaceId,
+    channelId: input.channelId ?? null,
     conversationId: input.conversationId ?? null,
     messageId: input.storedMessageId ?? null,
+    mediaAssetId: input.envelope.media.mediaAssetId,
     providerMessageId: input.envelope.providerMessageId,
     from: input.envelope.from,
     to: input.envelope.to,

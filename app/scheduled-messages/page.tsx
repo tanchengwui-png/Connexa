@@ -5,6 +5,7 @@ import { getScheduledMessagesData, type ScheduledMessagesFilter } from "@/lib/sc
 type ScheduledMessagesPageProps = {
   searchParams?: Promise<{
     conversationId?: string;
+    channelId?: string;
     filter?: string;
   }>;
 };
@@ -17,11 +18,17 @@ export default async function ScheduledMessagesPage({ searchParams }: ScheduledM
     ? ((params?.filter as ScheduledMessagesFilter | undefined) ?? "scheduled")
     : "scheduled";
 
-  const data = await getScheduledMessagesData(filter, params?.conversationId);
+  const data = await getScheduledMessagesData(filter, params?.conversationId, params?.channelId);
 
   return (
     <DashboardShell currentPath="/scheduled-messages">
-      <ScheduledMessagesBoard conversationId={data.conversationId} filter={data.filter} rows={data.rows} summary={data.summary} />
+      <ScheduledMessagesBoard
+        conversationId={data.conversationId}
+        channelId={data.channelId}
+        filter={data.filter}
+        rows={data.rows}
+        summary={data.summary}
+      />
     </DashboardShell>
   );
 }

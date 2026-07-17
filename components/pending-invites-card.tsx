@@ -62,7 +62,7 @@ export function PendingInvitesCard({ invites }: PendingInvitesCardProps) {
   };
 
   return (
-    <section className="content-card">
+    <section className="content-card pending-invites-card">
       <div className="card-header">
         <div>
           <h3 className="card-title">Pending invites</h3>

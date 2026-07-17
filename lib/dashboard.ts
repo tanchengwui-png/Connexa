@@ -1,7 +1,7 @@
-import { LeadPriority, LeadSource, LeadStage } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { MALAYSIA_TIME_ZONE } from "@/lib/malaysia-time";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { LeadPriority, LeadSource, LeadStage } from "@/lib/db-types";
 import { getLeadCustomString, parseLeadCustomData } from "@/lib/lead-custom-fields";
 
 const sourceLabels: Record<LeadSource, string> = {
@@ -66,18 +66,21 @@ export async function getDashboardData() {
   }
 
   const leads = workspace.leads;
+  type LeadRecord = (typeof leads)[number];
+  type AgentRecord = (typeof workspace.agents)[number];
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  const newLeadsToday = leads.filter((lead) => lead.createdAt >= today).length;
-  const bookedVisits = leads.filter((lead) => lead.stage === LeadStage.SITE_VISIT_BOOKED).length;
-  const responseTracked = leads.filter((lead) => typeof lead.responseMinutes === "number");
-  const fastResponses = responseTracked.filter((lead) => (lead.responseMinutes ?? 999) <= 5).length;
+  const newLeadsToday = leads.filter((lead: LeadRecord) => lead.createdAt >= today).length;
+  const bookedVisits = leads.filter((lead: LeadRecord) => lead.stage === LeadStage.SITE_VISIT_BOOKED).length;
+  const responseTracked = leads.filter((lead: LeadRecord) => typeof lead.responseMinutes === "number");
+  const fastResponses = responseTracked.filter((lead: LeadRecord) => (lead.responseMinutes ?? 999) <= 5).length;
   const fastResponseRate =
     responseTracked.length === 0 ? 0 : Math.round((fastResponses / responseTracked.length) * 100);
   const overdueFollowUps = leads.filter(
-    (lead) => lead.nextActionAt && lead.nextActionAt < new Date() && lead.stage !== LeadStage.CLOSED_WON && lead.stage !== LeadStage.CLOSED_LOST
+    (lead: LeadRecord) =>
+      lead.nextActionAt && lead.nextActionAt < new Date() && lead.stage !== LeadStage.CLOSED_WON && lead.stage !== LeadStage.CLOSED_LOST
   ).length;
 
   const metrics = [
@@ -106,12 +109,12 @@ export async function getDashboardData() {
   const pipeline = [
     {
       name: "New lead",
-      count: leads.filter((lead) => lead.stage === LeadStage.NEW_LEAD).length,
+      count: leads.filter((lead: LeadRecord) => lead.stage === LeadStage.NEW_LEAD).length,
       summary: "Fresh inbound leads that still need qualification or assignment."
     },
     {
       name: "Qualified",
-      count: leads.filter((lead) => lead.stage === LeadStage.QUALIFIED).length,
+      count: leads.filter((lead: LeadRecord) => lead.stage === LeadStage.QUALIFIED).length,
       summary: "Budget, area, and financing status already captured."
     },
     {
@@ -122,8 +125,8 @@ export async function getDashboardData() {
   ];
 
   const totalLeads = leads.length || 1;
-  const sourceMix = Object.values(LeadSource).map((source) => {
-    const count = leads.filter((lead) => lead.source === source).length;
+  const sourceMix = Object.values(LeadSource).map((source: LeadSource) => {
+    const count = leads.filter((lead: LeadRecord) => lead.source === source).length;
     return {
       source: sourceLabels[source],
       share: Math.round((count / totalLeads) * 100)
@@ -131,9 +134,10 @@ export async function getDashboardData() {
   });
 
   const hotLeads = [...leads]
-    .sort((a, b) => {
+    .sort((a: LeadRecord, b: LeadRecord) => {
       const priorityRank = { URGENT: 4, HIGH: 3, MEDIUM: 2, LOW: 1 } as const;
-      const priorityDiff = priorityRank[b.priority] - priorityRank[a.priority];
+      const priorityDiff =
+        priorityRank[b.priority as LeadPriority] - priorityRank[a.priority as LeadPriority];
       if (priorityDiff !== 0) {
         return priorityDiff;
       }
@@ -153,57 +157,57 @@ export async function getDashboardData() {
       return b.lastActivityAt.getTime() - a.lastActivityAt.getTime();
     })
     .slice(0, 4)
-    .map((lead) => {
+    .map((lead: LeadRecord) => {
       const customData = parseLeadCustomData(lead.customData);
       const preferredArea = getLeadCustomString(customData, "preferredArea") ?? lead.preferredArea;
       const financingStatus = getLeadCustomString(customData, "financingStatus") ?? lead.financingStatus;
 
       return {
         name: lead.name,
-        stage: stageLabels[lead.stage],
-        priority: priorityLabels[lead.priority],
+        stage: stageLabels[lead.stage as LeadStage],
+        priority: priorityLabels[lead.priority as LeadPriority],
         project: getLeadCustomString(customData, "project") ?? lead.project,
         preferredArea: preferredArea ?? "Custom fields not captured",
         financingStatus: financingStatus ?? "Lead details not captured",
         nextActionAt: lead.nextActionAt ? formatUpcomingAction(lead.nextActionAt) : "No next action set",
-        sourceDetail: lead.sourceDetail ?? sourceLabels[lead.source],
+        sourceDetail: lead.sourceDetail ?? sourceLabels[lead.source as LeadSource],
         signal: lead.note ?? lead.lastMessage ?? "No recent activity logged yet.",
         owner: lead.owner?.name ?? "Unassigned",
         id: lead.id
       };
     });
 
-  const inbox = leads.slice(0, 5).map((lead) => ({
+  const inbox = leads.slice(0, 5).map((lead: LeadRecord) => ({
     name: lead.name,
     lastMessage: lead.lastMessage ?? "No message captured yet.",
-    channel: sourceLabels[lead.source],
+    channel: sourceLabels[lead.source as LeadSource],
     age: formatRelativeAge(lead.lastActivityAt)
   }));
 
-  const teamBoard = workspace.agents.map((agent) => {
-    const ownedLeads = leads.filter((lead) => lead.ownerId === agent.id);
-    const trackedResponses = ownedLeads.filter((lead) => typeof lead.responseMinutes === "number");
+  const teamBoard = workspace.agents.map((agent: AgentRecord) => {
+    const ownedLeads = leads.filter((lead: LeadRecord) => lead.ownerId === agent.id);
+    const trackedResponses = ownedLeads.filter((lead: LeadRecord) => typeof lead.responseMinutes === "number");
     const avgResponse =
       trackedResponses.length === 0
         ? null
         : Math.round(
-            trackedResponses.reduce((total, lead) => total + (lead.responseMinutes ?? 0), 0) /
+            trackedResponses.reduce((total: number, lead: LeadRecord) => total + (lead.responseMinutes ?? 0), 0) /
               trackedResponses.length
           );
 
     return {
       agent: agent.name,
       openLeads: ownedLeads.filter(
-        (lead) => lead.stage !== LeadStage.CLOSED_WON && lead.stage !== LeadStage.CLOSED_LOST
+        (lead: LeadRecord) => lead.stage !== LeadStage.CLOSED_WON && lead.stage !== LeadStage.CLOSED_LOST
       ).length,
-      bookedVisits: ownedLeads.filter((lead) => lead.stage === LeadStage.SITE_VISIT_BOOKED).length,
+      bookedVisits: ownedLeads.filter((lead: LeadRecord) => lead.stage === LeadStage.SITE_VISIT_BOOKED).length,
       responseTime: avgResponse === null ? "No data" : `${avgResponse} min`
     };
   });
 
-  const timeline = leads.slice(0, 3).map((lead) => ({
+  const timeline = leads.slice(0, 3).map((lead: LeadRecord) => ({
     title: `${lead.name} updated`,
-    description: lead.note ?? lead.lastMessage ?? `${stageLabels[lead.stage]} stage updated.`,
+    description: lead.note ?? lead.lastMessage ?? `${stageLabels[lead.stage as LeadStage]} stage updated.`,
     time: formatTime(lead.lastActivityAt)
   }));
 

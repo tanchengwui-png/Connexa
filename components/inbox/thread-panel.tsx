@@ -6,10 +6,13 @@ import { IncomingMessageBubble } from "@/components/inbox/incoming-message-bubbl
 import { ReplyComposer } from "@/components/inbox/reply-composer";
 import { SystemEventCard } from "@/components/inbox/system-event-card";
 import { TimelineDivider } from "@/components/inbox/timeline-divider";
+import { getStableInboxMessageKey, normalizeInboxMessage, normalizeInboxSelectedConversation } from "@/lib/inbox-message-normalization";
 import type {
   InboxAgent,
+  InboxComposerAttachment,
   InboxCurrentAgent,
   InboxMediaAsset,
+  InboxMessage,
   InboxMentionCandidate,
   InboxQuickReply,
   InboxSelectedMention,
@@ -23,17 +26,21 @@ type ThreadPanelProps = {
   currentAgent: InboxCurrentAgent;
   error: string | null;
   hasHydrated?: boolean;
+  isMuteSupported: boolean;
   isInternalNote: boolean;
   isPending: boolean;
+  isPersonalChannel: boolean;
   mediaAssets: InboxMediaAsset[];
   messageBody: string;
   mentionCandidates: InboxMentionCandidate[];
   selectedMentions: InboxSelectedMention[];
   onAddTag: (tag?: string) => void;
-  onAttachmentChange: (attachmentIds: string[]) => void;
+  onAttachmentChange: (attachments: InboxComposerAttachment[]) => void;
+  onMediaAssetsChange: (assets: InboxMediaAsset[]) => void;
   onDeleteMessage: (messageId: string) => void;
   onInsertQuickReply: (quickReply: InboxQuickReply) => void;
   onMessageBodyChange: (value: string) => void;
+  onSetMute: (duration: "8h" | "1w" | "always" | null) => void;
   onSelectedMentionsChange: (mentions: InboxSelectedMention[]) => void;
   replyingToMessage: {
     id: string;
@@ -52,10 +59,11 @@ type ThreadPanelProps = {
     assigneeId?: string | null;
     teammateIds?: string[];
     snoozedUntil?: string | null;
+    snoozeReason?: string | null;
   }) => void;
   quickReplies: InboxQuickReply[];
   requiresTakeOverForPublicReply: boolean;
-  selectedAttachmentIds: string[];
+  selectedAttachments: InboxComposerAttachment[];
   selectedConversation: InboxSelectedConversation;
   whatsappMode: "live" | "mock" | "webjs";
 };
@@ -71,6 +79,7 @@ type TimelineItem =
       id: string;
       isConnexaOutbound: boolean;
       isScheduledEvent?: boolean;
+      deliveryStatus: InboxMessage["deliveryStatus"];
       replyToMessage: {
         sender: string | null;
         body: string | null;
@@ -93,6 +102,7 @@ type TimelineItem =
       type: "event";
       label: string;
       meta: string;
+      href?: string | null;
       occurredAtIso?: string;
     };
 
@@ -103,17 +113,21 @@ export function InboxThreadPanel({
   currentAgent,
   error,
   hasHydrated = true,
+  isMuteSupported,
   isInternalNote,
   isPending,
+  isPersonalChannel,
   mediaAssets,
   messageBody,
   mentionCandidates,
   selectedMentions,
   onAddTag,
   onAttachmentChange,
+  onMediaAssetsChange,
   onDeleteMessage,
   onInsertQuickReply,
   onMessageBodyChange,
+  onSetMute,
   onSelectedMentionsChange,
   replyingToMessage,
   onReplyToMessage,
@@ -125,7 +139,7 @@ export function InboxThreadPanel({
   onUpdateConversation,
   quickReplies,
   requiresTakeOverForPublicReply,
-  selectedAttachmentIds,
+  selectedAttachments,
   selectedConversation,
   whatsappMode
 }: ThreadPanelProps) {
@@ -194,24 +208,30 @@ export function InboxThreadPanel({
     );
   }
 
-  const timeline = hasHydrated ? buildTimeline(selectedConversation) : null;
+  const normalizedConversation = normalizeInboxSelectedConversation(selectedConversation)!;
+  const timeline = hasHydrated ? buildTimeline(normalizedConversation) : null;
 
   return (
     <article className="inbox-column inbox-thread-panel">
       <ActiveConversationHeader
         agents={agents}
         currentAgent={currentAgent}
+        isMuteSupported={isMuteSupported}
         onAddTag={onAddTag}
+        onSetMute={onSetMute}
         onSnoozeConversation={onSnoozeConversation}
         onTakeOverConversation={onTakeOverConversation}
         onUpdateConversation={onUpdateConversation}
-        selectedConversation={selectedConversation}
+        selectedConversation={normalizedConversation}
       />
 
-      {selectedConversation.snoozedUntil ? (
+      {selectedConversation.isSnoozed && selectedConversation.snoozedUntil ? (
         <div className="inbox-snooze-banner">
-          <strong>Snoozed reminder</strong>
-          <span>{selectedConversation.snoozedUntil}</span>
+          <strong>{selectedConversation.snoozeReason?.trim() || "Snoozed conversation"}</strong>
+          <span>
+            {selectedConversation.snoozedUntil}
+            {selectedConversation.snoozedBy ? ` · set by ${selectedConversation.snoozedBy.name}` : ""}
+          </span>
         </div>
       ) : null}
 
@@ -228,7 +248,7 @@ export function InboxThreadPanel({
               }
 
               if (item.type === "event") {
-                return <SystemEventCard key={item.id} label={item.label} meta={item.meta} />;
+                return <SystemEventCard key={item.id} label={item.label} meta={item.meta} href={item.href} />;
               }
 
               return (
@@ -243,6 +263,7 @@ export function InboxThreadPanel({
                   isConnexaOutbound={item.isConnexaOutbound}
                   isDeleted={Boolean(item.deletedAt)}
                   key={item.id}
+                  deliveryStatus={item.deliveryStatus}
                   onDelete={onDeleteMessage}
                   onReply={onReplyToMessage}
                   reactions={item.reactions}
@@ -272,14 +293,16 @@ export function InboxThreadPanel({
           error={error}
           isInternalNote={isInternalNote}
           isPending={isPending}
+          isPersonalChannel={isPersonalChannel}
           mediaAssets={mediaAssets}
           messageBody={messageBody}
           mentionCandidates={mentionCandidates}
           replyingToMessage={replyingToMessage}
           selectedMentions={selectedMentions}
-          selectedAttachmentIds={selectedAttachmentIds}
+          selectedAttachments={selectedAttachments}
           whatsappMode={whatsappMode}
           onAttachmentChange={onAttachmentChange}
+          onMediaAssetsChange={onMediaAssetsChange}
           onClearReply={() => onReplyToMessage("")}
           onInsertQuickReply={onInsertQuickReply}
           onMessageBodyChange={onMessageBodyChange}
@@ -299,7 +322,15 @@ export function InboxThreadPanel({
 
 function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversation>): TimelineItem[] {
   const entries = [
-    ...selectedConversation.messages.map((message) => ({ kind: "message" as const, sentAtIso: message.sentAtIso, message })),
+    ...selectedConversation.messages.map((message) => {
+      const normalizedMessage = normalizeInboxMessage(message);
+      return {
+        kind: "message" as const,
+        sentAtIso: normalizedMessage.sentAtIso,
+        message: normalizedMessage,
+        stableKey: getStableInboxMessageKey(normalizedMessage)
+      };
+    }),
     ...selectedConversation.auditEvents.map((event) => ({ kind: "audit" as const, sentAtIso: event.createdAtIso, event }))
   ].sort((left, right) => left.sentAtIso.localeCompare(right.sentAtIso));
 
@@ -322,7 +353,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
 
     if (dayLabel !== lastDayLabel) {
       items.push({
-        id: `separator-${entry.kind}-${entry.kind === "message" ? entry.message.id : entry.event.id}`,
+        id: `separator-${entry.kind}-${entry.kind === "message" ? entry.stableKey : entry.event.id}`,
         type: "separator",
         label: dayLabel
       });
@@ -331,7 +362,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
 
     if (index === 0) {
       items.push({
-        id: `event-open-${entry.kind}-${entry.kind === "message" ? entry.message.id : entry.event.id}`,
+        id: `event-open-${entry.kind}-${entry.kind === "message" ? entry.stableKey : entry.event.id}`,
         type: "event",
         label: "Conversation opened",
         meta: `${selectedConversation.contactName} started a WhatsApp conversation`
@@ -356,7 +387,8 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
         id: `event-scheduled-${message.id}`,
         type: "event",
         label: formatPendingMessageLabel(message.outboundJobStatus),
-        meta: formatPendingMessageMeta(message)
+        meta: formatPendingMessageMeta(message),
+        href: buildScheduledMessageHref(selectedConversation.id, message.outboundJobStatus, message.outboundJobAvailableAt)
       });
       return;
     }
@@ -369,6 +401,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
       deletedAt: message.deletedAt,
       id: message.id,
       isConnexaOutbound: message.isConnexaOutbound,
+      deliveryStatus: message.deliveryStatus,
       reactions: message.reactions,
       replyToMessage: message.replyToMessage,
       type: "message",
@@ -464,4 +497,20 @@ function getDayLabel(isoValue?: string | null) {
   }
 
   return isoValue.slice(0, 10);
+}
+
+function buildScheduledMessageHref(
+  conversationId: string,
+  status: string | null,
+  availableAt: string | null
+) {
+  if (!availableAt) {
+    return null;
+  }
+
+  if (status === "CANCELED" || status === "FAILED" || status === "RUNNING" || status === "SENT") {
+    return null;
+  }
+
+  return `/scheduled-messages?conversationId=${encodeURIComponent(conversationId)}`;
 }

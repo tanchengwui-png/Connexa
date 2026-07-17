@@ -1,9 +1,16 @@
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
+import { activateFreeTrialAfterVerification } from "@/lib/billing-management";
+import { saveBillingProfile } from "@/lib/billing-management";
 import { createSession } from "@/lib/auth/session";
 import { createEmailVerification } from "@/lib/auth/verification";
 import {
+  getBillingDetailsErrorMessage,
+  normalizeBillingDetails,
+  type BillingDetails,
+  validateBillingDetails
+} from "@/lib/billing-details";
+import {
   getPackageBillingSnapshot,
-  getSubscriptionStatusForNewWorkspace,
   normalizeWorkspacePackageKey
 } from "@/lib/billing";
 import { AgentRole, AgentStatus } from "@/lib/db-types";
@@ -16,16 +23,23 @@ export async function registerWorkspace(input: {
   workspaceName: string;
   password: string;
   plan: string;
+  billingDetails: BillingDetails;
   remember: boolean;
+  freeTrial?: boolean;
 }) {
   const name = input.name.trim();
   const email = input.email.trim().toLowerCase();
   const workspaceName = input.workspaceName.trim();
   const password = input.password;
-  const plan = normalizeWorkspacePlan(input.plan);
+  const plan = input.freeTrial ? "starter" : normalizeWorkspacePlan(input.plan);
+  const billingDetails = normalizeBillingDetails(input.billingDetails);
 
   if (!name || !email || !workspaceName || !password) {
     throw new Error("Name, email, workspace name, and password are required.");
+  }
+  const billingValidationError = getBillingDetailsErrorMessage(validateBillingDetails(billingDetails));
+  if (billingValidationError) {
+    throw new Error(billingValidationError);
   }
 
   if (password.length < 8) {
@@ -39,7 +53,6 @@ export async function registerWorkspace(input: {
   }
 
   const workspaceSlug = await generateWorkspaceSlug(workspaceName);
-  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
   const packageSnapshot = await getPackageBillingSnapshot(normalizeWorkspacePackageKey(plan));
   const passwordHash = existingAccount?.passwordHash ?? hashPassword(password);
   const account =
@@ -54,14 +67,14 @@ export async function registerWorkspace(input: {
       workspaceName,
       slug: workspaceSlug,
       plan,
-      trialEndsAt,
+      trialEndsAt: null,
       packageCode: packageSnapshot.code,
       packageName: packageSnapshot.name,
       packageDescription: packageSnapshot.description,
       packagePriceAmount: packageSnapshot.priceAmount,
       packageCurrency: packageSnapshot.currency,
       packageBillingPeriod: packageSnapshot.billingPeriod,
-      subscriptionStatus: getSubscriptionStatusForNewWorkspace(true),
+      subscriptionStatus: input.freeTrial ? "PENDING" : "ACTIVE",
       agentName: name,
       agentEmail: email,
       passwordHash,
@@ -70,13 +83,29 @@ export async function registerWorkspace(input: {
   });
   const agent = result.agent;
 
+  await saveBillingProfile({
+    workspaceId: agent.workspaceId,
+    billingName: billingDetails.billingName,
+    billingEmail: email,
+    billingPhoneNumber: billingDetails.billingPhoneNumber,
+    billingAddressLine1: billingDetails.billingAddressLine1,
+    billingAddressLine2: billingDetails.billingAddressLine2,
+    billingCity: billingDetails.billingCity,
+    billingState: billingDetails.billingState,
+    billingPostcode: billingDetails.billingPostcode,
+    billingCountry: billingDetails.billingCountry,
+    billingTaxId: billingDetails.billingTaxId
+  });
+
   await createSession({
     agentId: agent.id,
     workspaceId: agent.workspaceId,
     remember: input.remember
   });
 
-  if (!existingAccount?.emailVerifiedAt) {
+  if (input.freeTrial && existingAccount?.emailVerifiedAt) {
+    await activateFreeTrialAfterVerification(agent.id);
+  } else if (!existingAccount?.emailVerifiedAt) {
     await createEmailVerification(agent.id);
   }
 

@@ -10,12 +10,20 @@ import {
   publicPackages,
   type PublicPackageKey
 } from "@/lib/public-packages";
+import {
+  calculatePackagePricing,
+  formatPackageAmount,
+  parseYearlyDiscountPercentage,
+  PACKAGE_BILLING_PERIOD
+} from "@/lib/package-pricing";
 
 type PlatformPackageSettingsInput = {
   packageKey: PublicPackageKey;
   isVisible: boolean;
   displayOrder: number;
   priceAmount: number | null;
+  yearlyDiscountPercentage: number;
+  mediaLibraryStorageLimitBytes: number | null;
   maxOutboundMessages: number | null;
   maxActiveContacts: number | null;
   maxActiveAutomations: number | null;
@@ -28,6 +36,8 @@ function isMissingPlatformPackageTableError(error: unknown) {
     (error.message.includes('relation "PlatformPackageConfig" does not exist') ||
       error.message.includes('column "platformId" does not exist') ||
       error.message.includes('column "priceAmount" does not exist') ||
+      error.message.includes('column "yearlyDiscountPercentage" does not exist') ||
+      error.message.includes('column "mediaLibraryStorageLimitBytes" does not exist') ||
       error.message.includes('column "maxOutboundMessages" does not exist') ||
       error.message.includes('column "maxActiveContacts" does not exist') ||
       error.message.includes('column "maxActiveAutomations" does not exist') ||
@@ -40,8 +50,10 @@ function getDefaultPackageSettings() {
     packageKey,
     isVisible: defaultVisiblePublicPackageKeys.includes(packageKey),
     displayOrder: index,
-    priceAmount: publicPackages[packageKey].priceAmount,
-    maxOutboundMessages: publicPackages[packageKey].limits.maxOutboundMessages,
+      priceAmount: publicPackages[packageKey].priceAmount,
+      yearlyDiscountPercentage: 0,
+      mediaLibraryStorageLimitBytes: publicPackages[packageKey].limits.mediaLibraryStorageLimitBytes,
+      maxOutboundMessages: publicPackages[packageKey].limits.maxOutboundMessages,
     maxActiveContacts: publicPackages[packageKey].limits.maxActiveContacts,
     maxActiveAutomations: publicPackages[packageKey].limits.maxActiveAutomations,
     maxWhatsAppCampaigns: publicPackages[packageKey].limits.maxWhatsAppCampaigns
@@ -67,9 +79,10 @@ export async function getVisiblePublicPackages() {
   return settings
     .filter((item) => item.isVisible)
     .sort((left, right) => left.displayOrder - right.displayOrder)
+    .slice(0, 3)
     .map((item) => ({
       key: item.packageKey,
-      ...mergePackageDefinition(item.packageKey, item.priceAmount)
+      ...mergePackageDefinition(item.packageKey, item.priceAmount, item.yearlyDiscountPercentage)
     }));
 }
 
@@ -83,22 +96,25 @@ export async function getPlatformPackageAdminView() {
       isVisible: item.isVisible,
       displayOrder: item.displayOrder,
       priceAmount: item.priceAmount,
+      yearlyDiscountPercentage: item.yearlyDiscountPercentage,
+      mediaLibraryStorageLimitBytes: item.mediaLibraryStorageLimitBytes,
       maxOutboundMessages: item.maxOutboundMessages,
       maxActiveContacts: item.maxActiveContacts,
       maxActiveAutomations: item.maxActiveAutomations,
       maxWhatsAppCampaigns: item.maxWhatsAppCampaigns,
-      package: mergePackageDefinition(item.packageKey, item.priceAmount)
+      package: mergePackageDefinition(item.packageKey, item.priceAmount, item.yearlyDiscountPercentage)
     }));
 }
 
 export async function getResolvedPublicPackageDefinition(packageKey: PublicPackageKey) {
   const settings = await getPlatformPackageSettings();
   const config = settings.find((item) => item.packageKey === packageKey);
-  return mergePackageDefinition(packageKey, config?.priceAmount);
+  return mergePackageDefinition(packageKey, config?.priceAmount, config?.yearlyDiscountPercentage);
 }
 
 export async function savePlatformPackageSettings(input: PlatformPackageSettingsInput[]) {
   const seen = new Set<string>();
+  let visibleCount = 0;
 
   for (const item of input) {
     if (!isPublicPackageKey(item.packageKey)) {
@@ -109,12 +125,25 @@ export async function savePlatformPackageSettings(input: PlatformPackageSettings
       throw new Error("Duplicate package key.");
     }
 
+    if (item.isVisible) {
+      visibleCount += 1;
+    }
+
     if (!Number.isInteger(item.displayOrder) || item.displayOrder < 0) {
       throw new Error("Display order must be a non-negative integer.");
     }
 
     if (item.priceAmount !== null && (!Number.isFinite(item.priceAmount) || item.priceAmount < 0)) {
       throw new Error("Package price must be a non-negative amount or left blank for custom billing.");
+    }
+
+    parseYearlyDiscountPercentage(item.yearlyDiscountPercentage);
+
+    if (
+      item.mediaLibraryStorageLimitBytes !== null &&
+      (!Number.isInteger(item.mediaLibraryStorageLimitBytes) || item.mediaLibraryStorageLimitBytes < 0)
+    ) {
+      throw new Error("Media Library storage limit must be a non-negative whole number of bytes or unlimited.");
     }
 
     if (
@@ -148,6 +177,10 @@ export async function savePlatformPackageSettings(input: PlatformPackageSettings
     seen.add(item.packageKey);
   }
 
+  if (visibleCount > 3) {
+    throw new Error("A maximum of 3 packages can be visible on the public packages page.");
+  }
+
   for (const packageKey of publicPackageKeys) {
     if (!seen.has(packageKey)) {
       throw new Error("Every package must be configured.");
@@ -161,6 +194,8 @@ export async function savePlatformPackageSettings(input: PlatformPackageSettings
         isVisible: item.isVisible,
         displayOrder: item.displayOrder,
         priceAmount: item.priceAmount === null ? null : item.priceAmount.toFixed(2),
+        yearlyDiscountPercentage: item.yearlyDiscountPercentage.toFixed(2),
+        mediaLibraryStorageLimitBytes: item.mediaLibraryStorageLimitBytes,
         maxOutboundMessages: item.maxOutboundMessages,
         maxActiveContacts: item.maxActiveContacts,
         maxActiveAutomations: item.maxActiveAutomations,
@@ -177,6 +212,8 @@ export async function savePlatformPackageSettings(input: PlatformPackageSettings
           isVisible: item.isVisible,
           displayOrder: item.displayOrder,
           priceAmount: item.priceAmount === null ? null : item.priceAmount.toFixed(2),
+          yearlyDiscountPercentage: item.yearlyDiscountPercentage.toFixed(2),
+          mediaLibraryStorageLimitBytes: item.mediaLibraryStorageLimitBytes,
           maxOutboundMessages: item.maxOutboundMessages,
           maxActiveContacts: item.maxActiveContacts,
           maxActiveAutomations: item.maxActiveAutomations,
@@ -197,6 +234,8 @@ function mapPackageSettings(
     isVisible: boolean;
     displayOrder: number;
     priceAmount: string | null;
+    yearlyDiscountPercentage: string | null;
+    mediaLibraryStorageLimitBytes: number | string | null;
     maxOutboundMessages: number | null;
     maxActiveContacts: number | null;
     maxActiveAutomations: number | null;
@@ -212,6 +251,10 @@ function mapPackageSettings(
       isVisible: config?.isVisible ?? defaultVisiblePublicPackageKeys.includes(packageKey),
       displayOrder: config?.displayOrder ?? index,
       priceAmount: config ? parseOptionalPriceAmount(config.priceAmount) : publicPackages[packageKey].priceAmount,
+      yearlyDiscountPercentage: config ? parseOptionalPercentage(config.yearlyDiscountPercentage) : 0,
+      mediaLibraryStorageLimitBytes:
+        parseOptionalStorageLimit(config?.mediaLibraryStorageLimitBytes) ??
+        publicPackages[packageKey].limits.mediaLibraryStorageLimitBytes,
       maxOutboundMessages: config?.maxOutboundMessages ?? publicPackages[packageKey].limits.maxOutboundMessages,
       maxActiveContacts: config?.maxActiveContacts ?? publicPackages[packageKey].limits.maxActiveContacts,
       maxActiveAutomations: config?.maxActiveAutomations ?? publicPackages[packageKey].limits.maxActiveAutomations,
@@ -229,14 +272,45 @@ function parseOptionalPriceAmount(value: string | null | undefined) {
   return Number.isFinite(normalized) ? normalized : null;
 }
 
-function mergePackageDefinition(packageKey: PublicPackageKey, priceAmountOverride: number | null | undefined) {
+function parseOptionalPercentage(value: string | null | undefined) {
+  if (value === null || value === undefined || value === "") {
+    return 0;
+  }
+
+  return parseYearlyDiscountPercentage(value);
+}
+
+function parseOptionalStorageLimit(value: number | string | null | undefined) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const normalized = Number(value);
+
+  if (!Number.isFinite(normalized) || !Number.isInteger(normalized) || normalized < 0) {
+    throw new Error("Stored media library storage limit is invalid.");
+  }
+
+  return normalized;
+}
+
+function mergePackageDefinition(
+  packageKey: PublicPackageKey,
+  priceAmountOverride: number | null | undefined,
+  yearlyDiscountPercentageOverride: number | undefined
+) {
   const pkg = publicPackages[packageKey];
   const resolvedPriceAmount = priceAmountOverride === undefined ? pkg.priceAmount : priceAmountOverride;
+  const yearlyDiscountPercentage = parseYearlyDiscountPercentage(yearlyDiscountPercentageOverride ?? 0);
+  const pricing = calculatePackagePricing(resolvedPriceAmount, yearlyDiscountPercentage, pkg.currency);
 
   return {
     ...pkg,
+    monthlyPriceAmount: resolvedPriceAmount,
+    yearlyDiscountPercentage,
+    pricing,
     priceAmount: resolvedPriceAmount,
-    price: formatPackagePrice(resolvedPriceAmount, pkg.currency, pkg.billingPeriod)
+    price: formatPackagePrice(resolvedPriceAmount, pkg.currency, PACKAGE_BILLING_PERIOD.MONTHLY)
   };
 }
 
@@ -245,16 +319,5 @@ function formatPackagePrice(
   currency: string | null,
   billingPeriod: "MONTHLY" | "YEARLY" | null
 ) {
-  if (priceAmount === null) {
-    return "Custom";
-  }
-
-  const formattedAmount = new Intl.NumberFormat("en-MY", {
-    minimumFractionDigits: Number.isInteger(priceAmount) ? 0 : 2,
-    maximumFractionDigits: 2
-  }).format(priceAmount);
-
-  const currencyPrefix = currency === "MYR" || !currency ? "RM" : `${currency} `;
-  const periodSuffix = billingPeriod === "YEARLY" ? "/yr" : billingPeriod === "MONTHLY" ? "/mo" : "";
-  return `${currencyPrefix}${formattedAmount}${periodSuffix}`;
+  return formatPackageAmount(priceAmount, currency, billingPeriod);
 }

@@ -1,8 +1,20 @@
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 import { QUICK_REPLY_CATEGORIES } from "@/lib/quick-reply-categories";
 import { listWorkspaceMediaAssets } from "@/lib/media-library";
 import { formatMediaAssetSize } from "@/lib/media-library-shared";
+
+export type QuickReplyRecord = {
+  id: string;
+  title: string;
+  shortcut: string;
+  category: string;
+  body: string;
+  mediaAssetIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
 
 export async function getQuickRepliesData() {
   const workspaceId = await requireCurrentWorkspaceId();
@@ -27,16 +39,10 @@ export async function getQuickRepliesData() {
   return {
     summary: {
       total: workspace.quickReplies.length,
-      withMedia: workspace.quickReplies.filter((item) => parseMediaAssetIds(item.mediaAssetIdsJson).length > 0).length
+      withMedia: workspace.quickReplies.filter((item) => parseMediaAssetIds(item.mediaAssetIdsJson).length > 0).length,
+      categoriesInUse: new Set(workspace.quickReplies.map((item) => item.category)).size
     },
-    quickReplies: workspace.quickReplies.map((item) => ({
-      id: item.id,
-      title: item.title,
-      shortcut: item.shortcut,
-      category: item.category,
-      body: item.body,
-      mediaAssetIds: parseMediaAssetIds(item.mediaAssetIdsJson)
-    })),
+    quickReplies: workspace.quickReplies.map(mapQuickReplyRecord),
     categories: [...QUICK_REPLY_CATEGORIES],
     mediaAssets: mediaAssets.map((asset) => ({
       id: asset.id,
@@ -47,6 +53,32 @@ export async function getQuickRepliesData() {
       sizeLabel: formatMediaAssetSize(asset.sizeBytes)
     }))
   };
+}
+
+export async function getQuickReplyListData() {
+  const { summary, quickReplies, categories } = await getQuickRepliesData();
+
+  return {
+    summary,
+    quickReplies,
+    categories
+  };
+}
+
+export async function getQuickReplyEditorData() {
+  return getQuickRepliesData();
+}
+
+export async function getQuickReplyById(id: string, workspaceId?: string) {
+  const resolvedWorkspaceId = workspaceId ?? (await requireCurrentWorkspaceId());
+  const quickReply = await prisma.quickReply.findFirst({
+    where: {
+      id,
+      workspaceId: resolvedWorkspaceId
+    }
+  });
+
+  return quickReply ? mapQuickReplyRecord(quickReply) : null;
 }
 
 export async function createQuickReply(input: {
@@ -83,16 +115,22 @@ export async function createQuickReply(input: {
     }
   }
 
-  return prisma.quickReply.create({
-    data: {
-      workspaceId,
-      title,
-      shortcut,
-      category,
-      body,
-      mediaAssetIdsJson: mediaAssetIds.length ? JSON.stringify(mediaAssetIds) : null
-    }
-  });
+  try {
+    const quickReply = await prisma.quickReply.create({
+      data: {
+        workspaceId,
+        title,
+        shortcut,
+        category,
+        body,
+        mediaAssetIdsJson: mediaAssetIds.length ? JSON.stringify(mediaAssetIds) : null
+      }
+    });
+
+    return mapQuickReplyRecord(quickReply);
+  } catch (error) {
+    throw normalizeQuickReplyMutationError(error);
+  }
 }
 
 export async function updateQuickReply(
@@ -145,18 +183,24 @@ export async function updateQuickReply(
     }
   }
 
-  return prisma.quickReply.update({
-    where: {
-      id: quickReply.id
-    },
-    data: {
-      title,
-      shortcut,
-      category,
-      body,
-      mediaAssetIdsJson: mediaAssetIds.length ? JSON.stringify(mediaAssetIds) : null
-    }
-  });
+  try {
+    const updated = await prisma.quickReply.update({
+      where: {
+        id: quickReply.id
+      },
+      data: {
+        title,
+        shortcut,
+        category,
+        body,
+        mediaAssetIdsJson: mediaAssetIds.length ? JSON.stringify(mediaAssetIds) : null
+      }
+    });
+
+    return mapQuickReplyRecord(updated);
+  } catch (error) {
+    throw normalizeQuickReplyMutationError(error);
+  }
 }
 
 export async function deleteQuickReply(id: string) {
@@ -191,6 +235,39 @@ function normalizeCategory(value?: string) {
 
 function normalizeMediaAssetIds(value?: string[]) {
   return Array.from(new Set((value ?? []).map((item) => item.trim()).filter(Boolean)));
+}
+
+function mapQuickReplyRecord(item: {
+  id: string;
+  title: string;
+  shortcut: string;
+  category: string;
+  body: string;
+  mediaAssetIdsJson: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}) {
+  return {
+    id: item.id,
+    title: item.title,
+    shortcut: item.shortcut,
+    category: item.category,
+    body: item.body,
+    mediaAssetIds: parseMediaAssetIds(item.mediaAssetIdsJson),
+    createdAt: item.createdAt.toISOString(),
+    updatedAt: item.updatedAt.toISOString()
+  } satisfies QuickReplyRecord;
+}
+
+function normalizeQuickReplyMutationError(error: unknown) {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  ) {
+    return new Error("Shortcut already exists. Use a different shortcut.");
+  }
+
+  return error instanceof Error ? error : new Error("Unable to save quick reply.");
 }
 
 function parseMediaAssetIds(value: string | null) {

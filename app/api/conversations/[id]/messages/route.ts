@@ -7,6 +7,11 @@ import { enqueueOutboundMessage } from "@/lib/outbound-message-jobs";
 import { assertWorkspaceHasOutboundMessageCapacity } from "@/lib/package-feature-limits";
 import { prisma } from "@/lib/prisma";
 
+type ComposerAttachmentInput = {
+  assetId: string;
+  sendAsVoice: boolean;
+};
+
 type RouteContext = {
   params: Promise<{
     id: string;
@@ -21,6 +26,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
     const isFormData = contentType.includes("multipart/form-data");
     let text = "";
     let mediaAssetIds: string[] = [];
+    let attachments: ComposerAttachmentInput[] = [];
     let mentions: Array<{ id: string; label: string; token: string }> = [];
     let replyToMessageId = "";
     let interactiveButtons: string[] = [];
@@ -32,6 +38,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       const formData = await request.formData();
       text = `${formData.get("body") ?? ""}`.trim();
       mediaAssetIds = parseStringArray(formData.get("mediaAssetIds"));
+      attachments = parseAttachments(formData.get("attachments"));
       mentions = parseMentions(formData.get("mentions"));
       replyToMessageId = `${formData.get("replyToMessageId") ?? ""}`.trim();
       interactiveButtons = parseInteractiveChoices(formData.get("interactiveButtons"), 3);
@@ -42,6 +49,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       const body = (await request.json()) as {
         body?: string;
         mediaAssetIds?: string[];
+        attachments?: unknown;
         mentions?: unknown;
         replyToMessageId?: string;
         interactiveButtons?: unknown;
@@ -51,6 +59,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       };
       text = body.body?.trim() ?? "";
       mediaAssetIds = parseStringArray(body.mediaAssetIds);
+      attachments = parseAttachments(body.attachments);
       mentions = parseMentions(body.mentions);
       replyToMessageId = body.replyToMessageId?.trim() ?? "";
       interactiveButtons = parseInteractiveChoices(body.interactiveButtons, 3);
@@ -59,11 +68,20 @@ export async function POST(request: NextRequest, context: RouteContext) {
       scheduledFor = body.scheduledFor?.trim() ?? "";
     }
 
-    if (!text && !mediaAssetIds.length) {
+    const normalizedAttachments =
+      attachments.length || !mediaAssetIds.length
+        ? attachments
+        : mediaAssetIds.map((assetId) => ({
+            assetId,
+            sendAsVoice: false
+          }));
+    const attachmentIds = normalizedAttachments.map((attachment) => attachment.assetId);
+
+    if (!text && !attachmentIds.length) {
       return NextResponse.json({ error: "Message body or media is required." }, { status: 400 });
     }
 
-    if ((interactiveButtons.length || interactiveListOptions.length) && mediaAssetIds.length) {
+    if ((interactiveButtons.length || interactiveListOptions.length) && attachmentIds.length) {
       return NextResponse.json({ error: "Interactive messages cannot include attachments yet." }, { status: 400 });
     }
 
@@ -89,6 +107,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
       select: {
         id: true,
         workspaceId: true,
+        channelId: true,
         contactId: true,
         contact: {
           select: {
@@ -118,24 +137,53 @@ export async function POST(request: NextRequest, context: RouteContext) {
       );
     }
 
-    const selectedMediaAssets = mediaAssetIds.length
+    const selectedMediaAssets = attachmentIds.length
       ? await prisma.workspaceMediaAsset.findMany({
           where: {
             id: {
-              in: mediaAssetIds
+              in: attachmentIds
             },
             workspaceId: agent.workspaceId
           }
         })
       : [];
 
-    if (mediaAssetIds.length && selectedMediaAssets.length !== mediaAssetIds.length) {
+    if (attachmentIds.length && selectedMediaAssets.length !== attachmentIds.length) {
       return NextResponse.json({ error: "Selected media was not found." }, { status: 400 });
     }
 
-    const orderedMediaAssets = mediaAssetIds
-      .map((assetId) => selectedMediaAssets.find((asset) => asset.id === assetId) ?? null)
-      .filter((asset): asset is NonNullable<(typeof selectedMediaAssets)[number]> => Boolean(asset));
+    type SelectedMediaAsset = (typeof selectedMediaAssets)[number];
+    const invalidVoiceAttachment = normalizedAttachments.find((attachment) => {
+      if (!attachment.sendAsVoice) {
+        return false;
+      }
+
+      const asset = selectedMediaAssets.find((candidate: SelectedMediaAsset) => candidate.id === attachment.assetId);
+      return !asset || !asset.mimeType.startsWith("audio/") || !asset.storagePath;
+    });
+
+    if (invalidVoiceAttachment) {
+      return NextResponse.json(
+        {
+          error: "Voice notes require a stored audio attachment that can be converted to OGG."
+        },
+        { status: 400 }
+      );
+    }
+
+    const orderedMediaAssets = normalizedAttachments
+      .map((attachment) => {
+        const asset = selectedMediaAssets.find((candidate: SelectedMediaAsset) => candidate.id === attachment.assetId) ?? null;
+        return asset
+          ? {
+              asset,
+              sendAsVoice: attachment.sendAsVoice && asset.mimeType.startsWith("audio/")
+            }
+          : null;
+      })
+      .filter(
+        (entry): entry is { asset: NonNullable<SelectedMediaAsset>; sendAsVoice: boolean } => Boolean(entry)
+      );
 
     await assertWorkspaceHasOutboundMessageCapacity(
       agent.workspaceId,
@@ -147,6 +195,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
     if (text) {
       const textMessage = await enqueueOutboundMessage({
         workspaceId: conversation.workspaceId,
+        channelId: conversation.channelId,
+        mediaAssetId: null,
         attachmentMimeType: null,
         attachmentName: null,
         attachmentUrl: null,
@@ -165,12 +215,17 @@ export async function POST(request: NextRequest, context: RouteContext) {
       messages.push(textMessage);
     }
 
-    for (const [index, mediaAsset] of orderedMediaAssets.entries()) {
+    for (const [index, mediaAttachment] of orderedMediaAssets.entries()) {
+      const mediaAsset = mediaAttachment.asset;
       const nextMessage = await enqueueOutboundMessage({
         workspaceId: conversation.workspaceId,
+        channelId: conversation.channelId,
+        mediaAssetId: mediaAsset.id,
         attachmentMimeType: mediaAsset.mimeType,
         attachmentName: mediaAsset.originalName || mediaAsset.title,
         attachmentUrl: resolveMediaAssetUrl(mediaAsset.publicUrl),
+        attachmentPath: mediaAsset.storagePath,
+        sendAudioAsVoice: mediaAttachment.sendAsVoice,
         conversationId: id,
         body: "",
         availableAt: scheduledAt,
@@ -228,6 +283,33 @@ function parseStringArray(value: unknown) {
   } catch {
     return [];
   }
+}
+
+function parseAttachments(value: unknown) {
+  const parsed = typeof value === "string" ? safeParseJson(value) : value;
+
+  if (!Array.isArray(parsed)) {
+    return [] as ComposerAttachmentInput[];
+  }
+
+  return parsed
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+
+      const record = entry as Record<string, unknown>;
+      const assetId = typeof record.assetId === "string" ? record.assetId.trim() : "";
+      if (!assetId) {
+        return null;
+      }
+
+      return {
+        assetId,
+        sendAsVoice: record.sendAsVoice === true
+      };
+    })
+    .filter((entry): entry is ComposerAttachmentInput => Boolean(entry));
 }
 
 function parseMentions(value: unknown) {

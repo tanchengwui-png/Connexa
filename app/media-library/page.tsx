@@ -1,5 +1,6 @@
 import { DashboardShell } from "@/components/dashboard-shell";
 import { MediaLibraryManager } from "@/components/media-library-manager";
+import { MorePageIntro } from "@/components/more-page-intro";
 import { getMediaLibraryData } from "@/lib/media-library";
 
 export default async function MediaLibraryPage() {
@@ -7,17 +8,14 @@ export default async function MediaLibraryPage() {
 
   return (
     <DashboardShell currentPath="/media-library">
-      <section className="hero">
-        <div>
-          <span className="badge">Media library</span>
-          <h2>Centralize the images, voice notes, and videos that automation can reuse.</h2>
-          <p className="muted">
-            Upload approved WhatsApp media once here. Automation rules will pick from this library instead of uploading files inline.
-          </p>
-        </div>
-      </section>
-
-      <MediaLibraryManager assets={data.assets} limits={data.limits} />
+      <div className="more-page-stack">
+        <MorePageIntro
+          badge="Media library"
+          title="Store approved WhatsApp media in one operational library."
+          description="Keep reusable images, videos, audio, and documents easy to upload, review, and attach across automation and quick-reply workflows."
+        />
+        <MediaLibraryManager assets={data.assets} limits={data.limits} />
+      </div>
     </DashboardShell>
   );
 }

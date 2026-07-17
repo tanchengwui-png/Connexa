@@ -88,6 +88,18 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
     });
   }, [leads, ownerFilter, query, stageFilter]);
 
+  const stageSummary = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    for (const lead of filteredLeads) {
+      counts.set(lead.stageLabel, (counts.get(lead.stageLabel) ?? 0) + 1);
+    }
+
+    return Array.from(counts.entries())
+      .sort((left, right) => right[1] - left[1])
+      .slice(0, 3);
+  }, [filteredLeads]);
+
   const handleQuickUpdate = (
     lead: LeadSummary,
     patch: Partial<Pick<LeadSummary, "ownerId" | "priority" | "stage">>
@@ -116,16 +128,58 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
     });
   };
 
+  const unassignedCount = filteredLeads.filter((lead) => !lead.ownerId).length;
+
   return (
-    <section className="content-card leads-workspace-card">
+    <section className="auth-page-stack">
+      <section className="auth-page-hero auth-page-hero-compact">
+        <div className="auth-page-hero-copy">
+          <span className="auth-page-kicker">Pipeline management</span>
+          <h2>Leads</h2>
+          <p>Qualify, assign, and advance active opportunities from a faster list-first workspace.</p>
+          <div className="auth-page-hero-metrics">
+            <span className="auth-page-hero-stat">
+              <strong>{filteredLeads.length}</strong>
+              <small>visible leads</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{stageSummary[0]?.[1] ?? 0}</strong>
+              <small>{stageSummary[0]?.[0] ?? "top stage"}</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{unassignedCount}</strong>
+              <small>unassigned</small>
+            </span>
+            <span className="auth-page-hero-panel">
+              <span className="auth-page-hero-panel-label">List status</span>
+              <strong>
+                {query.trim() || stageFilter !== "ALL" || ownerFilter !== "ALL"
+                  ? "Filters are active"
+                  : "Viewing all active leads"}
+              </strong>
+              <p>
+                {filteredLeads.length} visible leads, {stageSummary[0]?.[1] ?? 0} in{" "}
+                {stageSummary[0]?.[0] ?? "top stage"}, and {unassignedCount} unassigned.
+              </p>
+            </span>
+          </div>
+        </div>
+      </section>
+
+      <section className="content-card leads-workspace-card">
       <div className="card-header leads-workspace-head">
         <div>
-          <h3 className="card-title">Lead workspace</h3>
+          <h3 className="card-title">Pipeline view</h3>
           <p className="muted">Manage active opportunities directly from the list, then open the full record when needed.</p>
         </div>
-        <span className="product-catalog-count">
-          {filteredLeads.length} {filteredLeads.length === 1 ? "lead" : "leads"}
-        </span>
+        <div className="scheduled-inline-stats">
+          <span>{filteredLeads.length} shown</span>
+          {stageSummary.map(([label, count]) => (
+            <span key={label}>
+              {count} {label}
+            </span>
+          ))}
+        </div>
       </div>
 
       <div className="leads-toolbar">
@@ -246,6 +300,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
           <div className="lead-record-empty">No leads match the current filters.</div>
         )}
       </div>
+      </section>
     </section>
   );
 }

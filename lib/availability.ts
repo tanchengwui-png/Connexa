@@ -1,5 +1,9 @@
 import { findAgentAvailability, listWorkspaceAvailabilityAgents, replaceAgentAvailability } from "@/lib/db-availability";
 import { AVAILABILITY_OVERRIDE_OPTIONS, WEEKDAY_OPTIONS } from "@/lib/availability-constants";
+import {
+  createWeeklyAvailabilityRule,
+  getWeeklyAvailabilityRuleLabel
+} from "@/lib/availability-weekly-rules";
 import { AvailabilityOverrideType } from "@/lib/db-types";
 
 const AVAILABILITY_TIME_ZONE = "Asia/Kuala_Lumpur";
@@ -17,6 +21,7 @@ const WEEKDAY_INDEX_BY_NAME: Record<string, number> = {
 export type AvailabilityRuleInput = {
   dayOfWeek: number;
   enabled: boolean;
+  allDay: boolean;
   startTime: string;
   endTime: string;
 };
@@ -41,13 +46,14 @@ export async function getAgentAvailability(agentId: string) {
   return {
     weeklyRules: WEEKDAY_OPTIONS.map(({ dayOfWeek, label }) => {
       const rule = rulesByDay.get(dayOfWeek);
-      return {
+      return createWeeklyAvailabilityRule({
         dayOfWeek,
         label,
-        enabled: rule?.enabled ?? false,
-        startTime: rule?.startTime ?? "09:00",
-        endTime: rule?.endTime ?? "18:00"
-      };
+        enabled: rule?.enabled,
+        allDay: rule?.allDay,
+        startTime: rule?.startTime,
+        endTime: rule?.endTime
+      });
     }),
     overrides: agent.availabilityOverrides.map((override) => ({
       id: override.id,
@@ -76,6 +82,7 @@ export async function saveAgentAvailability(
     weeklyRules: input.weeklyRules.map((rule) => ({
       dayOfWeek: rule.dayOfWeek,
       enabled: rule.enabled,
+      allDay: rule.allDay,
       startTime: rule.startTime,
       endTime: rule.endTime
     })),
@@ -106,7 +113,7 @@ export async function getWorkspaceAvailabilitySummary(workspaceId: string) {
 }
 
 export function deriveAvailabilityStatus(input: {
-  rules: Array<Pick<AvailabilityRuleInput, "dayOfWeek" | "enabled" | "startTime" | "endTime">>;
+  rules: Array<Pick<AvailabilityRuleInput, "dayOfWeek" | "enabled" | "allDay" | "startTime" | "endTime">>;
   overrides: Array<{ type: AvailabilityOverrideType; startAt: Date; endAt: Date }>;
 }) {
   const now = new Date();
@@ -140,6 +147,13 @@ export function deriveAvailabilityStatus(input: {
     return {
       tone: "off" as const,
       label: "Off today"
+    };
+  }
+
+  if (todayRule.allDay) {
+    return {
+      tone: "available" as const,
+      label: "Available all day"
     };
   }
 
@@ -184,14 +198,22 @@ function validateWeeklyRules(rules: AvailabilityRuleInput[]) {
 
     uniqueDays.add(rule.dayOfWeek);
 
+    if (typeof rule.allDay !== "boolean") {
+      throw new Error("Invalid all-day setting in availability rules.");
+    }
+
     if (!isValidTime(rule.startTime) || !isValidTime(rule.endTime)) {
       throw new Error("Availability times must use HH:MM.");
     }
 
-    if (toMinutes(rule.endTime) <= toMinutes(rule.startTime)) {
+    if (!rule.allDay && toMinutes(rule.endTime) <= toMinutes(rule.startTime)) {
       throw new Error("End time must be later than start time.");
     }
   }
+}
+
+export function getAvailabilityRuleDefaultLabel(rule: Pick<AvailabilityRuleInput, "enabled" | "allDay" | "startTime" | "endTime">) {
+  return getWeeklyAvailabilityRuleLabel(rule);
 }
 
 function validateOverrides(overrides: AvailabilityOverrideInput[]) {

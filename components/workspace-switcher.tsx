@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type WorkspaceMembership = {
   agentId: string;
@@ -13,9 +13,11 @@ type WorkspaceMembership = {
 };
 
 export function WorkspaceSwitcher({
-  memberships
+  memberships,
+  variant = "default"
 }: {
   memberships: WorkspaceMembership[];
+  variant?: "default" | "compact" | "menu";
 }) {
   const router = useRouter();
   const currentMembership = memberships.find((membership) => membership.isCurrent) ?? memberships[0];
@@ -23,8 +25,13 @@ export function WorkspaceSwitcher({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSwitch() {
-    if (!selectedAgentId || selectedAgentId === currentMembership?.agentId) {
+  useEffect(() => {
+    setSelectedAgentId(currentMembership?.agentId ?? "");
+    setPending(false);
+  }, [currentMembership?.agentId]);
+
+  async function switchWorkspace(agentId: string) {
+    if (!agentId || agentId === currentMembership?.agentId) {
       return;
     }
 
@@ -37,7 +44,7 @@ export function WorkspaceSwitcher({
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        agentId: selectedAgentId
+        agentId
       })
     });
 
@@ -57,32 +64,41 @@ export function WorkspaceSwitcher({
     return null;
   }
 
+  const isCompactVariant = variant === "compact" || variant === "menu";
+  const isMenuVariant = variant === "menu";
+
   return (
-    <div className="workspace-switcher">
+    <div className={`workspace-switcher${isCompactVariant ? " compact" : ""}${isMenuVariant ? " menu" : ""}`}>
       <label className="workspace-switcher-label" htmlFor="workspace-switcher">
         Workspace
       </label>
       <select
         className="app-select workspace-switcher-select"
         id="workspace-switcher"
-        onChange={(event) => setSelectedAgentId(event.target.value)}
+        onChange={(event) => {
+          const nextAgentId = event.target.value;
+          setSelectedAgentId(nextAgentId);
+          void switchWorkspace(nextAgentId);
+        }}
         value={selectedAgentId}
       >
         {memberships.map((membership) => (
           <option key={membership.agentId} value={membership.agentId}>
-            {`${membership.workspaceName} (${membership.role.toLowerCase()})`}
+            {isMenuVariant ? membership.workspaceName : `${membership.workspaceName} (${membership.role.toLowerCase()})`}
           </option>
         ))}
       </select>
 
-      <button
-        className="button button-secondary workspace-switcher-button"
-        disabled={pending || selectedAgentId === currentMembership?.agentId}
-        onClick={handleSwitch}
-        type="button"
-      >
-        {pending ? "Switching..." : "Switch workspace"}
-      </button>
+      {isMenuVariant ? null : (
+        <button
+          className="button button-secondary workspace-switcher-button"
+          disabled={pending || selectedAgentId === currentMembership?.agentId}
+          onClick={() => void switchWorkspace(selectedAgentId)}
+          type="button"
+        >
+          {pending ? "Switching..." : "Switch workspace"}
+        </button>
+      )}
 
       {error ? <p className="form-error workspace-switcher-error">{error}</p> : null}
     </div>

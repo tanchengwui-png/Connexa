@@ -13,9 +13,10 @@ type SnoozeDialogProps = {
   isOpen: boolean;
   isPending: boolean;
   initialValue: string | null;
+  initialReason: string | null;
   onClear: () => void;
   onClose: () => void;
-  onSave: (value: string) => void;
+  onSave: (input: { value: string; reason: string | null }) => void;
 };
 
 const quickOptions = [
@@ -36,11 +37,13 @@ export function SnoozeDialog({
   isOpen,
   isPending,
   initialValue,
+  initialReason,
   onClear,
   onClose,
   onSave
 }: SnoozeDialogProps) {
   const [value, setValue] = useState("");
+  const [reason, setReason] = useState("");
 
   useEffect(() => {
     if (!isOpen) {
@@ -50,7 +53,8 @@ export function SnoozeDialog({
     setValue(
       formatMalaysiaDateTimeLocalInput(initialValue ? new Date(initialValue) : new Date(Date.now() + 60 * 60 * 1000))
     );
-  }, [initialValue, isOpen]);
+    setReason(initialReason ?? "");
+  }, [initialReason, initialValue, isOpen]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -83,7 +87,10 @@ export function SnoozeDialog({
       return;
     }
 
-    onSave(nextDate.toISOString());
+    onSave({
+      value: nextDate.toISOString(),
+      reason: reason.trim() || null
+    });
   };
 
   return createPortal(
@@ -127,6 +134,17 @@ export function SnoozeDialog({
               onChange={(event) => setValue(event.target.value)}
               type="datetime-local"
               value={value}
+            />
+          </label>
+          <label className="inbox-dialog-field">
+            <span>Reason</span>
+            <input
+              className="inbox-dialog-input"
+              maxLength={160}
+              onChange={(event) => setReason(event.target.value)}
+              placeholder="Follow up, awaiting customer reply, quote review..."
+              type="text"
+              value={reason}
             />
           </label>
         </div>

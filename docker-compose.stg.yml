@@ -19,8 +19,9 @@ services:
 
   sender:
     build:
-      context: .
+      context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
+      target: sender
     container_name: connexa-stg-sender
     working_dir: /app
     env_file:
@@ -38,14 +39,16 @@ services:
 
   web:
     build:
-      context: .
+      context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
+      target: web
     container_name: connexa-stg-web
     working_dir: /app
     env_file:
       - .env.staging
     environment:
       NODE_ENV: production
+      SENDER_SERVICE_URL: http://sender:3101
     command: sh -lc "npm run start -- --hostname 0.0.0.0 --port 3000"
     ports:
       - "127.0.0.1:3001:3000"
@@ -60,13 +63,35 @@ services:
 
   worker:
     build:
-      context: .
+      context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
+      target: worker
     container_name: connexa-stg-worker
     working_dir: /app
     env_file:
       - .env.staging
+    environment:
+      SENDER_SERVICE_URL: http://sender:3101
     command: sh -lc "npm run worker:messages"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      web:
+        condition: service_started
+    restart: unless-stopped
+
+  billing-worker:
+    build:
+      context: /srv/recurvos/staging/connexa/repo
+      dockerfile: Dockerfile
+      target: worker
+    container_name: connexa-stg-billing-worker
+    working_dir: /app
+    env_file:
+      - .env.staging
+    environment:
+      BILLING_CLEANUP_INTERVAL_MS: "86400000"
+    command: sh -lc "npm run worker:billing-cleanup"
     depends_on:
       postgres:
         condition: service_healthy

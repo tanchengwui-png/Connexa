@@ -1,3 +1,5 @@
+import { AttachmentPreview } from "@/components/attachment-preview";
+
 type IncomingMessageBubbleProps = {
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
@@ -5,6 +7,7 @@ type IncomingMessageBubbleProps = {
   body: string;
   direction: "inbound" | "outbound";
   canDelete?: boolean;
+  deliveryStatus?: "pending" | "sent" | "delivered" | "read";
   id: string;
   isConnexaOutbound?: boolean;
   isDeleted?: boolean;
@@ -31,6 +34,7 @@ export function IncomingMessageBubble({
   attachmentUrl,
   body,
   canDelete = false,
+  deliveryStatus = "pending",
   direction,
   id,
   isConnexaOutbound = false,
@@ -42,9 +46,12 @@ export function IncomingMessageBubble({
   sender,
   sentAt
 }: IncomingMessageBubbleProps) {
+  const normalizedBody = normalizeBubbleText(body);
+  const normalizedReplyBody = normalizeNullableBubbleText(replyToMessage?.body);
+  const normalizedReplyAttachmentName = normalizeNullableBubbleText(replyToMessage?.attachmentName);
+  const normalizedSender = normalizeBubbleText(sender, "Unknown sender");
   const resolvedAttachmentUrl = resolveAttachmentUrl(attachmentUrl);
-  const parsedBody = parseInteractiveBody(isDeleted ? "" : body);
-  const attachmentKind = getAttachmentKind(attachmentMimeType);
+  const parsedBody = parseInteractiveBody(isDeleted ? "" : normalizedBody);
   const shouldHidePlaceholderBody = !parsedBody.kind && shouldHideSyncedPlaceholderBody(parsedBody.text, resolvedAttachmentUrl);
   const outboundClassName = direction === "outbound" ? (isConnexaOutbound ? "connexa" : "external") : "";
   const outboundLabel =
@@ -58,61 +65,27 @@ export function IncomingMessageBubble({
   return (
     <div className={`chat-bubble-row ${direction}`}>
       <div className={`chat-bubble ${direction} ${outboundClassName}`.trim()}>
-        <div className="chat-bubble-sender">{sender}</div>
+        <div className="chat-bubble-sender">{normalizedSender}</div>
         {!isDeleted && replyToMessage ? (
           <div className="chat-bubble-reply-context">
             <span>{replyToMessage.sender ?? "Previous message"}</span>
             <strong>
-              {replyToMessage.body?.trim()
-                ? renderWhatsAppFormattedText(replyToMessage.body.trim())
-                : replyToMessage.attachmentName || "Attachment"}
+              {normalizedReplyBody
+                ? renderWhatsAppFormattedText(normalizedReplyBody)
+                : normalizedReplyAttachmentName || "Attachment"}
             </strong>
           </div>
         ) : null}
         {resolvedAttachmentUrl ? (
           <div className="chat-bubble-attachment-wrap">
-            {attachmentKind === "image" ? (
-              <a className="chat-bubble-image-link" href={resolvedAttachmentUrl} rel="noreferrer" target="_blank">
-                <img
-                  alt={attachmentName ?? "Image attachment"}
-                  className="chat-bubble-image"
-                  loading="lazy"
-                  src={resolvedAttachmentUrl}
-                />
-              </a>
-            ) : null}
-            {attachmentKind === "audio" ? (
-              <audio className="chat-bubble-audio" controls preload="metadata" src={resolvedAttachmentUrl}>
-                Your browser does not support audio playback.
-              </audio>
-            ) : null}
-            {attachmentKind === "video" ? (
-              <video
-                className="chat-bubble-video"
-                controls
-                playsInline
-                preload="metadata"
-                src={resolvedAttachmentUrl}
-              >
-                Your browser does not support video playback.
-              </video>
-            ) : null}
-            <a className="chat-bubble-attachment" href={resolvedAttachmentUrl} rel="noreferrer" target="_blank">
-              <span>{getAttachmentLabel(attachmentKind)}</span>
-              <strong>{attachmentName ?? "Open file"}</strong>
-            </a>
-            <div className="chat-bubble-attachment-actions">
-              <a className="chat-bubble-action chat-bubble-action-link" href={resolvedAttachmentUrl} rel="noreferrer" target="_blank">
-                Open
-              </a>
-              <a
-                className="chat-bubble-action chat-bubble-action-link"
-                download={attachmentName ?? true}
-                href={resolvedAttachmentUrl}
-              >
-                Download
-              </a>
-            </div>
+            <AttachmentPreview
+              className="attachment-preview-compact"
+              fileName={attachmentName}
+              fit="cover"
+              mimeType={attachmentMimeType}
+              openLabel="Open attachment"
+              url={resolvedAttachmentUrl}
+            />
           </div>
         ) : null}
         {isDeleted ? <div className="chat-bubble-deleted">Message deleted for everyone</div> : null}
@@ -144,8 +117,17 @@ export function IncomingMessageBubble({
           </div>
         ) : null}
         <div className="chat-meta">
-          <span>{outboundLabel}</span>
-          <span>{sentAt}</span>
+          <span className="chat-meta-label">{outboundLabel}</span>
+          {direction === "outbound" ? (
+            <span
+              aria-label={`Message ${deliveryStatus}`}
+              className={`chat-delivery-status ${deliveryStatus}`}
+              title={formatDeliveryStatusLabel(deliveryStatus)}
+            >
+              {renderDeliveryStatusTick(deliveryStatus)}
+            </span>
+          ) : null}
+          <span className="chat-meta-time">{sentAt}</span>
         </div>
         {!isDeleted && (onReply || (onDelete && canDelete)) ? (
           <div className="chat-bubble-actions">
@@ -166,40 +148,70 @@ export function IncomingMessageBubble({
   );
 }
 
-function getAttachmentKind(mimeType?: string | null) {
-  if (!mimeType) {
-    return "file" as const;
-  }
+function normalizeBubbleText(value: unknown, fallback = "") {
+  const normalized = extractBubbleText(value)
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .join("\n")
+    .trim();
 
-  if (mimeType.startsWith("image/")) {
-    return "image" as const;
-  }
-
-  if (mimeType.startsWith("audio/")) {
-    return "audio" as const;
-  }
-
-  if (mimeType.startsWith("video/")) {
-    return "video" as const;
-  }
-
-  return "file" as const;
+  return normalized || fallback;
 }
 
-function getAttachmentLabel(kind: ReturnType<typeof getAttachmentKind>) {
-  if (kind === "image") {
-    return "Image";
+function normalizeNullableBubbleText(value: unknown) {
+  const normalized = normalizeBubbleText(value);
+  return normalized ? normalized : null;
+}
+
+function extractBubbleText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
   }
 
-  if (kind === "audio") {
-    return "Audio";
+  if (Array.isArray(value)) {
+    return value.map((entry) => extractBubbleText(entry)).filter(Boolean).join(" ");
   }
 
-  if (kind === "video") {
-    return "Video";
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["text", "body", "caption", "message"]) {
+      const nested = extractBubbleText(record[key]);
+      if (nested) {
+        return nested;
+      }
+    }
   }
 
-  return "Attachment";
+  return "";
+}
+
+function renderDeliveryStatusTick(status: NonNullable<IncomingMessageBubbleProps["deliveryStatus"]>) {
+  switch (status) {
+    case "read":
+      return "✓✓";
+    case "delivered":
+      return "✓✓";
+    case "sent":
+      return "✓";
+    case "pending":
+    default:
+      return "◷";
+  }
+}
+
+function formatDeliveryStatusLabel(status: NonNullable<IncomingMessageBubbleProps["deliveryStatus"]>) {
+  switch (status) {
+    case "read":
+      return "Read";
+    case "delivered":
+      return "Delivered";
+    case "sent":
+      return "Sent";
+    case "pending":
+    default:
+      return "Pending";
+  }
 }
 
 function parseInteractiveBody(body: string) {

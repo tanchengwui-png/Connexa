@@ -1,5 +1,5 @@
 type SetupProgressCardProps = {
-  activeStep: 1 | 2;
+  activeStep: 1 | 2 | 3 | 4;
   selectedMethodLabel?: string | null;
   variant?: "guided" | "settings";
 };
@@ -7,13 +7,23 @@ type SetupProgressCardProps = {
 const steps = [
   {
     id: 1,
-    title: "Integration Method",
-    description: "Choose the connection path that matches your scale and operational model."
+    title: "Select Number",
+    description: "Choose the workspace WhatsApp channel you want to manage."
   },
   {
     id: 2,
-    title: "Setup Connection",
-    description: "Configure credentials or scan QR, then finalize the workspace connection."
+    title: "Choose Method",
+    description: "Use WhatsApp Web for QR setup or Business API for Meta Cloud."
+  },
+  {
+    id: 3,
+    title: "Connect Phone",
+    description: "Scan QR or save API credentials for the selected channel."
+  },
+  {
+    id: 4,
+    title: "Verify Inbox",
+    description: "Confirm the inbox is ready for live conversations."
   }
 ] as const;
 
@@ -27,12 +37,12 @@ export function SetupProgressCard({
   return (
     <div className="wa-progress-card">
       <div className="wa-progress-copy">
-        <span className="wa-progress-kicker">{isGuided ? "Activate inbox" : "Let&apos;s Get Connected!"}</span>
-        <h2>{isGuided ? "Connect WhatsApp first" : "Setup your account"}</h2>
+        <span className="wa-progress-kicker">{isGuided ? "Activate inbox" : "Let's Get Connected!"}</span>
+        <h2>{isGuided ? "Connect WhatsApp first" : "WhatsApp setup"}</h2>
         <p>
           {isGuided
             ? "Link the business phone once so your team can start working from the shared inbox."
-            : "Move through a short guided setup so the inbox lands on a stable WhatsApp connection."}
+            : "Move through four simple steps: number, method, connection, and inbox verification."}
         </p>
       </div>
 

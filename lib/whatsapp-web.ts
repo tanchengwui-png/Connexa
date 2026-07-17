@@ -1,20 +1,29 @@
 import { accessSync, existsSync, readdirSync, rmSync } from "fs";
-import { mkdir, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { spawn } from "child_process";
 import path from "path";
+import { tmpdir } from "os";
 import { normalizeStoredPhone } from "@/lib/phone";
+import { MediaAssetSource, MessageDirection } from "@/lib/db-types";
+import { registerStoredWorkspaceMediaAsset } from "@/lib/media-library";
 import QRCode from "qrcode";
-import { MessageDirection } from "@prisma/client";
 import whatsappWebJs from "whatsapp-web.js";
 import type { Client as WhatsAppClient, Message, Reaction } from "whatsapp-web.js";
 import { prisma } from "@/lib/prisma";
 import {
-  deleteWorkspaceWhatsAppSession,
+  getWhatsAppChannelStatusById,
+  deleteWhatsAppSession,
+  clearWhatsAppChannelSession,
   clearWorkspaceWhatsAppSession,
+  isWhatsAppChannelIncognitoModeEnabled,
   markWorkspaceWhatsAppChannelDisconnected,
+  markWhatsAppChannelDisconnected,
   getWorkspaceWhatsAppChannelStatus,
+  saveWhatsAppChannelConnection,
   saveWorkspaceWhatsAppChannelConnection
 } from "@/lib/whatsapp-channel";
 import { captureWhatsAppMessageEnvelope, captureWhatsAppReactionEnvelope, persistIncomingMedia } from "@/lib/whatsapp-message-envelope";
+import { persistWhatsAppMessageAck } from "@/lib/whatsapp-ack";
 import { logWhatsAppRuntimeEvent, WHATSAPP_RUNTIME_EVENT_TYPES } from "@/lib/whatsapp-runtime-events";
 import {
   clearRuntimeSupervisorState,
@@ -40,6 +49,7 @@ type RuntimeState = {
   client: WhatsAppClient;
   agentId: string;
   workspaceId: string;
+  channelId: string;
   sessionClientId: string;
   restoredFromSession: boolean;
   initializing: Promise<void> | null;
@@ -58,6 +68,7 @@ type RuntimeState = {
   reconnectTimer: NodeJS.Timeout | null;
   idleEvictionTimer: NodeJS.Timeout | null;
   lastActivityAt: number;
+  reconnectAttempts: number;
 };
 
 declare global {
@@ -65,10 +76,13 @@ declare global {
   var whatsAppRuntimeStates: Map<string, RuntimeState> | undefined;
   // eslint-disable-next-line no-var
   var whatsAppRuntimeCreations: Map<string, Promise<RuntimeState | null>> | undefined;
+  // eslint-disable-next-line no-var
+  var whatsAppRuntimeBoundClients: WeakSet<WhatsAppClient> | undefined;
 }
 
 const runtimeStates = global.whatsAppRuntimeStates ?? new Map<string, RuntimeState>();
 const runtimeCreations = global.whatsAppRuntimeCreations ?? new Map<string, Promise<RuntimeState | null>>();
+const runtimeBoundClients = global.whatsAppRuntimeBoundClients ?? new WeakSet<WhatsAppClient>();
 
 const WHATSAPP_HISTORY_SYNC_LIMIT = Math.max(
   1,
@@ -110,9 +124,34 @@ const WHATSAPP_CONNECTION_STALL_MS = Math.max(
   Number.parseInt(process.env.WHATSAPP_CONNECTION_STALL_MS ?? "90000", 10) || 90000
 );
 
+const WHATSAPP_INITIALIZE_TIMEOUT_MS = Math.max(
+  WHATSAPP_CONNECTION_STALL_MS,
+  Number.parseInt(process.env.WHATSAPP_INITIALIZE_TIMEOUT_MS ?? "180000", 10) || 180000
+);
+
+const WHATSAPP_RECONNECT_BASE_MS = Math.max(
+  1_000,
+  Number.parseInt(process.env.WHATSAPP_RECONNECT_BASE_MS ?? "5000", 10) || 5000
+);
+
+const WHATSAPP_RECONNECT_MAX_MS = Math.max(
+  WHATSAPP_RECONNECT_BASE_MS,
+  Number.parseInt(process.env.WHATSAPP_RECONNECT_MAX_MS ?? "60000", 10) || 60000
+);
+
+const WHATSAPP_STALE_RUNTIME_MS = Math.max(
+  WHATSAPP_CONNECTION_STALL_MS,
+  Number.parseInt(process.env.WHATSAPP_STALE_RUNTIME_MS ?? "180000", 10) || 180000
+);
+
 const WHATSAPP_HISTORY_DEFERRED_RETRY_MS = Math.max(
   WHATSAPP_HISTORY_RETRY_MAX_MS,
   Number.parseInt(process.env.WHATSAPP_HISTORY_DEFERRED_RETRY_MS ?? "300000", 10) || 300000
+);
+
+const WHATSAPP_PERIODIC_SYNC_MS = Math.max(
+  60_000,
+  Number.parseInt(process.env.WHATSAPP_PERIODIC_SYNC_MS ?? "180000", 10) || 180000
 );
 
 const WHATSAPP_TYPING_MIN_MS = Math.max(
@@ -143,21 +182,25 @@ if (!global.whatsAppRuntimeCreations) {
   global.whatsAppRuntimeCreations = runtimeCreations;
 }
 
-function buildRuntimeKey(workspaceId: string) {
-  return workspaceId;
+if (!global.whatsAppRuntimeBoundClients) {
+  global.whatsAppRuntimeBoundClients = runtimeBoundClients;
 }
 
-function hasWarmRuntime(workspaceId: string) {
-  const runtime = runtimeStates.get(buildRuntimeKey(workspaceId));
+function buildRuntimeKey(channelId: string) {
+  return channelId;
+}
+
+function hasWarmRuntime(channelId: string) {
+  const runtime = runtimeStates.get(buildRuntimeKey(channelId));
   return Boolean(runtime?.client);
 }
 
-function buildSessionClientId(workspaceId: string, agentId: string) {
-  return `connexa-${workspaceId}-${agentId}`.replace(/[^a-zA-Z0-9-_]/g, "");
+function buildSessionClientId(workspaceId: string, channelId: string, agentId: string) {
+  return `connexa-${workspaceId}-${channelId}-${agentId}`.replace(/[^a-zA-Z0-9-_]/g, "");
 }
 
-function buildFreshSessionClientId(workspaceId: string, agentId: string) {
-  return `${buildSessionClientId(workspaceId, agentId)}-${Date.now().toString(36)}`;
+function buildFreshSessionClientId(workspaceId: string, channelId: string, agentId: string) {
+  return `${buildSessionClientId(workspaceId, channelId, agentId)}-${Date.now().toString(36)}`;
 }
 
 function createWhatsAppClient(sessionClientId: string) {
@@ -425,7 +468,23 @@ async function extractIncomingMediaAttachment(input: {
     media: downloadedMedia
   }).catch(() => null);
 
+  const mediaAsset =
+    storedMedia && typeof downloadedMedia.filesize === "number" && downloadedMedia.filesize > 0
+      ? await registerStoredWorkspaceMediaAsset({
+          workspaceId: input.workspaceId,
+          originalName: downloadedMedia.filename ?? input.providerMessageId,
+          title: downloadedMedia.filename ?? input.providerMessageId,
+          storagePath: storedMedia.storagePath,
+          publicUrl: storedMedia.url,
+          mimeType: downloadedMedia.mimetype ?? "application/octet-stream",
+          sizeBytes: downloadedMedia.filesize,
+          sourceModule: MediaAssetSource.WHATSAPP_INBOUND,
+          skipStorageLimitCheck: true
+        }).catch(() => null)
+      : null;
+
   return {
+    mediaAssetId: mediaAsset?.id ?? null,
     attachmentMimeType: downloadedMedia.mimetype ?? null,
     attachmentName: downloadedMedia.filename ?? null,
     attachmentUrl: storedMedia?.url ?? null
@@ -588,6 +647,111 @@ function isGroupRemoteId(serializedId?: string | null) {
 function buildDirectChatId(phone: string) {
   const normalizedPhone = normalizeChatPhone(phone);
   return normalizedPhone ? `${normalizedPhone}@c.us` : null;
+}
+
+function isVoiceNoteMimeType(mimeType?: string | null) {
+  const normalized = `${mimeType ?? ""}`.trim().toLowerCase();
+  return normalized === "audio/ogg" || normalized === "audio/opus";
+}
+
+function assertValidVoiceNoteRequest(input: {
+  attachmentPath?: string | null;
+  attachmentMimeType?: string | null;
+  sendAudioAsVoice?: boolean;
+}) {
+  if (input.sendAudioAsVoice !== true) {
+    return;
+  }
+
+  if (!input.attachmentPath) {
+    throw new Error("Voice notes require a local audio file before sending.");
+  }
+
+  if (!`${input.attachmentMimeType ?? ""}`.trim().toLowerCase().startsWith("audio/")) {
+    throw new Error("Voice notes only support audio attachments.");
+  }
+}
+
+function shouldSendAsVoiceNote(input: {
+  attachmentPath?: string | null;
+  attachmentMimeType?: string | null;
+  sendAudioAsVoice?: boolean;
+}) {
+  return Boolean(
+    input.sendAudioAsVoice === true &&
+      input.attachmentPath &&
+      `${input.attachmentMimeType ?? ""}`.trim().toLowerCase().startsWith("audio/")
+  );
+}
+
+async function prepareVoiceNoteAttachment(input: {
+  attachmentPath: string;
+  attachmentMimeType?: string | null;
+  attachmentName?: string | null;
+}) {
+  const tempDir = await mkdtemp(path.join(tmpdir(), "connexa-voice-note-"));
+  const outputPath = path.join(tempDir, `${path.parse(input.attachmentName ?? "voice-note").name || "voice-note"}.ogg`);
+
+  await convertAudioToVoiceNoteOgg(input.attachmentPath, outputPath);
+
+  return {
+    path: outputPath,
+    mimeType: "audio/ogg",
+    cleanup: async () => {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  };
+}
+
+async function convertAudioToVoiceNoteOgg(inputPath: string, outputPath: string) {
+  await new Promise<void>((resolve, reject) => {
+    const ffmpeg = spawn("ffmpeg", [
+      "-y",
+      "-i",
+      inputPath,
+      "-vn",
+      "-ac",
+      "1",
+      "-ar",
+      "48000",
+      "-c:a",
+      "libopus",
+      "-b:a",
+      "48k",
+      "-application",
+      "voip",
+      "-f",
+      "ogg",
+      outputPath
+    ]);
+
+    let stderr = "";
+
+    ffmpeg.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    ffmpeg.on("error", (error) => {
+      reject(
+        new Error(
+          error instanceof Error && "code" in error && error.code === "ENOENT"
+            ? "ffmpeg is not installed on the WhatsApp Personal sender runtime."
+            : error instanceof Error
+              ? error.message
+              : "Unable to start ffmpeg for voice note conversion."
+        )
+      );
+    });
+
+    ffmpeg.on("close", (code) => {
+      if (code === 0) {
+        resolve();
+        return;
+      }
+
+      reject(new Error(stderr.trim() || `ffmpeg exited with code ${code}`));
+    });
+  });
 }
 
 function isUsableWhatsAppPhone(serializedId?: string | null) {
@@ -1281,6 +1445,86 @@ function clearIdleEvictionTimer(state: RuntimeState) {
   }
 }
 
+function isUnrecoverableRuntimeStatus(status: string) {
+  return status === "AUTH_FAILED" || status === "DISCONNECTED" || status === "ERROR";
+}
+
+function getReconnectDelayMs(attempt: number) {
+  return Math.min(WHATSAPP_RECONNECT_MAX_MS, WHATSAPP_RECONNECT_BASE_MS * 2 ** Math.max(0, attempt - 1));
+}
+
+function shouldRecycleRuntimeState(state: RuntimeState) {
+  if (!state.client) {
+    return true;
+  }
+
+  if (state.reconnectTimer || isUnrecoverableRuntimeStatus(state.connectionStatus)) {
+    return true;
+  }
+
+  if (
+    (state.connectionStatus === "INITIALIZING" || state.connectionStatus === "AUTHENTICATED") &&
+    Date.now() - state.statusUpdatedAt > WHATSAPP_STALE_RUNTIME_MS
+  ) {
+    return true;
+  }
+
+  if (
+    ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(state.connectionStatus) &&
+    !state.client.info?.wid?._serialized &&
+    Date.now() - state.statusUpdatedAt > WHATSAPP_STALE_RUNTIME_MS
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+async function replaceRuntimeClient(state: RuntimeState, sessionClientId = state.sessionClientId) {
+  const previousClient = state.client;
+
+  await previousClient.destroy().catch(() => null);
+  state.client = createWhatsAppClient(sessionClientId);
+  bindClientEvents(state);
+}
+
+function createInitializeTimeoutError(timeoutMs: number) {
+  return new Error(`WhatsApp client initialization timed out after ${timeoutMs}ms.`);
+}
+
+async function initializeClientWithTimeout(state: RuntimeState) {
+  let timeoutHandle: NodeJS.Timeout | null = null;
+
+  try {
+    await Promise.race([
+      state.client.initialize(),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(createInitializeTimeoutError(WHATSAPP_INITIALIZE_TIMEOUT_MS));
+        }, WHATSAPP_INITIALIZE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
+function shouldRetryInitializeError(error: unknown) {
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error ?? "").toLowerCase();
+
+  return (
+    isTransientExecutionContextError(error) ||
+    isChromiumProfileLockError(error) ||
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("navigation") ||
+    message.includes("target closed") ||
+    message.includes("session closed")
+  );
+}
+
 function canEvictIdleRuntime(state: RuntimeState) {
   return (
     WHATSAPP_IDLE_EVICT_MS > 0 &&
@@ -1292,7 +1536,7 @@ function canEvictIdleRuntime(state: RuntimeState) {
 }
 
 async function evictIdleRuntime(state: RuntimeState, expectedActivityAt: number) {
-  const currentRuntime = runtimeStates.get(buildRuntimeKey(state.workspaceId));
+  const currentRuntime = runtimeStates.get(buildRuntimeKey(state.channelId));
   if (
     currentRuntime !== state ||
     state.lastActivityAt !== expectedActivityAt ||
@@ -1315,7 +1559,7 @@ async function evictIdleRuntime(state: RuntimeState, expectedActivityAt: number)
     }
   });
 
-  await teardownRuntimeState(state.workspaceId);
+  await teardownRuntimeState(state.channelId);
 }
 
 function scheduleIdleEviction(state: RuntimeState) {
@@ -1347,7 +1591,7 @@ function shouldWatchForStalledRuntime(state: RuntimeState) {
 }
 
 function isActiveRuntimeState(state: RuntimeState) {
-  return runtimeStates.get(buildRuntimeKey(state.workspaceId)) === state;
+  return runtimeStates.get(buildRuntimeKey(state.channelId)) === state;
 }
 
 function updateRuntimeStatus(state: RuntimeState, status: string) {
@@ -1377,8 +1621,8 @@ function updateRuntimeStatus(state: RuntimeState, status: string) {
   }, WHATSAPP_CONNECTION_STALL_MS);
 }
 
-async function teardownRuntimeState(workspaceId: string) {
-  const runtimeKey = buildRuntimeKey(workspaceId);
+async function teardownRuntimeState(channelId: string) {
+  const runtimeKey = buildRuntimeKey(channelId);
   const runtime = runtimeStates.get(runtimeKey);
 
   if (!runtime) {
@@ -1434,7 +1678,8 @@ async function scheduleRuntimeReconnect(state: RuntimeState, delayMs = 5000) {
       eventType: WHATSAPP_RUNTIME_EVENT_TYPES.SUPERVISOR_PAUSED,
       message: recoveryAttempt.status.manualAttentionReason
     });
-    await markWorkspaceWhatsAppChannelDisconnected({
+    await markWhatsAppChannelDisconnected({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       connectionStatus: "ERROR",
       lastError: recoveryAttempt.status.manualAttentionReason
@@ -1443,18 +1688,23 @@ async function scheduleRuntimeReconnect(state: RuntimeState, delayMs = 5000) {
   }
 
   clearReconnectTimer(state);
+  state.reconnectAttempts += 1;
+  const resolvedDelayMs = Math.max(delayMs, getReconnectDelayMs(state.reconnectAttempts));
   void logWhatsAppRuntimeEvent({
     workspaceId: state.workspaceId,
     sessionClientId: state.sessionClientId,
     eventType: WHATSAPP_RUNTIME_EVENT_TYPES.RECONNECT_SCHEDULED,
-    message: `Transient disconnect detected. Reconnect scheduled in ${delayMs}ms.`,
+    message: `Transient disconnect detected. Reconnect scheduled in ${resolvedDelayMs}ms.`,
     metadata: {
-      delayMs
+      attempt: state.reconnectAttempts,
+      delayMs: resolvedDelayMs
     }
   });
   state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = null;
     void ensureWorkspaceWhatsAppClient({
       workspaceId: state.workspaceId,
+      channelId: state.channelId,
       agentId: state.agentId
     }).catch((error) => {
       console.error(
@@ -1463,7 +1713,7 @@ async function scheduleRuntimeReconnect(state: RuntimeState, delayMs = 5000) {
         }`
       );
     });
-  }, delayMs);
+  }, resolvedDelayMs);
 }
 
 async function recoverStalledRuntime(
@@ -1471,7 +1721,7 @@ async function recoverStalledRuntime(
   expectedStatus: string,
   statusUpdatedAt: number
 ) {
-  const currentRuntime = runtimeStates.get(buildRuntimeKey(state.workspaceId));
+  const currentRuntime = runtimeStates.get(buildRuntimeKey(state.channelId));
   if (
     currentRuntime !== state ||
     state.connectionStatus !== expectedStatus ||
@@ -1497,8 +1747,9 @@ async function recoverStalledRuntime(
         expectedStatus
       }
     });
-    await teardownRuntimeState(state.workspaceId);
-    await saveWorkspaceWhatsAppChannelConnection({
+    await teardownRuntimeState(state.channelId);
+    await saveWhatsAppChannelConnection({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       agentId: state.agentId,
       sessionClientId: state.sessionClientId,
@@ -1537,8 +1788,9 @@ async function restartRuntimePreservingSession(
   lastError: string,
   metadata?: Record<string, unknown>
 ) {
-  await teardownRuntimeState(state.workspaceId);
-  await saveWorkspaceWhatsAppChannelConnection({
+  await teardownRuntimeState(state.channelId);
+  await saveWhatsAppChannelConnection({
+    channelId: state.channelId,
     workspaceId: state.workspaceId,
     agentId: state.agentId,
     sessionClientId: state.sessionClientId,
@@ -1556,6 +1808,7 @@ async function restartRuntimePreservingSession(
   });
   await ensureWorkspaceWhatsAppClient({
     workspaceId: state.workspaceId,
+    channelId: state.channelId,
     agentId: state.agentId
   });
 }
@@ -1563,7 +1816,7 @@ async function restartRuntimePreservingSession(
 function scheduleBackgroundSync(state: RuntimeState, delayMs: number) {
   clearBackgroundSyncTimer(state);
   state.backgroundSyncTimer = setTimeout(() => {
-    void syncWorkspaceHistory(state.workspaceId, { triggeredBy: "background" }).catch(() => null);
+    void syncWorkspaceHistory(state.workspaceId, state.channelId, { triggeredBy: "background" }).catch(() => null);
   }, delayMs);
 }
 
@@ -1657,6 +1910,12 @@ async function retryWhatsAppOperation<T>(operation: () => Promise<T>, attempts =
 }
 
 function bindClientEvents(state: RuntimeState) {
+  if (runtimeBoundClients.has(state.client)) {
+    return;
+  }
+
+  runtimeBoundClients.add(state.client);
+
   state.client.on("qr", async (qr) => {
     if (!isActiveRuntimeState(state)) {
       return;
@@ -1675,7 +1934,8 @@ function bindClientEvents(state: RuntimeState) {
       message: "QR code generated and ready to scan."
     });
 
-    await saveWorkspaceWhatsAppChannelConnection({
+    await saveWhatsAppChannelConnection({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       agentId: state.agentId,
       sessionClientId: state.sessionClientId,
@@ -1706,7 +1966,8 @@ function bindClientEvents(state: RuntimeState) {
       message: "WhatsApp session authenticated."
     });
 
-    await saveWorkspaceWhatsAppChannelConnection({
+    await saveWhatsAppChannelConnection({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       agentId: state.agentId,
       sessionClientId: state.sessionClientId,
@@ -1731,6 +1992,7 @@ function bindClientEvents(state: RuntimeState) {
     state.lastError = null;
     state.historySyncStartedAt = Date.now();
     state.historyRetryDelayMs = WHATSAPP_HISTORY_RETRY_BASE_MS;
+    state.reconnectAttempts = 0;
     touchRuntimeActivity(state);
     const previousSupervisorState = getRuntimeSupervisorStatus(state.workspaceId);
     recordRuntimeReady(state.workspaceId);
@@ -1754,7 +2016,8 @@ function bindClientEvents(state: RuntimeState) {
       });
     }
 
-    await saveWorkspaceWhatsAppChannelConnection({
+    await saveWhatsAppChannelConnection({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       agentId: state.agentId,
       sessionClientId: state.sessionClientId,
@@ -1796,7 +2059,8 @@ function bindClientEvents(state: RuntimeState) {
       message: supervisorStatus.manualAttentionReason
     });
 
-    await saveWorkspaceWhatsAppChannelConnection({
+    await saveWhatsAppChannelConnection({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       agentId: state.agentId,
       sessionClientId: state.sessionClientId,
@@ -1826,18 +2090,20 @@ function bindClientEvents(state: RuntimeState) {
       eventType: WHATSAPP_RUNTIME_EVENT_TYPES.DISCONNECTED,
       message: String(reason)
     });
-    await teardownRuntimeState(state.workspaceId);
+    await teardownRuntimeState(state.channelId);
 
     if (isSessionInvalidationDisconnectReason(reason)) {
-      await clearWorkspaceWhatsAppSession(
-        state.workspaceId,
-        String(reason),
-        getSessionAuthPath(state.sessionClientId)
-      );
+      await clearWhatsAppChannelSession({
+        channelId: state.channelId,
+        workspaceId: state.workspaceId,
+        lastError: String(reason),
+        authPath: getSessionAuthPath(state.sessionClientId)
+      });
       return;
     }
 
-    await markWorkspaceWhatsAppChannelDisconnected({
+    await markWhatsAppChannelDisconnected({
+      channelId: state.channelId,
       workspaceId: state.workspaceId,
       connectionStatus: "DISCONNECTED",
       lastError: String(reason)
@@ -1849,116 +2115,26 @@ function bindClientEvents(state: RuntimeState) {
   });
 
   state.client.on("message", async (message) => {
-    const messageData = message as Message & {
-      _data?: {
-        notifyName?: string;
-      };
-      rawData?: unknown;
-    };
-    try {
-      const contact = await message.getContact().catch(() => null);
-      const contactSnapshot = serializeWhatsAppContactSnapshot(contact);
-      const remoteId = message.fromMe ? message.to : message.from;
-      const chat = await message.getChat().catch(() => null);
+    await persistLiveWhatsAppWebMessage(state, message, "message");
+  });
 
-      if (
-        isStatusLikeMessage(message) ||
-        isStatusLikeRemoteId(remoteId) ||
-        isStatusLikeRemoteId(chat?.id?._serialized)
-      ) {
-        return;
-      }
-
-      const resolvedIdentity = await resolveIncomingContactIdentity({
-        workspaceId: state.workspaceId,
-        client: state.client,
-        remoteId,
-        notifyName: messageData._data?.notifyName ?? null,
-        fallbackId: message.fromMe ? message.to : message.from,
-        contact,
-        chat
-      });
-
-      logProfilePhotoResult({
-        source: message.fromMe ? "sync" : "inbound",
-        displayName: resolvedIdentity.displayName,
-        phone: resolvedIdentity.phone,
-        photoUrl: resolvedIdentity.primaryPhotoUrl,
-        fallbackPhotoUrl: resolvedIdentity.fallbackPhotoUrl,
-        bridgePhotoUrl: resolvedIdentity.bridgePhotoUrl
-      });
-
-      const body = message.body?.trim();
-      const mediaAttachment = await extractIncomingMediaAttachment({
-        workspaceId: state.workspaceId,
-        providerMessageId: message.id._serialized,
-        message
-      });
-      const messageRawPayload = messageData.rawData
-        ? mergeRawPayloadContactSnapshot(messageData.rawData, contactSnapshot)
-        : {
-            author: (message as Message & { author?: string | null }).author ?? null,
-            chatId: remoteId ?? null,
-            from: message.from,
-            to: message.to,
-            fromMe: message.fromMe,
-            body: message.body,
-            notifyName: messageData._data?.notifyName ?? null,
-            contact: contactSnapshot,
-            ...getMessageMentionMetadata(message),
-            hasMedia: message.hasMedia,
-            type: message.type
-          };
-      let ingestedMessage:
-        | Awaited<ReturnType<typeof ingestWhatsAppClientMessage>>
-        | null = null;
-
-      if (body || mediaAttachment?.attachmentUrl) {
-        try {
-          ingestedMessage = await ingestWhatsAppClientMessage({
-            workspaceId: state.workspaceId,
-            providerMessageId: message.id._serialized,
-            direction: message.fromMe ? "OUTBOUND" : "INBOUND",
-            attachmentMimeType: mediaAttachment?.attachmentMimeType ?? null,
-            attachmentName: mediaAttachment?.attachmentName ?? null,
-            attachmentUrl: mediaAttachment?.attachmentUrl ?? null,
-            body: body ?? "",
-            phone: resolvedIdentity.phone ?? undefined,
-            displayName: resolvedIdentity.displayName ?? undefined,
-            photoUrl: resolvedIdentity.photoUrl,
-            sentAt: message.timestamp ? new Date(message.timestamp * 1000) : new Date(),
-            rawPayload: messageRawPayload
-          });
-        } catch (ingestError) {
-          console.warn(
-            `[whatsapp-web][message][ingest] skipped business ingest for ${message.id._serialized}: ${
-              ingestError instanceof Error ? ingestError.message : "Unknown ingest error."
-            }`
-          );
-        }
-      }
-
-      await captureWhatsAppMessageEnvelope({
-        workspaceId: state.workspaceId,
-        message,
-        rawData: messageRawPayload,
-        conversationId: ingestedMessage?.conversationId ?? null,
-        storedMessageId: ingestedMessage?.messageId ?? null
-      });
-      touchRuntimeActivity(state);
-    } catch (error) {
-      console.warn(
-        `[whatsapp-web][message] skipped envelope capture ${message.id._serialized} for workspace ${state.workspaceId}: ${
-          error instanceof Error ? error.message : "Unknown capture error."
-        }`
-      );
+  state.client.on("message_create", async (message) => {
+    if (!message.fromMe) {
+      return;
     }
+
+    await persistLiveWhatsAppWebMessage(state, message, "message_create");
+  });
+
+  state.client.on("message_ack", async (message, ack) => {
+    await persistLiveWhatsAppWebMessageAck(state, message, ack);
   });
 
   state.client.on("message_reaction", async (reaction: Reaction) => {
     try {
       await captureWhatsAppReactionEnvelope({
         workspaceId: state.workspaceId,
+        channelId: state.channelId,
         reaction
       });
     } catch (error) {
@@ -1971,61 +2147,341 @@ function bindClientEvents(state: RuntimeState) {
   });
 }
 
+async function persistLiveWhatsAppWebMessageAck(state: RuntimeState, message: Message, ack: number) {
+  console.info(
+    `[whatsapp-web][message_ack] received workspace=${state.workspaceId} channel=${state.channelId} providerMessageId=${message.id._serialized} ack=${ack} fromMe=${String(message.fromMe)}`
+  );
+
+  if (!isActiveRuntimeState(state) || !message.fromMe || isStatusLikeMessage(message)) {
+    console.info(
+      `[whatsapp-web][message_ack] skipped workspace=${state.workspaceId} providerMessageId=${message.id._serialized} active=${String(isActiveRuntimeState(state))} fromMe=${String(message.fromMe)} statusLike=${String(isStatusLikeMessage(message))}`
+    );
+    return;
+  }
+
+  try {
+    const result = await persistWhatsAppMessageAck({
+      workspaceId: state.workspaceId,
+      channelId: state.channelId,
+      providerMessageId: message.id._serialized,
+      ack,
+      occurredAt: new Date()
+    });
+
+    if (result?.changed) {
+      console.info(
+        `[whatsapp-web][message_ack] workspace=${state.workspaceId} providerMessageId=${message.id._serialized} ack=${result.ack} status=${result.deliveryStatus}`
+      );
+    } else {
+      console.info(
+        `[whatsapp-web][message_ack] unchanged workspace=${state.workspaceId} providerMessageId=${message.id._serialized} ack=${ack}`
+      );
+    }
+    touchRuntimeActivity(state);
+  } catch (error) {
+    console.warn(
+      `[whatsapp-web][message_ack] failed providerMessageId=${message.id._serialized} workspace=${state.workspaceId}: ${
+        error instanceof Error ? error.message : "Unknown ack persistence error."
+      }`
+    );
+  }
+}
+
+async function persistLiveWhatsAppWebMessage(
+  state: RuntimeState,
+  message: Message,
+  eventName: "message" | "message_create"
+) {
+  const messageData = message as Message & {
+    _data?: {
+      notifyName?: string;
+    };
+    rawData?: unknown;
+  };
+
+  try {
+    const remoteId = message.fromMe ? message.to : message.from;
+    const chat = await message.getChat().catch(() => null);
+    const messageContact = await message.getContact().catch(() => null);
+    const remoteContact =
+      message.fromMe && remoteId
+        ? await state.client.getContactById(remoteId).catch(() => null)
+        : null;
+    const contact = message.fromMe ? remoteContact ?? messageContact : messageContact;
+    const contactSnapshot = serializeWhatsAppContactSnapshot(contact);
+
+    if (
+      isStatusLikeMessage(message) ||
+      isStatusLikeRemoteId(remoteId) ||
+      isStatusLikeRemoteId(chat?.id?._serialized)
+    ) {
+      return;
+    }
+
+    const resolvedIdentity = await resolveIncomingContactIdentity({
+      workspaceId: state.workspaceId,
+      client: state.client,
+      remoteId,
+      notifyName: messageData._data?.notifyName ?? null,
+      fallbackId: message.fromMe ? message.to : message.from,
+      contact,
+      chat
+    });
+    const ownPhone = toStoredPhone(state.client.info?.wid?._serialized);
+    const existingRemoteIdentity =
+      message.fromMe && (!resolvedIdentity.phone || resolvedIdentity.phone === ownPhone)
+        ? await findExistingConversationIdentityForRemote({
+            workspaceId: state.workspaceId,
+            channelId: state.channelId,
+            remoteId
+          })
+        : null;
+    const effectiveIdentity = existingRemoteIdentity
+      ? {
+          ...resolvedIdentity,
+          displayName: existingRemoteIdentity.displayName ?? resolvedIdentity.displayName,
+          phone: existingRemoteIdentity.phone ?? resolvedIdentity.phone,
+          photoUrl: existingRemoteIdentity.photoUrl ?? resolvedIdentity.photoUrl
+        }
+      : resolvedIdentity;
+
+    logProfilePhotoResult({
+      source: message.fromMe ? "sync" : "inbound",
+      displayName: effectiveIdentity.displayName,
+      phone: effectiveIdentity.phone,
+      photoUrl: resolvedIdentity.primaryPhotoUrl,
+      fallbackPhotoUrl: resolvedIdentity.fallbackPhotoUrl,
+      bridgePhotoUrl: resolvedIdentity.bridgePhotoUrl
+    });
+
+    const body = message.body?.trim();
+    const mediaAttachment = await extractIncomingMediaAttachment({
+      workspaceId: state.workspaceId,
+      providerMessageId: message.id._serialized,
+      message
+    });
+    const messageRawPayload = messageData.rawData
+      ? mergeRawPayloadContactSnapshot(messageData.rawData, contactSnapshot)
+      : {
+          source: eventName,
+          author: (message as Message & { author?: string | null }).author ?? null,
+          chatId: remoteId ?? null,
+          from: message.from,
+          to: message.to,
+          fromMe: message.fromMe,
+          body: message.body,
+          notifyName: messageData._data?.notifyName ?? null,
+          contact: contactSnapshot,
+          ...getMessageMentionMetadata(message),
+          hasMedia: message.hasMedia,
+          type: message.type
+        };
+    let ingestedMessage:
+      | Awaited<ReturnType<typeof ingestWhatsAppClientMessage>>
+      | null = null;
+    let existingStoredMessage:
+      | Awaited<ReturnType<typeof findStoredWhatsAppWebMessageLink>>
+      | null = null;
+
+    if (body || mediaAttachment?.attachmentUrl) {
+      try {
+        ingestedMessage = await ingestWhatsAppClientMessage({
+          workspaceId: state.workspaceId,
+          channelId: state.channelId,
+          providerMessageId: message.id._serialized,
+          direction: message.fromMe ? "OUTBOUND" : "INBOUND",
+          mediaAssetId: mediaAttachment?.mediaAssetId ?? null,
+          attachmentMimeType: mediaAttachment?.attachmentMimeType ?? null,
+          attachmentName: mediaAttachment?.attachmentName ?? null,
+          attachmentUrl: mediaAttachment?.attachmentUrl ?? null,
+          body: body ?? "",
+          phone: effectiveIdentity.phone ?? undefined,
+          displayName: effectiveIdentity.displayName ?? undefined,
+          photoUrl: effectiveIdentity.photoUrl,
+          sentAt: message.timestamp ? new Date(message.timestamp * 1000) : new Date(),
+          rawPayload: messageRawPayload
+        });
+      } catch (ingestError) {
+        if (
+          ingestError instanceof Error &&
+          ingestError.message === "This inbound message has already been processed."
+        ) {
+          existingStoredMessage = await findStoredWhatsAppWebMessageLink({
+            workspaceId: state.workspaceId,
+            providerMessageId: message.id._serialized
+          });
+        } else {
+          console.warn(
+            `[whatsapp-web][${eventName}][ingest] skipped business ingest for ${message.id._serialized}: ${
+              ingestError instanceof Error ? ingestError.message : "Unknown ingest error."
+            }`
+          );
+        }
+      }
+    }
+
+    await captureWhatsAppMessageEnvelope({
+      workspaceId: state.workspaceId,
+      channelId: state.channelId,
+      message,
+      rawData: messageRawPayload,
+      conversationId: ingestedMessage?.conversationId ?? existingStoredMessage?.conversationId ?? null,
+      storedMessageId: ingestedMessage?.messageId ?? existingStoredMessage?.messageId ?? null
+    });
+    if (message.fromMe && typeof message.ack === "number") {
+      console.info(
+        `[whatsapp-web][${eventName}] bootstrap-ack workspace=${state.workspaceId} providerMessageId=${message.id._serialized} ack=${message.ack}`
+      );
+      await persistWhatsAppMessageAck({
+        workspaceId: state.workspaceId,
+        channelId: state.channelId,
+        providerMessageId: message.id._serialized,
+        ack: message.ack,
+        occurredAt: message.timestamp ? new Date(message.timestamp * 1000) : new Date()
+      }).catch(() => null);
+    }
+    touchRuntimeActivity(state);
+  } catch (error) {
+    console.warn(
+      `[whatsapp-web][${eventName}] skipped envelope capture ${message.id._serialized} for workspace ${state.workspaceId}: ${
+        error instanceof Error ? error.message : "Unknown capture error."
+      }`
+    );
+  }
+}
+
+async function findStoredWhatsAppWebMessageLink(input: {
+  workspaceId: string;
+  providerMessageId: string;
+}) {
+  const existingMessage = await prisma.message.findFirst({
+    where: {
+      providerMessageId: input.providerMessageId,
+      conversation: {
+        workspaceId: input.workspaceId
+      }
+    },
+    select: {
+      id: true,
+      conversationId: true
+    }
+  });
+
+  return existingMessage
+    ? {
+        conversationId: existingMessage.conversationId,
+        messageId: existingMessage.id
+    }
+    : null;
+}
+
+async function findExistingConversationIdentityForRemote(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  remoteId?: string | null;
+}) {
+  const remoteId = input.remoteId?.trim();
+  if (!remoteId) {
+    return null;
+  }
+
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      workspaceId: input.workspaceId,
+      ...(input.channelId ? { channelId: input.channelId } : {}),
+      whatsAppRemoteId: remoteId
+    },
+    select: {
+      contact: {
+        select: {
+          displayName: true,
+          phone: true,
+          photoUrl: true
+        }
+      }
+    },
+    orderBy: {
+      updatedAt: "desc"
+    }
+  });
+
+  return conversation?.contact ?? null;
+}
+
 async function initializeRuntime(state: RuntimeState) {
   if (!state.initializing) {
     state.initializing = (async () => {
-      try {
-        console.info(
-          `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:start`
-        );
-        await state.client.initialize();
-        console.info(
-          `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned`
-        );
-      } catch (error) {
-        if (isChromiumProfileLockError(error)) {
-          console.warn(
-            `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:profile-lock`
+      const maxAttempts = 2;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+          console.info(
+            `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:start attempt=${attempt}`
           );
-          clearChromiumProfileLocks(state.sessionClientId);
-          try {
-            await state.client.initialize();
-            console.info(
-              `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned-after-lock-clear`
+          await initializeClientWithTimeout(state);
+          console.info(
+            `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned attempt=${attempt}`
+          );
+          return;
+        } catch (error) {
+          if (isChromiumProfileLockError(error)) {
+            console.warn(
+              `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:profile-lock attempt=${attempt}`
             );
-            return;
-          } catch (retryError) {
-            if (isChromiumProfileLockError(retryError)) {
-              const staleSessionClientId = state.sessionClientId;
-              const freshSessionClientId = buildFreshSessionClientId(state.workspaceId, state.agentId);
+            clearChromiumProfileLocks(state.sessionClientId);
 
-              await state.client.destroy().catch(() => null);
-              clearChromiumSessionProfile(staleSessionClientId);
-
-              state.sessionClientId = freshSessionClientId;
-              state.client = createWhatsAppClient(freshSessionClientId);
-              bindClientEvents(state);
-
-              await saveWorkspaceWhatsAppChannelConnection({
-                workspaceId: state.workspaceId,
-                agentId: state.agentId,
-                sessionClientId: freshSessionClientId,
-                connectionStatus: "INITIALIZING",
-                lastError: null
-              });
-
-              await state.client.initialize();
+            try {
+              await initializeClientWithTimeout(state);
               console.info(
-                `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned-with-fresh-session`
+                `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned-after-lock-clear attempt=${attempt}`
               );
               return;
+            } catch (retryError) {
+              if (isChromiumProfileLockError(retryError)) {
+                const staleSessionClientId = state.sessionClientId;
+                const freshSessionClientId = buildFreshSessionClientId(
+                  state.workspaceId,
+                  state.channelId,
+                  state.agentId
+                );
+
+                clearChromiumSessionProfile(staleSessionClientId);
+
+                state.sessionClientId = freshSessionClientId;
+                await replaceRuntimeClient(state, freshSessionClientId);
+
+                await saveWhatsAppChannelConnection({
+                  channelId: state.channelId,
+                  workspaceId: state.workspaceId,
+                  agentId: state.agentId,
+                  sessionClientId: freshSessionClientId,
+                  connectionStatus: "INITIALIZING",
+                  lastError: null
+                });
+
+                await initializeClientWithTimeout(state);
+                console.info(
+                  `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:returned-with-fresh-session`
+                );
+                return;
+              }
+
+              throw retryError;
             }
-
-            throw retryError;
           }
-        }
 
-        throw error;
+          if (attempt < maxAttempts && shouldRetryInitializeError(error)) {
+            console.warn(
+              `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:retry attempt=${attempt} reason=${
+                error instanceof Error ? error.message : "Unknown initialize error."
+              }`
+            );
+            await replaceRuntimeClient(state);
+            continue;
+          }
+
+          throw error;
+        }
       }
     })().catch(async (error: unknown) => {
       const message =
@@ -2057,7 +2513,8 @@ async function initializeRuntime(state: RuntimeState) {
           `[whatsapp-web][runtime] workspace=${state.workspaceId} session=${state.sessionClientId} initialize:transient-after-connect ${message}`
         );
 
-        await saveWorkspaceWhatsAppChannelConnection({
+        await saveWhatsAppChannelConnection({
+          channelId: state.channelId,
           workspaceId: state.workspaceId,
           agentId: state.agentId,
           sessionClientId: state.sessionClientId,
@@ -2086,7 +2543,8 @@ async function initializeRuntime(state: RuntimeState) {
         }
       });
 
-      await saveWorkspaceWhatsAppChannelConnection({
+      await saveWhatsAppChannelConnection({
+        channelId: state.channelId,
         workspaceId: state.workspaceId,
         agentId: state.agentId,
         sessionClientId: state.sessionClientId,
@@ -2124,6 +2582,7 @@ async function waitForConnectedRuntime(
 
 async function createRuntimeState(input: {
   workspaceId: string;
+  channelId: string;
   agentId: string;
   sessionClientId: string;
   restoredFromSession?: boolean;
@@ -2132,6 +2591,7 @@ async function createRuntimeState(input: {
     client: createWhatsAppClient(input.sessionClientId),
     agentId: input.agentId,
     workspaceId: input.workspaceId,
+    channelId: input.channelId,
     sessionClientId: input.sessionClientId,
     restoredFromSession: Boolean(input.restoredFromSession),
     initializing: null,
@@ -2149,11 +2609,12 @@ async function createRuntimeState(input: {
     stallRecoveryTimer: null,
     reconnectTimer: null,
     idleEvictionTimer: null,
-    lastActivityAt: Date.now()
+    lastActivityAt: Date.now(),
+    reconnectAttempts: 0
   };
 
   bindClientEvents(state);
-  runtimeStates.set(buildRuntimeKey(input.workspaceId), state);
+  runtimeStates.set(buildRuntimeKey(input.channelId), state);
   recordRuntimeStartMetric({
     workspaceId: input.workspaceId,
     sessionClientId: input.sessionClientId,
@@ -2161,29 +2622,56 @@ async function createRuntimeState(input: {
   });
   updateRuntimeStatus(state, "INITIALIZING");
 
-    await saveWorkspaceWhatsAppChannelConnection({
-      workspaceId: input.workspaceId,
-      agentId: input.agentId,
-      sessionClientId: input.sessionClientId,
-      connectionStatus: "INITIALIZING",
-      qrCodeDataUrl: null,
-      qrCodeUpdatedAt: null,
-      lastError: null
-    });
+  await saveWhatsAppChannelConnection({
+    channelId: input.channelId,
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    sessionClientId: input.sessionClientId,
+    connectionStatus: "INITIALIZING",
+    qrCodeDataUrl: null,
+    qrCodeUpdatedAt: null,
+    lastError: null
+  });
 
   await initializeRuntime(state);
   return state;
 }
 
 async function getOrCreateRuntime(
-  workspaceId: string,
+  channelId: string,
   create: () => Promise<RuntimeState | null>
 ) {
-  const runtimeKey = buildRuntimeKey(workspaceId);
+  const runtimeKey = buildRuntimeKey(channelId);
   const existing = runtimeStates.get(runtimeKey);
 
-  if (existing?.client) {
+  if (existing?.client && !shouldRecycleRuntimeState(existing)) {
     return existing;
+  }
+
+  if (existing) {
+    const recycleReason = !existing.client
+      ? "missing-client"
+      : existing.reconnectTimer
+        ? "pending-reconnect"
+        : isUnrecoverableRuntimeStatus(existing.connectionStatus)
+          ? `status-${existing.connectionStatus.toLowerCase()}`
+          : `stalled-${existing.connectionStatus.toLowerCase()}`;
+    console.warn(
+      `[whatsapp-web][runtime] workspace=${existing.workspaceId} session=${existing.sessionClientId} recycle ${recycleReason}`
+    );
+    void logWhatsAppRuntimeEvent({
+      workspaceId: existing.workspaceId,
+      sessionClientId: existing.sessionClientId,
+      eventType: WHATSAPP_RUNTIME_EVENT_TYPES.RUNTIME_RECYCLED,
+      message: `Recycling stale WhatsApp runtime (${recycleReason}).`,
+      metadata: {
+        recycleReason,
+        connectionStatus: existing.connectionStatus,
+        statusAgeMs: Date.now() - existing.statusUpdatedAt,
+        lastActivityAgeMs: Date.now() - existing.lastActivityAt
+      }
+    });
+    await teardownRuntimeState(channelId);
   }
 
   if (existing && !existing.client) {
@@ -2208,18 +2696,26 @@ async function getOrCreateRuntime(
 
 export async function ensureWorkspaceWhatsAppClient(input: {
   workspaceId: string;
+  channelId?: string | null;
   agentId: string;
   source?: "external" | "auto";
 }) {
-  return getOrCreateRuntime(input.workspaceId, async () => {
-    const channel = await getWorkspaceWhatsAppChannelStatus(input.workspaceId);
+  const channel =
+    (input.channelId ? await getWhatsAppChannelStatusById(input.channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(input.workspaceId));
+  if (!channel) {
+    return null;
+  }
+
+  return getOrCreateRuntime(channel.id, async () => {
     const sessionClientId =
       channel?.sessionClientId && channel.connectedByAgentId === input.agentId
         ? channel.sessionClientId
-        : buildSessionClientId(input.workspaceId, input.agentId);
+        : buildSessionClientId(input.workspaceId, channel.id, input.agentId);
 
     return createRuntimeState({
       workspaceId: input.workspaceId,
+      channelId: channel.id,
       agentId: input.agentId,
       sessionClientId,
       restoredFromSession: false
@@ -2227,15 +2723,22 @@ export async function ensureWorkspaceWhatsAppClient(input: {
   });
 }
 
-export async function restoreWorkspaceWhatsAppClient(workspaceId: string) {
-  return getOrCreateRuntime(workspaceId, async () => {
-    const channel = await getWorkspaceWhatsAppChannelStatus(workspaceId);
+export async function restoreWorkspaceWhatsAppClient(workspaceId: string, channelId?: string | null) {
+  const channel =
+    (channelId ? await getWhatsAppChannelStatusById(channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(workspaceId));
+  if (!channel?.connectedByAgentId || !channel.sessionClientId) {
+    return null;
+  }
+
+  return getOrCreateRuntime(channel.id, async () => {
     if (!channel?.connectedByAgentId || !channel.sessionClientId) {
       return null;
     }
 
     return createRuntimeState({
       workspaceId,
+      channelId: channel.id,
       agentId: channel.connectedByAgentId,
       sessionClientId: channel.sessionClientId,
       restoredFromSession: true
@@ -2245,10 +2748,13 @@ export async function restoreWorkspaceWhatsAppClient(workspaceId: string) {
 
 export async function getWorkspaceWhatsAppRuntimeStatus(input: {
   workspaceId: string;
+  channelId?: string | null;
   agentId: string;
 }) {
-  const channel = await getWorkspaceWhatsAppChannelStatus(input.workspaceId);
-  const hydratedRuntime = runtimeStates.get(buildRuntimeKey(input.workspaceId));
+  const channel =
+    (input.channelId ? await getWhatsAppChannelStatusById(input.channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(input.workspaceId));
+  const hydratedRuntime = channel ? runtimeStates.get(buildRuntimeKey(channel.id)) : null;
   const supervisor = getRuntimeSupervisorStatus(input.workspaceId);
 
   return {
@@ -2270,35 +2776,46 @@ export async function getWorkspaceWhatsAppRuntimeStatus(input: {
   };
 }
 
-export async function disconnectWorkspaceWhatsAppClient(workspaceId: string) {
-  await teardownRuntimeState(workspaceId);
+export async function disconnectWorkspaceWhatsAppClient(workspaceId: string, channelId?: string | null) {
+  const channel =
+    (channelId ? await getWhatsAppChannelStatusById(channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(workspaceId));
+  if (!channel) {
+    return;
+  }
+
+  await teardownRuntimeState(channel.id);
   clearRuntimeSupervisorState(workspaceId);
 
-  await markWorkspaceWhatsAppChannelDisconnected({
+  await markWhatsAppChannelDisconnected({
+    channelId: channel.id,
     workspaceId,
     connectionStatus: "DISCONNECTED",
     lastError: null
   });
 }
 
-export async function deleteWorkspaceWhatsAppClientSession(workspaceId: string) {
-  await teardownRuntimeState(workspaceId);
+export async function deleteWorkspaceWhatsAppClientSession(workspaceId: string, channelId?: string | null) {
+  const channel =
+    (channelId ? await getWhatsAppChannelStatusById(channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(workspaceId));
+  if (!channel) {
+    return;
+  }
+
+  await teardownRuntimeState(channel.id);
   clearRuntimeSupervisorState(workspaceId);
 
-  const channel = await prisma.whatsAppChannel.findUnique({
-    where: {
-      workspaceId
-    }
-  });
-
-  await deleteWorkspaceWhatsAppSession(
+  await deleteWhatsAppSession({
     workspaceId,
-    channel?.sessionClientId ? getSessionAuthPath(channel.sessionClientId) : null
-  );
+    channelId: channel.id,
+    authPath: channel.sessionClientId ? getSessionAuthPath(channel.sessionClientId) : null
+  });
 }
 
 export async function sendWhatsAppWebMessage(input: {
   workspaceId: string;
+  channelId?: string | null;
   conversationId: string;
   to: string;
   body: string;
@@ -2316,10 +2833,18 @@ export async function sendWhatsAppWebMessage(input: {
   attachmentUrl?: string | null;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
+  sendAudioAsVoice?: boolean;
 }) {
   const startedAt = Date.now();
-  const wasColdStart = !hasWarmRuntime(input.workspaceId);
-  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId);
+  const channel =
+    (input.channelId ? await getWhatsAppChannelStatusById(input.channelId) : null) ??
+    (await getWorkspaceWhatsAppChannelStatus(input.workspaceId));
+  if (!channel) {
+    throw new Error("WhatsApp channel is not connected for this workspace.");
+  }
+
+  const wasColdStart = !hasWarmRuntime(channel.id);
+  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId, channel.id);
 
   if (!runtime) {
     throw new Error("WhatsApp channel is not connected for this workspace.");
@@ -2366,7 +2891,7 @@ export async function sendWhatsAppWebMessage(input: {
       .slice(0, 10);
     const normalizedListButtonText = input.interactiveListButtonText?.trim() || "Choose option";
 
-    if (input.simulateTyping) {
+    if (input.simulateTyping && !channel.incognitoMode) {
       await simulateChatTyping(connectedRuntime.client, chatId, input);
     }
 
@@ -2421,28 +2946,48 @@ export async function sendWhatsAppWebMessage(input: {
     }
 
     if (input.attachmentPath || input.attachmentUrl) {
-      const media = input.attachmentPath
-        ? MessageMedia.fromFilePath(input.attachmentPath)
-        : await MessageMedia.fromUrl(input.attachmentUrl!, {
-            filename: input.attachmentName ?? undefined,
-            unsafeMime: true
-          });
-      const sentMessage = await connectedRuntime.client.sendMessage(chatId, media, {
-        caption: outgoingBody || undefined,
-        mentions: mentionOptions.length ? (mentionOptions as never) : undefined,
-        sendMediaAsDocument: !(input.attachmentMimeType ?? "").startsWith("image/"),
-        quotedMessageId: input.quotedProviderMessageId ?? undefined
-      });
+      assertValidVoiceNoteRequest(input);
+      const sendAsVoiceNote = shouldSendAsVoiceNote(input);
+      let voiceNoteAsset: Awaited<ReturnType<typeof prepareVoiceNoteAttachment>> | null = null;
 
-      recordSendDurationMetric({
-        workspaceId: input.workspaceId,
-        durationMs: Date.now() - startedAt,
-        wasColdStart
-      });
-      return {
-        providerMessageId: sentMessage.id._serialized,
-        status: "accepted" as const
-      };
+      try {
+        if (sendAsVoiceNote && input.attachmentPath) {
+          voiceNoteAsset = await prepareVoiceNoteAttachment({
+            attachmentPath: input.attachmentPath,
+            attachmentMimeType: input.attachmentMimeType,
+            attachmentName: input.attachmentName
+          });
+        }
+
+        const media = voiceNoteAsset
+          ? MessageMedia.fromFilePath(voiceNoteAsset.path)
+          : input.attachmentPath
+            ? MessageMedia.fromFilePath(input.attachmentPath)
+            : await MessageMedia.fromUrl(input.attachmentUrl!, {
+                filename: input.attachmentName ?? undefined,
+                unsafeMime: true
+              });
+        const sentMessage = await connectedRuntime.client.sendMessage(chatId, media, {
+          caption: outgoingBody || undefined,
+          mentions: mentionOptions.length ? (mentionOptions as never) : undefined,
+          sendAudioAsVoice: sendAsVoiceNote,
+          sendMediaAsDocument:
+            !(input.attachmentMimeType ?? "").startsWith("image/") && !sendAsVoiceNote,
+          quotedMessageId: input.quotedProviderMessageId ?? undefined
+        });
+
+        recordSendDurationMetric({
+          workspaceId: input.workspaceId,
+          durationMs: Date.now() - startedAt,
+          wasColdStart
+        });
+        return {
+          providerMessageId: sentMessage.id._serialized,
+          status: "accepted" as const
+        };
+      } finally {
+        await voiceNoteAsset?.cleanup();
+      }
     }
 
     const sentMessage = await connectedRuntime.client.sendMessage(chatId, outgoingBody, {
@@ -2462,7 +3007,7 @@ export async function sendWhatsAppWebMessage(input: {
     const message = error instanceof Error ? error.message : "Unable to send WhatsApp message.";
 
     if (message.includes("getChat")) {
-      await teardownRuntimeState(input.workspaceId);
+      await teardownRuntimeState(channel.id);
       throw new Error(
         "WhatsApp client runtime is stale. Disconnect, generate a new QR session, and try sending again."
       );
@@ -2486,9 +3031,10 @@ export function getWhatsAppSenderNodeMetrics() {
 
 export async function deleteWhatsAppWebMessageForEveryone(input: {
   workspaceId: string;
+  channelId?: string | null;
   providerMessageId: string;
 }) {
-  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId);
+  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId, input.channelId ?? null);
 
   if (!runtime) {
     throw new Error("WhatsApp channel is not connected for this workspace.");
@@ -2522,7 +3068,136 @@ export async function deleteWhatsAppWebMessageForEveryone(input: {
     }
 
     if (message.includes("getMessageById") || message.includes("getChat")) {
-      await teardownRuntimeState(input.workspaceId);
+      await teardownRuntimeState(runtime.channelId);
+      throw new Error(
+        "WhatsApp client runtime is stale. Disconnect, generate a new QR session, and try again."
+      );
+    }
+
+    throw error;
+  }
+}
+
+export async function sendWhatsAppWebChatSeen(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  conversationId: string;
+}) {
+  if (
+    await isWhatsAppChannelIncognitoModeEnabled({
+      workspaceId: input.workspaceId,
+      channelId: input.channelId ?? null
+    })
+  ) {
+    return { status: "skipped" as const };
+  }
+
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id: input.conversationId,
+      workspaceId: input.workspaceId
+    },
+    select: {
+      contact: {
+        select: {
+          phone: true
+        }
+      }
+    }
+  });
+
+  if (!conversation?.contact.phone) {
+    return { status: "skipped" as const };
+  }
+
+  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId, input.channelId ?? null);
+
+  if (!runtime) {
+    return { status: "skipped" as const };
+  }
+
+  const connectedRuntime = await waitForConnectedRuntime(runtime);
+  const chatId = await resolveWhatsAppChatId({
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId,
+    to: conversation.contact.phone
+  });
+  const chat = await connectedRuntime.client.getChatById(chatId).catch(() => null);
+
+  if (!chat) {
+    return { status: "skipped" as const };
+  }
+
+  await chat.sendSeen();
+  touchRuntimeActivity(connectedRuntime);
+  return { status: "seen" as const };
+}
+
+function resolveMuteExpirationDate(isMuted: boolean, muteExpiration?: number | null) {
+  if (!isMuted || typeof muteExpiration !== "number" || !Number.isFinite(muteExpiration) || muteExpiration <= 0) {
+    return null;
+  }
+
+  const resolvedDate = new Date(muteExpiration > 1_000_000_000_000 ? muteExpiration : muteExpiration * 1000);
+  return Number.isNaN(resolvedDate.getTime()) ? null : resolvedDate;
+}
+
+export async function setWhatsAppWebChatMute(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  conversationId: string;
+  mute: boolean;
+  muteUntil?: Date | null;
+}) {
+  const conversation = await prisma.conversation.findFirst({
+    where: {
+      id: input.conversationId,
+      workspaceId: input.workspaceId
+    },
+    select: {
+      contact: {
+        select: {
+          phone: true
+        }
+      }
+    }
+  });
+
+  if (!conversation?.contact.phone) {
+    throw new Error("Conversation phone number was not found.");
+  }
+
+  const runtime = await restoreWorkspaceWhatsAppClient(input.workspaceId, input.channelId ?? null);
+
+  if (!runtime) {
+    throw new Error("WhatsApp Personal channel is not connected for this workspace.");
+  }
+
+  const connectedRuntime = await waitForConnectedRuntime(runtime);
+  const chatId = await resolveWhatsAppChatId({
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId,
+    to: conversation.contact.phone
+  });
+  const chat = await connectedRuntime.client.getChatById(chatId).catch(() => null);
+
+  if (!chat) {
+    throw new Error("WhatsApp chat was not found.");
+  }
+
+  try {
+    const result = input.mute ? await chat.mute(input.muteUntil ?? undefined) : await chat.unmute();
+    touchRuntimeActivity(connectedRuntime);
+
+    return {
+      isMuted: Boolean(result.isMuted),
+      muteExpiration: resolveMuteExpirationDate(Boolean(result.isMuted), result.muteExpiration)
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to update WhatsApp mute state.";
+
+    if (message.includes("getChat")) {
+      await teardownRuntimeState(runtime.channelId);
       throw new Error(
         "WhatsApp client runtime is stale. Disconnect, generate a new QR session, and try again."
       );
@@ -2738,16 +3413,20 @@ function extractWhatsAppRemoteIdFromStoredPayload(rawPayload: string | null) {
 
 export async function syncWorkspaceHistory(
   workspaceId: string,
+  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background" } | null,
   options: { triggeredBy?: "manual" | "background" } = {}
 ) {
-  const runtime = await restoreWorkspaceWhatsAppClient(workspaceId);
+  const channelId = typeof channelIdOrOptions === "string" ? channelIdOrOptions : null;
+  const resolvedOptions =
+    typeof channelIdOrOptions === "object" && channelIdOrOptions !== null ? channelIdOrOptions : options;
+  const runtime = await restoreWorkspaceWhatsAppClient(workspaceId, channelId);
 
   if (!runtime) {
     throw new Error("WhatsApp channel is not connected for this workspace.");
   }
 
   if (!runtime.client) {
-    await teardownRuntimeState(workspaceId);
+    await teardownRuntimeState(runtime.channelId);
     throw new Error("WhatsApp client runtime is stale. Restart the QR session and try syncing again.");
   }
 
@@ -2779,7 +3458,7 @@ export async function syncWorkspaceHistory(
       }
 
       if (message.includes("getChats")) {
-        await teardownRuntimeState(workspaceId);
+        await teardownRuntimeState(runtime.channelId);
         throw new Error(
           "WhatsApp client runtime is stale. Disconnect, generate a new QR session, and try syncing again."
         );
@@ -2810,6 +3489,13 @@ export async function syncWorkspaceHistory(
     const deferredCountBeforeBatch = deferredChatIds.size;
 
     for (const chat of chatsToSync) {
+      if (!isActiveRuntimeState(runtime)) {
+        return {
+          importedChats,
+          importedMessages
+        };
+      }
+
       const chatId = getChatIdentifier(chat);
       const fallbackPayload = buildFallbackSyncPayload(chat);
 
@@ -2863,6 +3549,7 @@ export async function syncWorkspaceHistory(
               author: (message as Message & { author?: string | null }).author ?? null,
               chatId: chat.id._serialized,
               id: message.id._serialized,
+              mediaAssetId: mediaAttachment?.mediaAssetId ?? null,
               attachmentMimeType: mediaAttachment?.attachmentMimeType ?? null,
               attachmentName: mediaAttachment?.attachmentName ?? null,
               attachmentUrl: mediaAttachment?.attachmentUrl ?? null,
@@ -2897,9 +3584,14 @@ export async function syncWorkspaceHistory(
 
         const result = await syncWhatsAppHistoryConversation({
           workspaceId,
+          channelId: runtime.channelId,
           phone: resolvedIdentity.phone,
           displayName: resolvedIdentity.displayName,
           photoUrl: resolvedIdentity.photoUrl,
+          isMuted: Boolean(chat.isMuted),
+          muteExpiration: chat.muteExpiration ?? null,
+          isArchived: Boolean(chat.archived),
+          isPinned: Boolean(chat.pinned),
           unreadCount: chat.unreadCount,
           messages: normalizedMessages
         });
@@ -2945,9 +3637,14 @@ export async function syncWorkspaceHistory(
               });
               const fallbackResult = await syncWhatsAppHistoryConversation({
                 workspaceId,
+                channelId: runtime.channelId,
                 phone: resolvedFallbackPayload.phone,
                 displayName: resolvedFallbackPayload.displayName,
                 photoUrl: fallbackIdentity?.photoUrl ?? undefined,
+                isMuted: Boolean(chat.isMuted),
+                muteExpiration: chat.muteExpiration ?? null,
+                isArchived: Boolean(chat.archived),
+                isPinned: Boolean(chat.pinned),
                 unreadCount: resolvedFallbackPayload.unreadCount,
                 messages: normalizedFallbackMessages
               });
@@ -3057,7 +3754,7 @@ export async function syncWorkspaceHistory(
     };
   } catch (error) {
     if (isTransientWhatsAppSyncError(error)) {
-      if (options.triggeredBy === "background") {
+      if (resolvedOptions.triggeredBy === "background") {
         const elapsedMs =
           runtime.historySyncStartedAt === null ? 0 : Date.now() - runtime.historySyncStartedAt;
         if (!runtime.hasCompletedInitialSync && elapsedMs >= WHATSAPP_HISTORY_STUCK_MS) {
@@ -3074,7 +3771,7 @@ export async function syncWorkspaceHistory(
       throw new Error("WhatsApp is still preparing chat history. Please try again in a moment.");
     }
 
-    if (options.triggeredBy === "background" && isTransientExecutionContextError(error)) {
+    if (resolvedOptions.triggeredBy === "background" && isTransientExecutionContextError(error)) {
       runtime.connectionStatus = "CONNECTED";
       nextRetryDelayMs = getNextHistoryRetryDelay(runtime);
       shouldRetryInBackground = true;
@@ -3084,35 +3781,40 @@ export async function syncWorkspaceHistory(
     throw error;
   } finally {
     runtime.isSyncingHistory = false;
-    if (syncCompleted) {
-      runtime.connectionStatus = "READY";
-      runtime.hasCompletedInitialSync = true;
-      runtime.lastError = null;
-      resetHistoryRetryState(runtime);
-      await saveWorkspaceWhatsAppChannelConnection({
-        workspaceId: runtime.workspaceId,
-        agentId: runtime.agentId,
-        sessionClientId: runtime.sessionClientId,
-        connectionStatus: "READY",
-        lastError: null
-      }).catch(() => null);
-    }
+    if (isActiveRuntimeState(runtime)) {
+      if (syncCompleted) {
+        runtime.connectionStatus = "READY";
+        runtime.hasCompletedInitialSync = true;
+        runtime.lastError = null;
+        resetHistoryRetryState(runtime);
+        await saveWhatsAppChannelConnection({
+          channelId: runtime.channelId,
+          workspaceId: runtime.workspaceId,
+          agentId: runtime.agentId,
+          sessionClientId: runtime.sessionClientId,
+          connectionStatus: "READY",
+          lastError: null
+        }).catch(() => null);
+        scheduleBackgroundSync(runtime, WHATSAPP_PERIODIC_SYNC_MS);
+      }
 
-    if (!syncCompleted) {
-      await saveWorkspaceWhatsAppChannelConnection({
-        workspaceId: runtime.workspaceId,
-        agentId: runtime.agentId,
-        sessionClientId: runtime.sessionClientId,
-        connectionStatus: runtime.connectionStatus,
-        lastError: runtime.lastError
-      }).catch(() => null);
-    }
+      if (!syncCompleted) {
+        await saveWhatsAppChannelConnection({
+          channelId: runtime.channelId,
+          workspaceId: runtime.workspaceId,
+          agentId: runtime.agentId,
+          sessionClientId: runtime.sessionClientId,
+          connectionStatus: runtime.connectionStatus,
+          lastError: runtime.lastError
+        }).catch(() => null);
+      }
 
-    if (shouldRetryInBackground) {
-      scheduleBackgroundSync(runtime, nextRetryDelayMs ?? runtime.historyRetryDelayMs);
-    }
+      if (shouldRetryInBackground) {
+        scheduleBackgroundSync(runtime, nextRetryDelayMs ?? runtime.historyRetryDelayMs);
+      }
 
-    touchRuntimeActivity(runtime);
+      touchRuntimeActivity(runtime);
+    }
   }
 }
 

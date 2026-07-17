@@ -40,6 +40,7 @@ export default async function MessageLogsPage({ searchParams }: MessageLogsPageP
       <MessageLogsBoard
         conversationId={data.conversationId}
         filter={data.filter}
+        hasLinkedWhatsAppNumbers={data.hasLinkedWhatsAppNumbers}
         pagination={data.pagination}
         rows={data.rows}
         summary={data.summary}

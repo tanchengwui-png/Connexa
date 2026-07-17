@@ -1,3 +1,4 @@
+import Image from "next/image";
 import { ConnexaLogo } from "@/components/connexa-logo";
 import { getVisiblePublicPackages } from "@/lib/platform-packages";
 
@@ -5,57 +6,149 @@ export const dynamic = "force-dynamic";
 
 const navItems = [
   { href: "#features", label: "Features" },
+  { href: "#video", label: "Watch" },
   { href: "#pricing", label: "Pricing" },
   { href: "#contact", label: "Contact" }
 ];
 
-const inboxItems = [
-  { name: "Aina Property Lead", preview: "Asked about viewing slot", active: true },
-  { name: "David Workshop", preview: "Need quotation update", active: false },
-  { name: "Mira Boutique", preview: "Interested in package details", active: true },
-  { name: "Klinik Orkid", preview: "Requested callback tomorrow", active: false }
-];
+const DEFAULT_CONNEXA_LANDING_VIDEO_URL = "https://www.youtube.com/watch?v=e5oyEIulVnA";
 
 const featureCards = [
   {
-    title: "Shared Team Inbox",
-    body: "Handle all conversations in one workspace with assignments, ownership, and visibility."
+    icon: "inbox",
+    title: "Shared WhatsApp Inbox",
+    body: "One team workspace for chats, notes, assignments, and replies."
   },
   {
-    title: "Contact Context",
-    body: "View customer details, tags, notes, and full timeline without switching screens."
+    icon: "channels",
+    title: "Multi-Number Connection",
+    body: "Connect QR or Cloud API numbers from one place."
   },
   {
-    title: "Action-First Workflow",
-    body: "Turn any chat into a follow-up, reminder, task, or team handoff instantly."
+    icon: "automation",
+    title: "Automation Workflows",
+    body: "Welcome replies, keyword flows, and follow-up logic."
+  },
+  {
+    icon: "campaigns",
+    title: "Campaign Broadcasts",
+    body: "Send targeted campaigns with media and scheduling."
+  },
+  {
+    icon: "contacts",
+    title: "Contacts and Leads",
+    body: "Keep owners, tags, stages, and context connected."
+  },
+  {
+    icon: "tracking",
+    title: "Scheduling and Tracking",
+    body: "Queue messages, book follow-up, and track delivery."
+  }
+];
+
+const heroProofItems = [
+  {
+    title: "Shared Inbox",
+    body: "Keep every customer chat visible to the team",
+    icon: "chat"
+  },
+  {
+    title: "Team Collaboration",
+    body: "Assign ownership and stay aligned on follow-up",
+    icon: "team"
   },
   {
     title: "Smart Automation",
-    body: "Run welcome replies, lead follow-ups, and routing rules with less manual work."
+    body: "Reply faster with rules, templates, and campaigns",
+    icon: "bolt"
   }
 ];
 
-const whyCards = [
+const heroChips = [
   {
-    title: "Faster response handling",
-    body: "Reduce missed messages and keep every conversation owned."
+    title: "WhatsApp Connected",
+    body: "Business number active",
+    tone: "green",
+    position: "top-left"
   },
   {
-    title: "Cleaner team collaboration",
-    body: "Assignments, notes, and context stay inside the same workflow."
+    title: "Lead Assigned",
+    body: "Assigned to Sarah",
+    tone: "blue",
+    position: "top-center"
   },
   {
-    title: "Higher lead visibility",
-    body: "Spot hot leads and priority chats before they go cold."
+    title: "Follow-up Scheduled",
+    body: "Tomorrow, 10:00 AM",
+    tone: "amber",
+    position: "top-right"
   },
   {
-    title: "Ready to scale",
-    body: "Start simple now and expand into automation, campaigns, and AI later."
+    title: "Response Time Improved",
+    body: "32% vs last month",
+    tone: "blue",
+    position: "bottom-left"
+  },
+  {
+    title: "Campaign Sent",
+    body: "Brochure message sent",
+    tone: "purple",
+    position: "bottom-right"
   }
 ];
+
+const statsItems = [
+  {
+    value: "1 inbox",
+    label: "for sales, support, and follow-up"
+  },
+  {
+    value: "Multi-number",
+    label: "connection with QR and Cloud API setup"
+  },
+  {
+    value: "Automated",
+    label: "workflows, broadcasts, and message scheduling"
+  }
+];
+
+function getConnexaLandingVideoEmbedUrl(input: string | undefined) {
+  const fallbackVideoId = "e5oyEIulVnA";
+  const rawValue = input?.trim() || DEFAULT_CONNEXA_LANDING_VIDEO_URL;
+
+  try {
+    const parsed = new URL(rawValue);
+    const hostname = parsed.hostname.replace(/^www\./, "");
+
+    if (hostname === "youtu.be") {
+      const shortVideoId = parsed.pathname.replace(/\//g, "").trim();
+      if (shortVideoId) {
+        return `https://www.youtube.com/embed/${shortVideoId}`;
+      }
+    }
+
+    if (hostname === "youtube.com" || hostname === "m.youtube.com") {
+      const videoId = parsed.searchParams.get("v")?.trim();
+      if (videoId) {
+        return `https://www.youtube.com/embed/${videoId}`;
+      }
+
+      const pathMatch = parsed.pathname.match(/^\/embed\/([^/]+)/);
+      if (pathMatch?.[1]) {
+        return `https://www.youtube.com/embed/${pathMatch[1]}`;
+      }
+    }
+  } catch {
+    return `https://www.youtube.com/embed/${fallbackVideoId}`;
+  }
+
+  return `https://www.youtube.com/embed/${fallbackVideoId}`;
+}
 
 export default async function ConnexaLandingPage() {
   const pricingPlans = await getVisiblePublicPackages();
+  const landingVideoUrl = process.env.NEXT_PUBLIC_CONNEXA_LANDING_VIDEO_URL ?? DEFAULT_CONNEXA_LANDING_VIDEO_URL;
+  const landingVideoEmbedUrl = getConnexaLandingVideoEmbedUrl(landingVideoUrl);
 
   return (
     <main className="connexa-dark-shell">
@@ -69,7 +162,7 @@ export default async function ConnexaLandingPage() {
       <header className="connexa-header">
         <div className="connexa-header-inner">
           <div className="connexa-brand">
-            <ConnexaLogo dark priority />
+            <ConnexaLogo priority />
             <span className="connexa-brand-copy">
               <strong>Shared inbox for modern teams</strong>
               <span>By Recurvos</span>
@@ -95,116 +188,85 @@ export default async function ConnexaLandingPage() {
         </div>
       </header>
 
-      <section className="connexa-hero">
+      <section className="connexa-hero" id="hero">
         <div className="connexa-hero-copy">
           <span className="connexa-kicker">WhatsApp-first shared inbox for modern teams</span>
 
           <h1>
-            Handle customer chats faster.
-            <span>Close more conversations with less chaos.</span>
+            One shared inbox for WhatsApp.
+            <span>Keep conversations, assignments, and follow-up in one place.</span>
           </h1>
 
           <p>
-            Connexa gives your team a beautiful shared inbox, contact context, assignments,
-            automations, and fast actions in one workspace, built for businesses that want
-            speed, clarity, and control.
+            Connexa gives your team a clearer way to manage customer chats, stay aligned, and
+            keep every conversation moving.
           </p>
 
           <div className="connexa-hero-actions">
             <a className="connexa-button connexa-button-primary connexa-button-large" href="/packages">
               Start Free Trial
             </a>
-            <a className="connexa-button connexa-button-glass connexa-button-large" href="#contact">
-              Book Demo
-            </a>
           </div>
 
-          <div className="connexa-hero-points">
-            <span>Shared inbox for teams</span>
-            <span>Fast lead follow-up</span>
-            <span>Clean WhatsApp workflow</span>
+          <div className="connexa-hero-proof-list">
+            {heroProofItems.map((item) => (
+              <article className="connexa-hero-proof-item" key={item.title}>
+                <div className={`connexa-hero-proof-icon ${item.icon}`} />
+                <div>
+                  <strong>{item.title}</strong>
+                  <p>{item.body}</p>
+                </div>
+              </article>
+            ))}
           </div>
         </div>
 
         <div className="connexa-preview-wrap">
           <div className="connexa-preview-glow" />
-          <div className="connexa-preview-shell">
-            <div className="connexa-preview-frame">
-              <div className="connexa-preview-topbar">
-                <div>
-                  <strong>Connexa Inbox</strong>
-                  <p>Realtime team conversation workspace</p>
-                </div>
-                <span>12 active now</span>
-              </div>
-
-              <div className="connexa-preview-grid">
-                <div className="connexa-preview-list">
-                  <div className="connexa-preview-panel-head">
-                    <strong>Inbox</strong>
-                    <span>24 open</span>
-                  </div>
-
-                  <div className="connexa-preview-list-items">
-                    {inboxItems.map((item) => (
-                      <div
-                        className={`connexa-preview-list-item${item.active ? " active" : ""}`}
-                        key={item.name}
-                      >
-                        <div>
-                          <strong>{item.name}</strong>
-                          <p>{item.preview}</p>
-                        </div>
-                        <span>Open</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="connexa-preview-chat">
-                  <div className="connexa-preview-chat-head">
-                    <div>
-                      <strong>Aina Property Lead</strong>
-                      <p>Assigned to Sarah • Hot Lead</p>
-                    </div>
-                    <span>High intent</span>
-                  </div>
-
-                  <div className="connexa-preview-messages">
-                    <div className="connexa-preview-bubble inbound">
-                      Hi, is the unit still available for viewing this weekend?
-                    </div>
-                    <div className="connexa-preview-bubble outbound">
-                      Yes, available. I can help you book a slot. Would Saturday afternoon work?
-                    </div>
-                    <div className="connexa-preview-bubble inbound">
-                      Saturday works. Can you send me the brochure too?
-                    </div>
-                  </div>
-
-                  <div className="connexa-preview-composer">
-                    <div className="connexa-preview-input">Reply to customer...</div>
-                    <button className="connexa-preview-send" type="button">
-                      Send
-                    </button>
-                  </div>
-                </div>
+          {heroChips.map((chip) => (
+            <div
+              className={`connexa-hero-chip ${chip.position} ${chip.tone}`}
+              key={`${chip.position}-${chip.title}`}
+            >
+              <div className="connexa-hero-chip-icon" />
+              <div>
+                <strong>{chip.title}</strong>
+                <p>{chip.body}</p>
               </div>
             </div>
+          ))}
+          <div className="connexa-preview-shell">
+            <Image
+              src="/LandingPageImage.png"
+              alt="Connexa inbox preview"
+              className="connexa-preview-image"
+              width={1600}
+              height={1200}
+              priority
+            />
           </div>
         </div>
       </section>
 
-      <section className="connexa-section" id="features">
+      <section className="connexa-stats-band" aria-label="Platform overview">
+        {statsItems.map((item) => (
+          <article className="connexa-stat-card" key={item.value}>
+            <strong>{item.value}</strong>
+            <p>{item.label}</p>
+          </article>
+        ))}
+      </section>
+
+      <section className="connexa-section connexa-solutions-section" id="features">
         <div className="connexa-section-copy">
-          <span>Core features</span>
-          <h2>Built to make everyday customer communication fast, clear, and controlled.</h2>
+          <span>Solutions</span>
+          <h2>Built to help teams handle WhatsApp work with more structure.</h2>
         </div>
 
         <div className="connexa-feature-grid">
           {featureCards.map((item) => (
             <article className="connexa-feature-card" key={item.title}>
-              <div className="connexa-feature-icon" />
+              <div className={`connexa-feature-icon connexa-feature-icon-${item.icon}`} />
               <strong>{item.title}</strong>
               <p>{item.body}</p>
             </article>
@@ -212,33 +274,33 @@ export default async function ConnexaLandingPage() {
         </div>
       </section>
 
-      <section className="connexa-section connexa-why-section" id="why">
-        <div className="connexa-why-grid">
-          <article className="connexa-why-main">
-            <span>Why Connexa</span>
-            <h3>Made for speed, not clutter.</h3>
+      <section className="connexa-section connexa-video-section" id="video">
+        <div className="connexa-video-layout">
+          <div className="connexa-video-copy">
+            <span>Watch Connexa</span>
+            <h2>See the workspace in action.</h2>
             <p>
-              Most communication tools are overloaded, slow to learn, and hard for teams to use
-              daily. Connexa is designed to feel focused from the first minute so your team can
-              respond, assign, follow up, and move forward without friction.
+              Show your ad, walkthrough, or product intro without sending visitors away.
             </p>
-          </article>
+          </div>
 
-          <div className="connexa-why-cards">
-            {whyCards.map((item) => (
-              <article className="connexa-why-card" key={item.title}>
-                <strong>{item.title}</strong>
-                <p>{item.body}</p>
-              </article>
-            ))}
+          <div className="connexa-video-frame">
+            <iframe
+              src={landingVideoEmbedUrl}
+              title="Connexa landing page video"
+              loading="lazy"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              referrerPolicy="strict-origin-when-cross-origin"
+              allowFullScreen
+            />
           </div>
         </div>
       </section>
 
-      <section className="connexa-section" id="pricing">
+      <section className="connexa-section connexa-pricing-section" id="pricing">
         <div className="connexa-section-copy">
           <span>Pricing</span>
-          <h2>Start simple. Upgrade when your team grows.</h2>
+          <h2>Start simple. Upgrade when you grow.</h2>
         </div>
 
         <div className="connexa-pricing-grid">
@@ -275,19 +337,15 @@ export default async function ConnexaLandingPage() {
         <div className="connexa-contact-card">
           <div>
             <span>Ready to launch</span>
-            <h3>Give your team a faster, cleaner way to handle customer conversations.</h3>
+            <h3>Give your team one place to handle WhatsApp work.</h3>
             <p>
-              Connexa is designed to help growing teams centralize chats, act faster, and keep
-              every conversation under control.
+              Connexa helps teams stay fast, organized, and visible from first reply to follow-up.
             </p>
           </div>
 
           <div className="connexa-contact-actions">
             <a className="connexa-button connexa-button-primary connexa-button-large" href="/packages">
               Start Free Trial
-            </a>
-            <a className="connexa-button connexa-button-glass connexa-button-large" href="#contact">
-              Book a Demo
             </a>
           </div>
         </div>

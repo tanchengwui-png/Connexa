@@ -30,7 +30,7 @@ export function FullEmojiPicker({ onEmojiSelect }: { onEmojiSelect: (emoji: stri
       previewPosition: "none",
       searchPosition: "sticky",
       skinTonePosition: "search",
-      theme: "dark"
+      theme: "light"
     });
 
     const pickerNode = picker as unknown as Node;

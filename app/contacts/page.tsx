@@ -7,53 +7,27 @@ type ContactsPageProps = {
     q?: string;
     page?: string;
     pageSize?: string;
+    tags?: string | string[];
+    tag?: string | string[];
+    ownerId?: string | string[];
+    ownerIds?: string | string[];
+    assignee?: string | string[];
+    assigneeIds?: string | string[];
   }>;
 };
 
 export default async function ContactsPage({ searchParams }: ContactsPageProps) {
   const params = searchParams ? await searchParams : undefined;
-  const { agents, contacts, summary, search, pagination } = await getContactsData({
+  const { agents, contacts, search, pagination } = await getContactsData({
     search: params?.q,
+    tags: normalizeQueryList(params?.tags, params?.tag),
+    ownerIds: normalizeQueryList(params?.ownerIds, params?.ownerId, params?.assigneeIds, params?.assignee),
     page: params?.page ? Number.parseInt(params.page, 10) : undefined,
     pageSize: params?.pageSize ? Number.parseInt(params.pageSize, 10) : undefined
   });
 
   return (
     <DashboardShell currentPath="/contacts">
-      <section className="hero contacts-hero">
-        <div>
-          <span className="badge">Contacts</span>
-          <h2>Keep customer identity, tags, and notes visible beyond the queue.</h2>
-          <p className="muted">
-            Searchable contacts make the inbox more useful by keeping customer context,
-            hot-lead signals, and internal memory in the same operating layer.
-          </p>
-        </div>
-      </section>
-
-      <section className="metrics-grid contacts-metrics-grid contacts-metrics-grid-compact">
-        <article className="content-card metric-card contacts-metric-card">
-          <div className="metric-label">Total contacts</div>
-          <div className="metric-value">{summary.total}</div>
-          <div className="table-subtle">Directory visible to the workspace</div>
-        </article>
-        <article className="content-card metric-card contacts-metric-card">
-          <div className="metric-label">Active</div>
-          <div className="metric-value">{summary.active}</div>
-          <div className="table-subtle">Available for inbox and note workflows</div>
-        </article>
-        <article className="content-card metric-card contacts-metric-card">
-          <div className="metric-label">Hot leads</div>
-          <div className="metric-value">{summary.hotLeads}</div>
-          <div className="table-subtle">Marked for closer attention</div>
-        </article>
-        <article className="content-card metric-card contacts-metric-card">
-          <div className="metric-label">Recent activity</div>
-          <div className="metric-value">{summary.recentlyActive}</div>
-          <div className="table-subtle">Interacted within the last 24 hours</div>
-        </article>
-      </section>
-
       <section className="contacts-workspace">
         <div className="contacts-mainpane">
           <section className="contacts-grid contacts-grid-single">
@@ -67,5 +41,17 @@ export default async function ContactsPage({ searchParams }: ContactsPageProps) 
         </div>
       </section>
     </DashboardShell>
+  );
+}
+
+function normalizeQueryList(...values: Array<string | string[] | undefined>) {
+  return Array.from(
+    new Set(
+      values
+        .flatMap((value) => (Array.isArray(value) ? value : value ? [value] : []))
+        .flatMap((value) => value.split(","))
+        .map((value) => value.trim())
+        .filter(Boolean)
+    )
   );
 }

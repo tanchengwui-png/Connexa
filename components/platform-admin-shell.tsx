@@ -28,7 +28,7 @@ export function PlatformAdminShell({
   children
 }: PlatformAdminShellProps) {
   return (
-    <div className="platform-admin-layout">
+    <div className={`platform-admin-layout platform-admin-layout-${currentKey}`}>
       <aside className="content-card platform-admin-sidebar">
         <div className="platform-admin-sidebar-head">
           <span className="badge connexa-public-badge">Platform owner</span>

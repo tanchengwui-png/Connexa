@@ -37,6 +37,17 @@ export const ConversationStatus = {
 
 export type ConversationStatus = (typeof ConversationStatus)[keyof typeof ConversationStatus];
 
+export const ConversationSnoozeStatus = {
+  ACTIVE: "ACTIVE",
+  MANUAL: "MANUAL",
+  EXPIRED: "EXPIRED",
+  INCOMING_MESSAGE: "INCOMING_MESSAGE",
+  WORKFLOW: "WORKFLOW"
+} as const;
+
+export type ConversationSnoozeStatus =
+  (typeof ConversationSnoozeStatus)[keyof typeof ConversationSnoozeStatus];
+
 export const MessageDirection = {
   INBOUND: "INBOUND",
   OUTBOUND: "OUTBOUND"
@@ -76,13 +87,71 @@ export const AutomationMatchType = {
 
 export type AutomationMatchType = (typeof AutomationMatchType)[keyof typeof AutomationMatchType];
 
+export const AutomationJobType = {
+  FOLLOW_UP_MESSAGE: "FOLLOW_UP_MESSAGE"
+} as const;
+
+export type AutomationJobType = (typeof AutomationJobType)[keyof typeof AutomationJobType];
+
+export const AutomationJobStatus = {
+  PENDING: "PENDING",
+  RUNNING: "RUNNING",
+  SENT: "SENT",
+  BLOCKED: "BLOCKED",
+  FAILED: "FAILED",
+  CANCELED: "CANCELED"
+} as const;
+
+export type AutomationJobStatus = (typeof AutomationJobStatus)[keyof typeof AutomationJobStatus];
+
 export const MediaAssetKind = {
   IMAGE: "IMAGE",
   AUDIO: "AUDIO",
-  VIDEO: "VIDEO"
+  VIDEO: "VIDEO",
+  DOCUMENT: "DOCUMENT"
 } as const;
 
 export type MediaAssetKind = (typeof MediaAssetKind)[keyof typeof MediaAssetKind];
+
+export const MediaAssetSource = {
+  MEDIA_LIBRARY: "MEDIA_LIBRARY",
+  INBOX: "INBOX",
+  QUICK_REPLY: "QUICK_REPLY",
+  CAMPAIGN: "CAMPAIGN",
+  AUTOMATION_RULE: "AUTOMATION_RULE",
+  AUTOMATION_WORKFLOW: "AUTOMATION_WORKFLOW",
+  WHATSAPP_INBOUND: "WHATSAPP_INBOUND"
+} as const;
+
+export type MediaAssetSource = (typeof MediaAssetSource)[keyof typeof MediaAssetSource];
+
+export const OutboundMessageJobStatus = {
+  PENDING: "PENDING",
+  RUNNING: "RUNNING",
+  SENT: "SENT",
+  FAILED: "FAILED",
+  CANCELED: "CANCELED"
+} as const;
+
+export type OutboundMessageJobStatus = (typeof OutboundMessageJobStatus)[keyof typeof OutboundMessageJobStatus];
+
+export const CampaignRunRecipientStatus = {
+  QUEUED: "QUEUED",
+  EXCLUDED: "EXCLUDED"
+} as const;
+
+export type CampaignRunRecipientStatus =
+  (typeof CampaignRunRecipientStatus)[keyof typeof CampaignRunRecipientStatus];
+
+export const ConversationAuditEventType = {
+  ASSIGNED: "ASSIGNED",
+  REASSIGNED: "REASSIGNED",
+  RELEASED: "RELEASED",
+  TAKEN_OVER: "TAKEN_OVER"
+} as const;
+
+export type ConversationAuditEventType =
+  (typeof ConversationAuditEventType)[keyof typeof ConversationAuditEventType];
 
 export const LeadPriority = {
   LOW: "LOW",

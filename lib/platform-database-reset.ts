@@ -85,7 +85,9 @@ export async function reseedDemoDatabase() {
     }
   });
 
-  await Promise.allSettled(existingWorkspaceIds.map(({ id }) => deleteWorkspaceWhatsAppClientSession(id)));
+  await Promise.allSettled(
+    existingWorkspaceIds.map(({ id }: { id: string }) => deleteWorkspaceWhatsAppClientSession(id))
+  );
   await resetUploadedAssets();
 
   if (prisma.invite) {

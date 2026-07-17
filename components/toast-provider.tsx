@@ -1,5 +1,6 @@
 "use client";
 
+import React from "react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { INBOX_LAYERS } from "@/components/inbox/layers";

@@ -18,13 +18,14 @@ type WorkflowMediaItem = {
 };
 
 type WorkflowAssignmentMode = "none" | "fixed" | "round_robin";
+type WorkflowSnoozeAction = "none" | "snooze" | "unsnooze";
 
 type WorkflowDraft = {
   startStepId: string;
   variables?: WorkflowVariable[];
   steps: Array<{
     id: string;
-    type: "ask" | "question" | "choice" | "action" | "reply" | "update" | "delay" | "go_to" | "end";
+    type: "ask" | "question" | "choice" | "action" | "reply" | "update" | "delay" | "follow_up" | "go_to" | "end";
     title?: string;
     position?: { x: number; y: number };
     prompt?: string;
@@ -43,6 +44,9 @@ type WorkflowDraft = {
     assignmentMode?: WorkflowAssignmentMode;
     roundRobinAgentIds?: string[];
     overwriteExistingOwner?: boolean;
+    snoozeAction?: WorkflowSnoozeAction;
+    snoozeDurationMinutes?: number | null;
+    snoozeReason?: string | null;
     leadStage?: string | null;
     leadAttributeKey?: string | null;
     leadAttributeValue?: string | null;
@@ -128,6 +132,14 @@ const DELAY_ICON = buildIconDataUri(`
     <path d="M32 24v9l6 4" stroke="#cbd5e1" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
 `);
+const FOLLOW_UP_ICON = buildIconDataUri(`
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+    <rect x="10" y="10" width="44" height="44" rx="12" fill="#10243a"/>
+    <path d="M20 24h16M20 32h24" stroke="#e0f2fe" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="42" cy="42" r="10" stroke="#7dd3fc" stroke-width="4"/>
+    <path d="M42 36v6l4 2" stroke="#7dd3fc" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+`);
 const GOTO_ICON = buildIconDataUri(`
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
     <rect x="10" y="12" width="44" height="40" rx="12" fill="#13283f"/>
@@ -177,7 +189,7 @@ export function WorkflowLibraryDesigner({
       hostRef.current.innerHTML = "";
 
       const designer = Designer.create(hostRef.current, definition, {
-        theme: "dark",
+        theme: "light",
         undoStackSize: 20,
         toolbox: {
           isCollapsed: true,
@@ -193,6 +205,9 @@ export function WorkflowLibraryDesigner({
             }
             if (step.type === "delay") {
               return "Delay";
+            }
+            if (step.type === "follow_up") {
+              return "Follow Up";
             }
             if (step.type === "go_to") {
               return "Go To Step";
@@ -220,6 +235,9 @@ export function WorkflowLibraryDesigner({
             }
             if (step.type === "delay") {
               return "Pause the workflow, then resume automatically after the selected wait time.";
+            }
+            if (step.type === "follow_up") {
+              return "Wait for the selected time, cancel if the contact replies, otherwise send a follow-up message.";
             }
             if (step.type === "go_to") {
               return "Jump to any existing node, including back to the main menu.";
@@ -295,6 +313,18 @@ export function WorkflowLibraryDesigner({
                     cancelOnInbound: true,
                     cancelOnHumanReply: false,
                     nextStepId: ""
+                  }
+                },
+                {
+                  componentType: "task",
+                  type: "follow_up",
+                  name: "Follow Up",
+                  properties: {
+                    delayMinutes: "60",
+                    reply: "Following up on my last message.",
+                    nextStepId: "",
+                    cancelOnInbound: true,
+                    cancelOnHumanReply: false
                   }
                 },
                 {
@@ -376,6 +406,9 @@ export function WorkflowLibraryDesigner({
             }
             if (type === "delay") {
               return DELAY_ICON;
+            }
+            if (type === "follow_up") {
+              return FOLLOW_UP_ICON;
             }
             if (type === "go_to") {
               return GOTO_ICON;
@@ -515,6 +548,15 @@ function parseWorkflowDraft(value: string): WorkflowDraft | null {
           };
         }
 
+        if (step.type === "follow_up") {
+          return {
+            ...step,
+            delayMinutes: readNullableInteger(step.delayMinutes),
+            cancelOnInbound: readBoolean(step.cancelOnInbound, true),
+            cancelOnHumanReply: readBoolean(step.cancelOnHumanReply)
+          };
+        }
+
         return step;
       })
     };
@@ -568,6 +610,25 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
             cancelOnInbound: step.cancelOnInbound !== false,
             cancelOnHumanReply: Boolean(step.cancelOnHumanReply),
             nextStepId: step.nextStepId ?? ""
+          }
+        },
+        ...buildSequence(step.nextStepId)
+      ];
+    }
+
+    if (step.type === "follow_up") {
+      return [
+        {
+          id: step.id,
+          componentType: "task",
+          type: "follow_up",
+          name: step.title || step.id,
+          properties: {
+            delayMinutes: step.delayMinutes ? `${step.delayMinutes}` : "60",
+            reply: step.reply ?? "",
+            nextStepId: step.nextStepId ?? "",
+            cancelOnInbound: step.cancelOnInbound !== false,
+            cancelOnHumanReply: Boolean(step.cancelOnHumanReply)
           }
         },
         ...buildSequence(step.nextStepId)
@@ -676,6 +737,9 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
             assignmentMode: step.assignmentMode ?? "none",
             roundRobinAgentIds: step.roundRobinAgentIds ?? [],
             overwriteExistingOwner: Boolean(step.overwriteExistingOwner),
+            snoozeAction: step.snoozeAction ?? "none",
+            snoozeDurationMinutes: step.snoozeDurationMinutes ?? null,
+            snoozeReason: step.snoozeReason ?? "",
             leadAttributeKey: step.leadAttributeKey ?? "",
             leadAttributeValue: step.leadAttributeValue ?? "",
             leadAttributeValueSource: step.leadAttributeValueSource ?? "literal",
@@ -702,6 +766,9 @@ function workflowDraftToDefinition(draft: WorkflowDraft): Definition {
           notifyAssignedOwner: Boolean(step.notifyAssignedOwner),
           notifyAgentIds: step.notifyAgentIds ?? [],
           notifyMessage: step.notifyMessage ?? "",
+          snoozeAction: step.snoozeAction ?? "none",
+          snoozeDurationMinutes: step.snoozeDurationMinutes ?? null,
+          snoozeReason: step.snoozeReason ?? "",
           nextStepId: step.nextStepId ?? ""
         }
       },
@@ -790,6 +857,20 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
       return step.id;
     }
 
+    if (step.type === "follow_up") {
+      steps.push({
+        id: step.id,
+        type: "follow_up",
+        title: step.name,
+        delayMinutes: readNullableInteger(step.properties.delayMinutes),
+        reply: readString(step.properties.reply),
+        cancelOnInbound: readBoolean(step.properties.cancelOnInbound, true),
+        cancelOnHumanReply: readBoolean(step.properties.cancelOnHumanReply),
+        nextStepId
+      });
+      return step.id;
+    }
+
     if (step.type === "reply") {
       steps.push({
         id: step.id,
@@ -827,6 +908,9 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
         assignmentMode: readWorkflowAssignmentMode(step.properties.assignmentMode),
         roundRobinAgentIds: readStringArray(step.properties.roundRobinAgentIds),
         overwriteExistingOwner: readBoolean(step.properties.overwriteExistingOwner),
+        snoozeAction: readWorkflowSnoozeAction(step.properties.snoozeAction),
+        snoozeDurationMinutes: readNullableNumber(step.properties.snoozeDurationMinutes),
+        snoozeReason: readNullableString(step.properties.snoozeReason),
         leadStage: readNullableString(step.properties.leadStage),
         leadAttributeKey: readLeadAttributeKey(step.properties.leadAttributeKey),
         leadAttributeValue: readNullableString(step.properties.leadAttributeValue),
@@ -848,6 +932,9 @@ function definitionToWorkflowDraft(definition: Definition, previousDraft?: Workf
       notifyAssignedOwner: readBoolean(step.properties.notifyAssignedOwner),
       notifyAgentIds: readStringArray(step.properties.notifyAgentIds),
       notifyMessage: readNullableString(step.properties.notifyMessage),
+      snoozeAction: readWorkflowSnoozeAction(step.properties.snoozeAction),
+      snoozeDurationMinutes: readNullableNumber(step.properties.snoozeDurationMinutes),
+      snoozeReason: readNullableString(step.properties.snoozeReason),
       leadStage: readNullableString(step.properties.leadStage),
       nextStepId
     });
@@ -934,6 +1021,10 @@ function readNullableInteger(value: unknown): number | null {
   return Math.round(parsed);
 }
 
+function readNullableNumber(value: unknown): number | null {
+  return readNullableInteger(value);
+}
+
 function readBoolean(value: unknown, fallback = false) {
   if (typeof value === "boolean") {
     return value;
@@ -953,6 +1044,10 @@ function readBoolean(value: unknown, fallback = false) {
 
 function readWorkflowAssignmentMode(value: unknown): WorkflowAssignmentMode {
   return value === "round_robin" ? "round_robin" : value === "fixed" ? "fixed" : "none";
+}
+
+function readWorkflowSnoozeAction(value: unknown): WorkflowSnoozeAction {
+  return value === "snooze" ? "snooze" : value === "unsnooze" ? "unsnooze" : "none";
 }
 
 function readLeadAttributeKey(value: unknown) {

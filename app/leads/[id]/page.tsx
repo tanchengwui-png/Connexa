@@ -54,7 +54,7 @@ export default async function LeadRecordPage({ params }: LeadRecordPageProps) {
           note: lead.note,
           lastActivityAtIso: lead.lastActivityAt.toISOString(),
           createdAtIso: lead.createdAt.toISOString(),
-          activities: lead.activities.map((activity) => ({
+          activities: lead.activities.map((activity: (typeof lead.activities)[number]) => ({
             id: activity.id,
             type: activity.type,
             title: activity.title,

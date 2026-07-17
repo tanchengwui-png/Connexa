@@ -32,6 +32,10 @@ export async function PUT(request: NextRequest) {
       billplzSandbox?: boolean;
       automationWorkflowIdleHours?: number;
       automationWorkflowExpireHours?: number;
+      freeTrialDurationDays?: number;
+      expiredAccountCleanupDays?: number;
+      sessionTimeoutMinutes?: number;
+      rememberMeTimeoutMinutes?: number;
     };
 
     await updatePlatformConfig({
@@ -49,7 +53,11 @@ export async function PUT(request: NextRequest) {
       billplzCollectionId: body.billplzCollectionId ?? "",
       billplzSandbox: Boolean(body.billplzSandbox),
       automationWorkflowIdleHours: Number(body.automationWorkflowIdleHours ?? 24),
-      automationWorkflowExpireHours: Number(body.automationWorkflowExpireHours ?? 72)
+      automationWorkflowExpireHours: Number(body.automationWorkflowExpireHours ?? 72),
+      freeTrialDurationDays: Number(body.freeTrialDurationDays ?? 14),
+      expiredAccountCleanupDays: Number(body.expiredAccountCleanupDays ?? 60),
+      sessionTimeoutMinutes: Number(body.sessionTimeoutMinutes ?? 60),
+      rememberMeTimeoutMinutes: Number(body.rememberMeTimeoutMinutes ?? 43_200)
     });
 
     return NextResponse.json({ ok: true });

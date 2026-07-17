@@ -12,8 +12,12 @@ function resolveAlias(specifier: string) {
     basePath,
     `${basePath}.ts`,
     `${basePath}.tsx`,
+    `${basePath}.js`,
+    `${basePath}.mjs`,
     path.join(basePath, "index.ts"),
-    path.join(basePath, "index.tsx")
+    path.join(basePath, "index.tsx"),
+    path.join(basePath, "index.js"),
+    path.join(basePath, "index.mjs")
   ];
 
   for (const candidate of candidates) {
@@ -45,6 +49,8 @@ const {
   listWhatsAppMentionCandidates,
   resolveWhatsAppContacts,
   restoreWorkspaceWhatsAppClient,
+  setWhatsAppWebChatMute,
+  sendWhatsAppWebChatSeen,
   sendWhatsAppWebMessage,
   syncWorkspaceHistory
 } = await import("../lib/whatsapp-web.ts");
@@ -113,13 +119,14 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/whatsapp/runtime" && request.method === "GET") {
       const workspaceId = getRequiredSearchParam(url, "workspaceId");
       const agentId = getRequiredSearchParam(url, "agentId");
+      const channelId = getRequiredSearchParam(url, "channelId");
 
       if (!workspaceId || !agentId) {
         sendJson(response, 400, { error: "workspaceId and agentId are required." });
         return;
       }
 
-      const status = await getWorkspaceWhatsAppRuntimeStatus({ workspaceId, agentId });
+      const status = await getWorkspaceWhatsAppRuntimeStatus({ workspaceId, agentId, channelId });
       sendJson(response, 200, { status });
       return;
     }
@@ -131,56 +138,66 @@ const server = createServer(async (request, response) => {
     }
 
     if (url.pathname === "/whatsapp/runtime/start" && request.method === "POST") {
-      const body = await readJsonBody<{ workspaceId?: string; agentId?: string }>(request);
+      const body = await readJsonBody<{ workspaceId?: string; agentId?: string; channelId?: string | null }>(request);
       const workspaceId = body?.workspaceId?.trim();
       const agentId = body?.agentId?.trim();
+      const channelId = body?.channelId?.trim() || null;
 
       if (!workspaceId || !agentId) {
         sendJson(response, 400, { error: "workspaceId and agentId are required." });
         return;
       }
 
-      await ensureWorkspaceWhatsAppClient({ workspaceId, agentId });
+      await ensureWorkspaceWhatsAppClient({ workspaceId, agentId, channelId });
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (url.pathname === "/whatsapp/runtime" && request.method === "DELETE") {
       const workspaceId = getRequiredSearchParam(url, "workspaceId");
+      const channelId = getRequiredSearchParam(url, "channelId");
 
       if (!workspaceId) {
         sendJson(response, 400, { error: "workspaceId is required." });
         return;
       }
 
-      await disconnectWorkspaceWhatsAppClient(workspaceId);
+      await disconnectWorkspaceWhatsAppClient(workspaceId, channelId);
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (url.pathname === "/whatsapp/runtime/session" && request.method === "DELETE") {
       const workspaceId = getRequiredSearchParam(url, "workspaceId");
+      const channelId = getRequiredSearchParam(url, "channelId");
 
       if (!workspaceId) {
         sendJson(response, 400, { error: "workspaceId is required." });
         return;
       }
 
-      await deleteWorkspaceWhatsAppClientSession(workspaceId);
+      await deleteWorkspaceWhatsAppClientSession(workspaceId, channelId);
       sendJson(response, 200, { ok: true });
       return;
     }
 
     if (url.pathname === "/whatsapp/runtime/sync" && request.method === "POST") {
-      const body = await readJsonBody<{ workspaceId?: string }>(request);
+      const body = await readJsonBody<{
+        workspaceId?: string;
+        channelId?: string | null;
+        triggeredBy?: "manual" | "background";
+      }>(request);
       const workspaceId = body?.workspaceId?.trim();
+      const channelId = body?.channelId?.trim() || null;
 
       if (!workspaceId) {
         sendJson(response, 400, { error: "workspaceId is required." });
         return;
       }
 
-      const result = await syncWorkspaceHistory(workspaceId);
+      const result = await syncWorkspaceHistory(workspaceId, channelId, {
+        triggeredBy: body?.triggeredBy
+      });
       sendJson(response, 200, { ok: true, result });
       return;
     }
@@ -224,6 +241,7 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/messages/send" && request.method === "POST") {
       const body = await readJsonBody<{
         conversationId?: string;
+        channelId?: string | null;
         workspaceId?: string;
         to?: string;
         body?: string;
@@ -241,10 +259,12 @@ const server = createServer(async (request, response) => {
         attachmentUrl?: string | null;
         attachmentMimeType?: string | null;
         attachmentName?: string | null;
+        sendAudioAsVoice?: boolean;
       }>(request);
 
       const workspaceId = body?.workspaceId?.trim();
       const conversationId = body?.conversationId?.trim();
+      const channelId = body?.channelId?.trim() || null;
       const to = body?.to?.trim();
       const messageBody = body?.body ?? "";
 
@@ -255,6 +275,7 @@ const server = createServer(async (request, response) => {
 
       const result = await sendWhatsAppWebMessage({
         workspaceId,
+        channelId,
         conversationId,
         to,
         body: messageBody,
@@ -275,7 +296,8 @@ const server = createServer(async (request, response) => {
         attachmentPath: body?.attachmentPath ?? null,
         attachmentUrl: body?.attachmentUrl ?? null,
         attachmentMimeType: body?.attachmentMimeType ?? null,
-        attachmentName: body?.attachmentName ?? null
+        attachmentName: body?.attachmentName ?? null,
+        sendAudioAsVoice: body?.sendAudioAsVoice === true
       });
 
       sendJson(response, 200, { result });
@@ -285,10 +307,12 @@ const server = createServer(async (request, response) => {
     if (url.pathname === "/messages/delete-for-everyone" && request.method === "POST") {
       const body = await readJsonBody<{
         workspaceId?: string;
+        channelId?: string | null;
         providerMessageId?: string;
       }>(request);
 
       const workspaceId = body?.workspaceId?.trim();
+      const channelId = body?.channelId?.trim() || null;
       const providerMessageId = body?.providerMessageId?.trim();
 
       if (!workspaceId || !providerMessageId) {
@@ -298,10 +322,78 @@ const server = createServer(async (request, response) => {
 
       const result = await deleteWhatsAppWebMessageForEveryone({
         workspaceId,
+        channelId,
         providerMessageId
       });
 
       sendJson(response, 200, { result });
+      return;
+    }
+
+    if (url.pathname === "/messages/seen" && request.method === "POST") {
+      const body = await readJsonBody<{
+        workspaceId?: string;
+        channelId?: string | null;
+        conversationId?: string;
+      }>(request);
+
+      const workspaceId = body?.workspaceId?.trim();
+      const channelId = body?.channelId?.trim() || null;
+      const conversationId = body?.conversationId?.trim();
+
+      if (!workspaceId || !conversationId) {
+        sendJson(response, 400, { error: "workspaceId and conversationId are required." });
+        return;
+      }
+
+      const result = await sendWhatsAppWebChatSeen({
+        workspaceId,
+        channelId,
+        conversationId
+      });
+
+      sendJson(response, 200, { result });
+      return;
+    }
+
+    if (url.pathname === "/chats/mute" && request.method === "POST") {
+      const body = await readJsonBody<{
+        workspaceId?: string;
+        channelId?: string | null;
+        conversationId?: string;
+        mute?: boolean;
+        muteUntil?: string | null;
+      }>(request);
+
+      const workspaceId = body?.workspaceId?.trim();
+      const channelId = body?.channelId?.trim() || null;
+      const conversationId = body?.conversationId?.trim();
+
+      if (!workspaceId || !conversationId || typeof body?.mute !== "boolean") {
+        sendJson(response, 400, { error: "workspaceId, conversationId, and mute are required." });
+        return;
+      }
+
+      const muteUntil = body.muteUntil ? new Date(body.muteUntil) : null;
+      if (body.mute && body.muteUntil && Number.isNaN(muteUntil?.getTime?.() ?? Number.NaN)) {
+        sendJson(response, 400, { error: "muteUntil must be a valid date." });
+        return;
+      }
+
+      const result = await setWhatsAppWebChatMute({
+        workspaceId,
+        channelId,
+        conversationId,
+        mute: body.mute,
+        muteUntil
+      });
+
+      sendJson(response, 200, {
+        result: {
+          isMuted: result.isMuted,
+          muteExpiration: result.muteExpiration?.toISOString() ?? null
+        }
+      });
       return;
     }
 
@@ -332,18 +424,21 @@ async function restorePersistedWhatsAppSessions() {
       }
     },
     select: {
+      id: true,
       workspaceId: true
     }
   });
 
   for (const channel of channels) {
-    restoreWorkspaceWhatsAppClient(channel.workspaceId)
+    restoreWorkspaceWhatsAppClient(channel.workspaceId, channel.id)
       .then(() => {
-        console.info(`[sender] restored WhatsApp runtime for workspace ${channel.workspaceId}`);
+        console.info(
+          `[sender] restored WhatsApp runtime for workspace ${channel.workspaceId} channel ${channel.id}`
+        );
       })
       .catch((error: unknown) => {
         console.error(
-          `[sender] failed to restore WhatsApp runtime for workspace ${channel.workspaceId}: ${
+          `[sender] failed to restore WhatsApp runtime for workspace ${channel.workspaceId} channel ${channel.id}: ${
             error instanceof Error ? error.message : "Unknown restore error."
           }`
         );

@@ -1,7 +1,13 @@
 import { prisma } from "@/lib/prisma";
+import { getPreferredWhatsAppChannelLabel } from "@/lib/whatsapp-channel-label";
+import { getWorkspaceWhatsAppChannels } from "@/lib/whatsapp-channel";
 import { getWorkspaceWhatsAppHealth } from "@/lib/whatsapp-health";
 import { WHATSAPP_RUNTIME_EVENT_TYPES } from "@/lib/whatsapp-runtime-events";
 import { getWhatsAppSenderNodeMetrics } from "@/lib/whatsapp-runtime";
+
+type SenderWorkspaceMetric = NonNullable<
+  Awaited<ReturnType<typeof getWhatsAppSenderNodeMetrics>>
+>["workspaces"][number];
 
 function getPlatformWorkspaceAlerts(input: {
   runtimeStatus: string;
@@ -89,38 +95,45 @@ export async function getPlatformWhatsAppHealthOverview() {
         slug: true,
         plan: true,
         createdAt: true,
-        whatsAppChannel: {
-          select: {
-            connectedByAgentId: true,
-            connectedByAgent: {
-              select: {
-                id: true,
-                name: true,
-                email: true
-              }
-            }
-          }
-        },
         agents: {
           orderBy: [{ createdAt: "asc" }],
           take: 1,
           select: {
-            id: true
+            id: true,
+            email: true
           }
         }
       }
     }),
     getWhatsAppSenderNodeMetrics().catch(() => null)
   ]);
+  type RecentEvent = (typeof recentEvents)[number];
+  type PlatformWorkspace = (typeof workspaces)[number];
   const senderWorkspaceMetrics = new Map(
-    (senderMetrics?.workspaces ?? []).map((workspace) => [workspace.workspaceId, workspace])
+    (senderMetrics?.workspaces ?? []).map((workspace: SenderWorkspaceMetric) => [workspace.workspaceId, workspace])
   );
 
   const rows = await Promise.all(
-    workspaces.map(async (workspace) => {
-      const workspaceEvents = recentEvents.filter((event) => event.workspaceId === workspace.id);
+    workspaces.map(async (workspace: PlatformWorkspace) => {
+      const workspaceEvents = recentEvents.filter(
+        (event: RecentEvent) => event.workspaceId === workspace.id
+      );
+      const workspaceChannels = await getWorkspaceWhatsAppChannels(workspace.id);
+      const visibleChannels = workspaceChannels.filter(
+        (channel) =>
+          Boolean(channel.phoneNumber?.trim()) ||
+          Boolean(channel.phoneNumberId?.trim()) ||
+          Boolean(channel.sessionClientId?.trim()) ||
+          Boolean(channel.displayName?.trim()) ||
+          channel.connectionStatus !== "DISCONNECTED"
+      );
+      const primaryChannel =
+        visibleChannels.find((channel) => channel.id === workspaceChannels[0]?.id) ??
+        visibleChannels[0] ??
+        workspaceChannels[0] ??
+        null;
       const referenceAgentId =
-        workspace.whatsAppChannel?.connectedByAgentId ?? workspace.agents[0]?.id ?? "platform-health";
+        primaryChannel?.connectedByAgentId ?? workspace.agents[0]?.id ?? "platform-health";
       const health = await getWorkspaceWhatsAppHealth({
         workspaceId: workspace.id,
         agentId: referenceAgentId
@@ -144,13 +157,27 @@ export async function getPlatformWhatsAppHealthOverview() {
         name: workspace.name,
         slug: workspace.slug,
         plan: workspace.plan,
+        loginEmail: workspace.agents[0]?.email ?? null,
         createdAt: workspace.createdAt.toISOString(),
+        channels: visibleChannels.map((channel, index) => ({
+          id: channel.id,
+          label: getPreferredWhatsAppChannelLabel({
+            displayName: channel.displayName,
+            phoneNumber: channel.phoneNumber,
+            fallbackLabel: `Phone ${index + 1}`
+          })!,
+          phoneNumber: channel.phoneNumber ?? null,
+          connectionStatus: channel.connectionStatus,
+          connectionMethod: channel.connectionMethod,
+          connectedAt: channel.connectedAt?.toISOString() ?? null,
+          connectedBy:
+            channel.connectedByAgentName?.trim() || null,
+          lastError: channel.lastError ?? null
+        })),
         phoneNumber: health.channel?.phoneNumber ?? null,
         connectedAt: health.channel?.connectedAt?.toISOString() ?? null,
         connectedBy:
-          workspace.whatsAppChannel?.connectedByAgent?.name && workspace.whatsAppChannel.connectedByAgent.email
-            ? `${workspace.whatsAppChannel.connectedByAgent.name} (${workspace.whatsAppChannel.connectedByAgent.email})`
-            : workspace.whatsAppChannel?.connectedByAgent?.name ?? null,
+          primaryChannel?.connectedByAgentName ?? null,
         hasSession:
           Boolean(health.channel?.sessionClientId) ||
           Boolean(health.channel?.phoneNumber) ||
@@ -172,20 +199,21 @@ export async function getPlatformWhatsAppHealthOverview() {
         senderMetrics: workspaceSenderMetrics,
         runtimeMetrics: {
           lastEventAt: workspaceEvents[0]?.createdAt.toISOString() ?? null,
-          qrEvents24h: workspaceEvents.filter((event) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.QR_READY)
-            .length,
+          qrEvents24h: workspaceEvents.filter(
+            (event: RecentEvent) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.QR_READY
+          ).length,
           authFailures24h: workspaceEvents.filter(
-            (event) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.AUTH_FAILURE
+            (event: RecentEvent) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.AUTH_FAILURE
           ).length,
           reconnects24h: workspaceEvents.filter(
-            (event) =>
+            (event: RecentEvent) =>
               event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.RECONNECT_SCHEDULED ||
               event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.STALL_RECOVERY
           ).length,
           idleEvictions24h: workspaceEvents.filter(
-            (event) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.IDLE_EVICTED
+            (event: RecentEvent) => event.eventType === WHATSAPP_RUNTIME_EVENT_TYPES.IDLE_EVICTED
           ).length,
-          latestEvents: workspaceEvents.slice(0, 3).map((event) => ({
+          latestEvents: workspaceEvents.slice(0, 3).map((event: RecentEvent) => ({
             eventType: event.eventType,
             message: event.message,
             createdAt: event.createdAt.toISOString()
@@ -195,21 +223,33 @@ export async function getPlatformWhatsAppHealthOverview() {
       };
     })
   );
+  type HealthRow = (typeof rows)[number];
 
   return {
     rows,
     summary: {
       totalWorkspaces: rows.length,
-      connectedWorkspaces: rows.filter((row) => row.runtimeStatus !== "DISCONNECTED" || row.phoneNumber).length,
-      readyWorkspaces: rows.filter((row) => row.isInboxReady && !row.isLiveOnlyMode).length,
-      liveOnlyWorkspaces: rows.filter((row) => row.isLiveOnlyMode).length,
-      alertWorkspaces: rows.filter((row) => row.alerts.length > 0).length,
-      qrEvents24h: rows.reduce((sum, row) => sum + row.runtimeMetrics.qrEvents24h, 0),
-      authFailures24h: rows.reduce((sum, row) => sum + row.runtimeMetrics.authFailures24h, 0),
-      reconnects24h: rows.reduce((sum, row) => sum + row.runtimeMetrics.reconnects24h, 0),
-      idleEvictions24h: rows.reduce((sum, row) => sum + row.runtimeMetrics.idleEvictions24h, 0),
-      totalImportedConversations: rows.reduce((sum, row) => sum + row.importedConversationCount, 0),
-      totalImportedMessages: rows.reduce((sum, row) => sum + row.importedMessageCount, 0)
+      connectedWorkspaces: rows.filter(
+        (row: HealthRow) => row.runtimeStatus !== "DISCONNECTED" || row.phoneNumber
+      ).length,
+      readyWorkspaces: rows.filter((row: HealthRow) => row.isInboxReady && !row.isLiveOnlyMode).length,
+      liveOnlyWorkspaces: rows.filter((row: HealthRow) => row.isLiveOnlyMode).length,
+      alertWorkspaces: rows.filter((row: HealthRow) => row.alerts.length > 0).length,
+      qrEvents24h: rows.reduce((sum: number, row: HealthRow) => sum + row.runtimeMetrics.qrEvents24h, 0),
+      authFailures24h: rows.reduce(
+        (sum: number, row: HealthRow) => sum + row.runtimeMetrics.authFailures24h,
+        0
+      ),
+      reconnects24h: rows.reduce((sum: number, row: HealthRow) => sum + row.runtimeMetrics.reconnects24h, 0),
+      idleEvictions24h: rows.reduce(
+        (sum: number, row: HealthRow) => sum + row.runtimeMetrics.idleEvictions24h,
+        0
+      ),
+      totalImportedConversations: rows.reduce(
+        (sum: number, row: HealthRow) => sum + row.importedConversationCount,
+        0
+      ),
+      totalImportedMessages: rows.reduce((sum: number, row: HealthRow) => sum + row.importedMessageCount, 0)
     },
     senderMetrics
   };

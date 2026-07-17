@@ -4,6 +4,15 @@ import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { AVAILABILITY_OVERRIDE_OPTIONS } from "@/lib/availability-constants";
+import {
+  areWeeklyAvailabilityTimeInputsDisabled,
+  createWeeklyAvailabilityRule,
+  getWeeklyAvailabilityRuleLabel,
+  isWeeklyAvailabilityAllDayDisabled,
+  serializeWeeklyAvailabilityRuleForSave,
+  toggleWeeklyAvailabilityAllDay,
+  type WeeklyAvailabilityRule
+} from "@/lib/availability-weekly-rules";
 import { INBOX_LAYERS } from "@/components/inbox/layers";
 import { useToast } from "@/components/toast-provider";
 import { AvailabilityOverrideType } from "@/lib/db-types";
@@ -21,13 +30,7 @@ import {
   startOfMalaysiaMonth
 } from "@/lib/malaysia-time";
 
-type WeeklyRule = {
-  dayOfWeek: number;
-  label: string;
-  enabled: boolean;
-  startTime: string;
-  endTime: string;
-};
+type WeeklyRule = WeeklyAvailabilityRule;
 
 type AvailabilityOverride = {
   id: string;
@@ -74,6 +77,12 @@ type DraftOverride = {
 type QuickAddDraft = Omit<DraftOverride, "id">;
 
 const CALENDAR_WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const AVAILABILITY_STATUS_LEGEND = [
+  { key: "available", label: "Available all day", tone: "available" },
+  { key: "unavailable", label: "Unavailable", tone: "off" },
+  { key: "blocked", label: "Blocked time", tone: "blocked" },
+  { key: "appointment", label: "Appointment", tone: "appointment" }
+] as const;
 
 export function AvailabilitySettingsCard({
   agentName,
@@ -90,7 +99,9 @@ export function AvailabilitySettingsCard({
   const [selectedDay, setSelectedDay] = useState(() => startOfMalaysiaDay(new Date()));
   const [quickAddDraft, setQuickAddDraft] = useState<QuickAddDraft | null>(null);
   const [editDraft, setEditDraft] = useState<DraftOverride | null>(null);
-  const [ruleDrafts, setRuleDrafts] = useState(weeklyRules);
+  const [ruleDrafts, setRuleDrafts] = useState(() =>
+    weeklyRules.map((rule) => createWeeklyAvailabilityRule(rule))
+  );
   const [overrideDrafts, setOverrideDrafts] = useState<DraftOverride[]>(
     overrides.map((override) => ({
       id: override.id,
@@ -111,7 +122,6 @@ export function AvailabilitySettingsCard({
     [appointments, overrideDrafts, ruleDrafts, selectedDay]
   );
   const selectedDayTimeSlots = useMemo(() => buildTimeSlots(selectedDay), [selectedDay]);
-
   useEffect(() => {
     setIsMounted(true);
   }, []);
@@ -223,12 +233,7 @@ export function AvailabilitySettingsCard({
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        weeklyRules: ruleDrafts.map((rule) => ({
-          dayOfWeek: rule.dayOfWeek,
-          enabled: rule.enabled,
-          startTime: rule.startTime,
-          endTime: rule.endTime
-        })),
+        weeklyRules: ruleDrafts.map((rule) => serializeWeeklyAvailabilityRuleForSave(rule)),
         overrides: overrideDrafts.map((override) => ({
           type: override.type,
           startAt: parseMalaysiaDateTimeLocalInput(override.startAt)?.toISOString(),
@@ -268,15 +273,21 @@ export function AvailabilitySettingsCard({
       <form className="availability-settings-form" onSubmit={handleSubmit}>
         <section className="availability-settings-section">
           <div className="availability-settings-section-head availability-settings-section-head-actions">
-            <div>
+            <div className="availability-calendar-heading">
               <strong>Availability calendar</strong>
-              <span className="table-subtle">
-                See your default weekly schedule and one-off overrides on a monthly calendar.
-              </span>
+              <span className="table-subtle">Monthly view of default availability, blocked time, and appointments.</span>
             </div>
             <div className="availability-calendar-nav">
-              <button className="inbox-search-tool" onClick={() => openQuickAdd()} type="button">
-                Add block
+              <button
+                className="inbox-search-tool"
+                onClick={() => {
+                  const today = startOfMalaysiaDay(new Date());
+                  setSelectedDay(today);
+                  setCalendarMonth(startOfMalaysiaMonth(today));
+                }}
+                type="button"
+              >
+                Today
               </button>
               <button
                 className="inbox-search-tool"
@@ -293,7 +304,19 @@ export function AvailabilitySettingsCard({
               >
                 Next
               </button>
+              <button className="button button-primary availability-calendar-primary-action" onClick={() => openQuickAdd(selectedDay)} type="button">
+                Add availability block
+              </button>
             </div>
+          </div>
+
+          <div className="availability-status-legend" aria-label="Availability status legend">
+            {AVAILABILITY_STATUS_LEGEND.map((item) => (
+              <span className={`availability-status-legend-item ${item.tone}`} key={item.key}>
+                <span className="availability-status-legend-dot" aria-hidden="true" />
+                {item.label}
+              </span>
+            ))}
           </div>
 
           {quickAddDraft ? (
@@ -412,17 +435,7 @@ export function AvailabilitySettingsCard({
                 >
                   <div className="availability-calendar-day-top">
                     <strong>{getMalaysiaDateTimeParts(day.date).day}</strong>
-                    <button
-                      className="availability-calendar-add"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setSelectedDay(startOfMalaysiaDay(day.date));
-                        openQuickAdd(day.date);
-                      }}
-                      type="button"
-                    >
-                      Add
-                    </button>
+                    {day.isSelected ? <span className="availability-calendar-selected-badge">Selected</span> : null}
                   </div>
 
                   <div className="availability-calendar-body">
@@ -458,18 +471,19 @@ export function AvailabilitySettingsCard({
 
             <aside className="availability-day-panel">
               <div className="availability-day-panel-head">
-                <div>
+                <div className="availability-day-panel-title">
                   <strong>{formatDayPanelLabel(selectedDay)}</strong>
-                  <span className="table-subtle">
-                    Default hours: {selectedDaySchedule.defaultLabel}
+                  <span className="table-subtle availability-day-panel-default-hours">
+                    Default availability: {selectedDaySchedule.defaultLabel}
                   </span>
+                  <span className="availability-day-panel-today-badge">Selected</span>
                 </div>
                 <button
-                  className="inbox-search-tool"
+                  className="button button-primary availability-day-panel-action"
                   onClick={() => openQuickAdd(selectedDay)}
                   type="button"
                 >
-                  Add block
+                  Add availability block
                 </button>
               </div>
 
@@ -486,7 +500,7 @@ export function AvailabilitySettingsCard({
 
               <div className="availability-day-slot-panel">
                 <div className="availability-day-slot-head">
-                  <strong>Time selection</strong>
+                  <strong>Choose a start time</strong>
                   <span className="table-subtle">Pick a start time to prefill a new block for this day.</span>
                 </div>
                 <div className="availability-day-slot-grid">
@@ -554,7 +568,7 @@ export function AvailabilitySettingsCard({
                   )
                 ) : (
                   <div className="availability-empty-state table-subtle">
-                    No blocked time or appointments on this day yet.
+                    No blocked time or appointments yet.
                   </div>
                 )}
               </div>
@@ -580,10 +594,10 @@ export function AvailabilitySettingsCard({
                   <span>{rule.label}</span>
                 </label>
 
-                <div className="availability-rule-time">
+                <div className={`availability-rule-time${areWeeklyAvailabilityTimeInputsDisabled(rule, pending) ? " disabled" : ""}`}>
                   <input
                     className="lead-record-input"
-                    disabled={!rule.enabled || pending}
+                    disabled={areWeeklyAvailabilityTimeInputsDisabled(rule, pending)}
                     onChange={(event) => updateRule(rule.dayOfWeek, { startTime: event.target.value })}
                     type="time"
                     value={rule.startTime}
@@ -591,122 +605,29 @@ export function AvailabilitySettingsCard({
                   <span className="table-subtle">to</span>
                   <input
                     className="lead-record-input"
-                    disabled={!rule.enabled || pending}
+                    disabled={areWeeklyAvailabilityTimeInputsDisabled(rule, pending)}
                     onChange={(event) => updateRule(rule.dayOfWeek, { endTime: event.target.value })}
                     type="time"
                     value={rule.endTime}
                   />
+                  <label
+                    className={`availability-rule-all-day${isWeeklyAvailabilityAllDayDisabled(rule, pending) ? " disabled" : ""}`}
+                  >
+                    <input
+                      checked={rule.allDay}
+                      disabled={isWeeklyAvailabilityAllDayDisabled(rule, pending)}
+                      onChange={(event) =>
+                        updateRule(rule.dayOfWeek, toggleWeeklyAvailabilityAllDay(rule, event.target.checked))
+                      }
+                      type="checkbox"
+                    />
+                    <span>Available all day</span>
+                  </label>
                 </div>
               </div>
             ))}
           </div>
         </section>
-
-        <section className="availability-settings-section">
-          <div className="availability-settings-section-head availability-settings-section-head-actions">
-            <div>
-              <strong>Date overrides</strong>
-              <span className="table-subtle">Use overrides for leave, blocked time, or extra availability outside the normal weekly template.</span>
-            </div>
-            <button className="inbox-search-tool" onClick={() => openQuickAdd()} type="button">
-              Add override
-            </button>
-          </div>
-
-          <div className="availability-override-list">
-            {overrideDrafts.length === 0 ? (
-              <div className="availability-empty-state table-subtle">No overrides yet.</div>
-            ) : (
-              overrideDrafts.map((override) => (
-                <div className="availability-override-card" key={override.id}>
-                  <div className="availability-override-grid">
-                    <label className="contact-assignment-label">
-                      <span>Type</span>
-                      <select
-                        className="lead-record-input app-select"
-                        disabled={pending}
-                        onChange={(event) =>
-                          updateOverride(override.id, { type: event.target.value as AvailabilityOverrideType })
-                        }
-                        value={override.type}
-                      >
-                        {AVAILABILITY_OVERRIDE_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-
-                    <label className="contact-assignment-label">
-                      <span>Start</span>
-                      <input
-                        className="lead-record-input"
-                        disabled={pending}
-                        onChange={(event) => updateOverride(override.id, { startAt: event.target.value })}
-                        type="datetime-local"
-                        value={override.startAt}
-                      />
-                    </label>
-
-                    <label className="contact-assignment-label">
-                      <span>End</span>
-                      <input
-                        className="lead-record-input"
-                        disabled={pending}
-                        onChange={(event) => updateOverride(override.id, { endAt: event.target.value })}
-                        type="datetime-local"
-                        value={override.endAt}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="availability-override-meta">
-                    <label className="control-block availability-override-note">
-                      <span className="control-label">Note</span>
-                      <input
-                        className="control-input"
-                        disabled={pending}
-                        onChange={(event) => updateOverride(override.id, { note: event.target.value })}
-                        placeholder="Optional note for managers"
-                        type="text"
-                        value={override.note}
-                      />
-                    </label>
-                    <button
-                      className="inbox-search-tool product-delete-button"
-                      disabled={pending}
-                      onClick={() => removeOverride(override.id)}
-                      type="button"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </section>
-
-        {overrides.length > 0 ? (
-          <section className="availability-settings-section">
-            <div className="availability-settings-section-head">
-              <strong>Current overrides</strong>
-              <span className="table-subtle">What managers see right now.</span>
-            </div>
-            <div className="availability-current-list">
-              {overrides.map((override) => (
-                <div className="availability-current-row" key={override.id}>
-                  <strong>{override.label}</strong>
-                  <span className="table-subtle">
-                    {override.startAtLabel} to {override.endAtLabel}
-                    {override.note ? ` | ${override.note}` : ""}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
 
         {error ? <div className="form-error">{error}</div> : null}
 
@@ -817,7 +738,7 @@ export function AvailabilitySettingsCard({
 
 function buildCalendarDays(
   month: Date,
-  weeklyRules: WeeklyRule[],
+  weeklyRules: WeeklyAvailabilityRule[],
   overrides: DraftOverride[],
   appointments: CalendarAppointment[],
   selectedDay: Date
@@ -857,8 +778,7 @@ function buildCalendarDays(
       isToday: getMalaysiaDateKey(date) === getMalaysiaDateKey(new Date()),
       isSelected: getMalaysiaDateKey(date) === getMalaysiaDateKey(selectedDay),
       appointmentCount,
-      defaultLabel:
-        matchingRule && matchingRule.enabled ? `${matchingRule.startTime} - ${matchingRule.endTime}` : "Off day",
+      defaultLabel: formatAvailabilityStatusLabel(matchingRule ? getWeeklyAvailabilityRuleLabel(matchingRule) : "Off day"),
       defaultTone: matchingRule && matchingRule.enabled ? "working" : "off",
       overrides: dayOverrides
     };
@@ -904,14 +824,13 @@ function formatDayPanelLabel(date: Date) {
 
 function buildDaySchedule(
   day: Date,
-  weeklyRules: WeeklyRule[],
+  weeklyRules: WeeklyAvailabilityRule[],
   overrides: DraftOverride[],
   appointments: CalendarAppointment[]
 ) {
   const dayKey = getMalaysiaDateKey(day);
   const matchingRule = weeklyRules.find((rule) => rule.dayOfWeek === getMalaysiaDayOfWeek(day));
-  const defaultLabel =
-    matchingRule && matchingRule.enabled ? `${matchingRule.startTime} - ${matchingRule.endTime}` : "Off day";
+  const defaultLabel = formatAvailabilityStatusLabel(matchingRule ? getWeeklyAvailabilityRuleLabel(matchingRule) : "Off day");
 
   const overrideItems = overrides
     .flatMap((override) => {
@@ -993,4 +912,16 @@ function formatLocalTime(value: string) {
     hour12: false,
     timeZone: MALAYSIA_TIME_ZONE
   }).format(date);
+}
+
+function formatAvailabilityStatusLabel(value: string) {
+  if (value === "Off day") {
+    return "Unavailable";
+  }
+
+  if (value === "All day") {
+    return "Available all day";
+  }
+
+  return value;
 }

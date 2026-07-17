@@ -1,20 +1,22 @@
 import {
+  decodeRuleMatcher,
+  RULE_MATCH_OPERATORS
+} from "@/lib/automation-rule-operators";
+import {
   AgentStatus,
-  AutomationMatchType,
-  AutomationTriggerType,
   AutomationJobStatus,
   AutomationJobType,
+  AutomationMatchType,
+  AutomationTriggerType,
+  ConversationSnoozeStatus,
   ConversationStatus,
   LeadPriority,
   LeadSource,
   LeadStage,
   MessageDirection
-} from "@prisma/client";
-import {
-  decodeRuleMatcher,
-  RULE_MATCH_OPERATORS
-} from "@/lib/automation-rule-operators";
+} from "@/lib/db-types";
 import { expireStaleConversationWorkflowIfNeeded } from "@/lib/automation-workflow-timeouts";
+import { emitConversationSnoozeEvent, getSnoozeTransitionAction } from "@/lib/conversation-snooze";
 import { resolveMediaAssetUrl } from "@/lib/media-library-urls";
 import { enqueueOutboundMessage } from "@/lib/outbound-message-jobs";
 import { getPlatformAutomationWorkflowConfig } from "@/lib/platform-config";
@@ -29,6 +31,7 @@ import {
 import { normalizeStoredPhone } from "@/lib/phone";
 
 const DEFAULT_TIMEZONE = "Asia/Kuala_Lumpur";
+type TransactionClient = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 export async function processInboundAutomation(input: {
   workspaceId: string;
@@ -142,17 +145,37 @@ export async function processInboundAutomation(input: {
     if (progressed) {
       return;
     }
+
+    const resumedAfterDelayCancellation = await resumeStructuredWorkflowAfterDelayCancellation({
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      contactId: conversation.contactId,
+      contactPhone: conversation.contact.phone,
+      contactTags: conversation.contact.tags,
+      sentAt: input.sentAt,
+      workflowId: activeWorkflowRecord?.id ?? settings.activeWorkflowId,
+      workflow: parseWorkflowDefinition(activeWorkflowRecord?.definitionJson ?? settings.workflowDefinitionJson)
+    });
+
+    if (resumedAfterDelayCancellation) {
+      return;
+    }
   }
 
-  const eligibleRules = rules.filter((rule) => {
+  type AutomationRule = (typeof rules)[number];
+  type ConversationExecution = (typeof executions)[number];
+  type WorkspaceMediaAsset = NonNullable<Awaited<ReturnType<typeof prisma.workspaceMediaAsset.findMany>>>[number];
+  const eligibleRules = rules.filter((rule: AutomationRule) => {
     if (rule.triggerType === AutomationTriggerType.WELCOME_MESSAGE) {
       return inboundCount === 1;
     }
 
     return rule.triggerType === AutomationTriggerType.KEYWORD_MATCH;
   });
-  const executionMap = new Map(executions.map((execution) => [execution.ruleId, execution] as const));
-  const latestExecution = executions.reduce<(typeof executions)[number] | null>((latest, execution) => {
+  const executionMap = new Map<string, ConversationExecution>(
+    executions.map((execution: ConversationExecution) => [execution.ruleId, execution] as const)
+  );
+  const latestExecution = executions.reduce<ConversationExecution | null>((latest: ConversationExecution | null, execution: ConversationExecution) => {
     if (!execution.rule) {
       return latest;
     }
@@ -174,7 +197,7 @@ export async function processInboundAutomation(input: {
   let matchedRule = false;
   const mediaAssetIds = Array.from(
     new Set(
-      rules.flatMap((rule) => [
+      rules.flatMap((rule: AutomationRule) => [
         ...parseMediaAssetIds(rule.replyMediaAssetIdsJson, rule.replyMediaAssetId),
         ...parseMediaAssetIds(rule.followUpMediaAssetIdsJson, rule.followUpMediaAssetId)
       ])
@@ -190,7 +213,7 @@ export async function processInboundAutomation(input: {
                 id: { in: mediaAssetIds }
               }
             })
-          ).map((asset) => [asset.id, asset] as const)
+          ).map((asset: WorkspaceMediaAsset) => [asset.id, asset] as const)
         )
       : new Map();
 
@@ -235,13 +258,14 @@ export async function processInboundAutomation(input: {
     }
 
     const replyMediaAssets = parseMediaAssetIds(rule.replyMediaAssetIdsJson, rule.replyMediaAssetId)
-      .map((assetId) => mediaAssetMap.get(assetId))
-      .filter(Boolean);
+      .map((assetId: string) => mediaAssetMap.get(assetId))
+      .filter((asset): asset is WorkspaceMediaAsset => Boolean(asset));
 
     if (rule.replyBody.trim()) {
       await sendAutomatedMessage({
         workspaceId: input.workspaceId,
         conversationId: input.conversationId,
+        channelId: conversation.channelId ?? null,
         to: conversation.contact.phone,
         body: rule.replyBody,
         attachmentMimeType: null,
@@ -254,6 +278,7 @@ export async function processInboundAutomation(input: {
       await sendAutomatedMediaMessages({
         workspaceId: input.workspaceId,
         conversationId: input.conversationId,
+        channelId: conversation.channelId ?? null,
         to: conversation.contact.phone,
         mediaAssets: replyMediaAssets
       });
@@ -328,8 +353,8 @@ export async function processInboundAutomation(input: {
     }
 
     const followUpMediaAssets = parseMediaAssetIds(rule.followUpMediaAssetIdsJson, rule.followUpMediaAssetId)
-      .map((assetId) => mediaAssetMap.get(assetId))
-      .filter(Boolean);
+      .map((assetId: string) => mediaAssetMap.get(assetId))
+      .filter((asset): asset is WorkspaceMediaAsset => Boolean(asset));
 
     if (rule.followUpDelayMinutes && (rule.followUpReplyBody?.trim() || followUpMediaAssets.length)) {
       const followUpBody = rule.followUpReplyBody?.trim() ?? null;
@@ -347,10 +372,11 @@ export async function processInboundAutomation(input: {
             scheduledFrom: input.sentAt.toISOString(),
             cancelOnInbound: true,
             body: followUpBody,
-            attachments: followUpMediaAssets.map((asset) => ({
-              mimeType: asset!.mimeType,
-              name: asset!.title,
-              url: resolveMediaAssetUrl(asset!.publicUrl)
+            attachments: followUpMediaAssets.map((asset: WorkspaceMediaAsset) => ({
+              mediaAssetId: asset.id,
+              mimeType: asset.mimeType,
+              name: asset.title,
+              url: resolveMediaAssetUrl(asset.publicUrl)
             }))
           })
         }
@@ -369,6 +395,7 @@ export async function processInboundAutomation(input: {
       await sendAutomatedMessage({
         workspaceId: input.workspaceId,
         conversationId: input.conversationId,
+        channelId: conversation.channelId ?? null,
         to: conversation.contact.phone,
         body: settings.awayReplyBody
       });
@@ -520,7 +547,8 @@ export async function processPendingAutomationJobs(limit = 10, workspaceId?: str
       }
 
       const body = payload.body?.trim();
-      if (!body && !payload.attachmentUrl && !payload.attachments?.length) {
+      const template = payload.kind === "rule-follow-up" ? normalizeAutomationTemplatePayload(payload.template) : null;
+      if (!body && !template && !payload.attachmentUrl && !payload.attachments?.length) {
         await prisma.automationJob.update({
           where: {
             id: runningJob.id
@@ -558,21 +586,40 @@ export async function processPendingAutomationJobs(limit = 10, workspaceId?: str
         continue;
       }
 
-      await sendAutomatedMessage({
-        workspaceId: runningJob.workspaceId,
-        conversationId: runningJob.conversationId,
-        to: conversation.contact.phone,
-        body: body ?? "",
-        attachmentMimeType: payload.attachmentMimeType ?? null,
-        attachmentName: payload.attachmentName ?? null,
-        attachmentUrl: payload.attachmentUrl ?? null
-      });
+      if (template) {
+        await sendAutomatedTemplate({
+          workspaceId: runningJob.workspaceId,
+          conversationId: runningJob.conversationId,
+          channelId: conversation.channelId ?? null,
+          to: conversation.contact.phone,
+          name: template.name,
+          languageCode: template.languageCode ?? null,
+          variables: template.variables ?? [],
+          bodyVariables: template.bodyVariables ?? [],
+          headerVariables: template.headerVariables ?? [],
+          components: template.components ?? [],
+          body: body ?? ""
+        });
+      } else {
+        await sendAutomatedMessage({
+          workspaceId: runningJob.workspaceId,
+          conversationId: runningJob.conversationId,
+          channelId: conversation.channelId ?? null,
+          to: conversation.contact.phone,
+          body: body ?? "",
+          mediaAssetId: payload.mediaAssetId ?? null,
+          attachmentMimeType: payload.attachmentMimeType ?? null,
+          attachmentName: payload.attachmentName ?? null,
+          attachmentUrl: payload.attachmentUrl ?? null
+        });
+      }
 
       if (payload.attachments?.length) {
         const remainingAttachments = body && payload.attachmentUrl ? payload.attachments.slice(1) : payload.attachments;
         await sendAutomatedAttachmentPayloads({
           workspaceId: runningJob.workspaceId,
           conversationId: runningJob.conversationId,
+          channelId: conversation.channelId ?? null,
           to: conversation.contact.phone,
           attachments: remainingAttachments
         });
@@ -621,27 +668,124 @@ export async function processPendingAutomationJobs(limit = 10, workspaceId?: str
 async function sendAutomatedMessage(input: {
   workspaceId: string;
   conversationId: string;
+  channelId?: string | null;
   to: string;
   body: string;
+  mediaAssetId?: string | null;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
   attachmentUrl?: string | null;
 }) {
+  await sendAutomatedWhatsAppAction({
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId,
+    channelId: input.channelId ?? null,
+    to: input.to,
+    body: input.body,
+    mediaAssetId: input.mediaAssetId ?? null,
+    attachmentMimeType: input.attachmentMimeType ?? null,
+    attachmentName: input.attachmentName ?? null,
+    attachmentUrl: input.attachmentUrl ?? null
+  });
+}
+
+async function sendAutomatedTemplate(input: {
+  workspaceId: string;
+  conversationId: string;
+  channelId?: string | null;
+  to: string;
+  name: string;
+  languageCode?: string | null;
+  variables?: unknown[] | null;
+  bodyVariables?: unknown[] | null;
+  headerVariables?: unknown[] | null;
+  components?: unknown[] | null;
+  body?: string | null;
+}) {
+  const fallbackBody = input.body?.trim() || `Template: ${input.name}`;
+  await sendAutomatedWhatsAppAction({
+    workspaceId: input.workspaceId,
+    conversationId: input.conversationId,
+    channelId: input.channelId ?? null,
+    to: input.to,
+    body: fallbackBody,
+    template: {
+      name: input.name,
+      languageCode: input.languageCode ?? null,
+      variables: Array.isArray(input.variables) ? input.variables : null,
+      bodyVariables: Array.isArray(input.bodyVariables) ? input.bodyVariables : null,
+      headerVariables: Array.isArray(input.headerVariables) ? input.headerVariables : null,
+      components: Array.isArray(input.components) ? input.components : null
+    }
+  });
+}
+
+async function sendAutomatedWhatsAppAction(input: {
+  workspaceId: string;
+  conversationId: string;
+  channelId?: string | null;
+  to: string;
+  body: string;
+  mediaAssetId?: string | null;
+  attachmentMimeType?: string | null;
+  attachmentName?: string | null;
+  attachmentUrl?: string | null;
+  template?: {
+    name: string;
+    languageCode?: string | null;
+    variables?: unknown[] | null;
+    bodyVariables?: unknown[] | null;
+    headerVariables?: unknown[] | null;
+    components?: unknown[] | null;
+  } | null;
+}) {
   const normalizedBody = input.body.trim();
-  if (!normalizedBody && !input.attachmentUrl) {
+  const normalizedTemplate = normalizeAutomationTemplatePayload(input.template);
+
+  if (!normalizedBody && !input.attachmentUrl && !normalizedTemplate) {
     return;
   }
 
   await enqueueOutboundMessage({
     conversationId: input.conversationId,
     workspaceId: input.workspaceId,
+    channelId: input.channelId ?? null,
     to: input.to,
     body: normalizedBody,
+    mediaAssetId: input.mediaAssetId ?? null,
     attachmentMimeType: input.attachmentMimeType ?? null,
     attachmentName: input.attachmentName ?? null,
     attachmentUrl: input.attachmentUrl ?? null,
-    source: "automation-engine"
+    source: "automation-engine",
+    template: normalizedTemplate
   });
+}
+
+function normalizeAutomationTemplatePayload(
+  value:
+    | {
+        name?: string | null;
+        languageCode?: string | null;
+        variables?: unknown[] | null;
+        bodyVariables?: unknown[] | null;
+        headerVariables?: unknown[] | null;
+        components?: unknown[] | null;
+      }
+    | null
+    | undefined
+) {
+  if (!value?.name?.trim()) {
+    return null;
+  }
+
+  return {
+    name: value.name.trim(),
+    languageCode: value.languageCode?.trim() || "en_US",
+    variables: Array.isArray(value.variables) ? value.variables : [],
+    bodyVariables: Array.isArray(value.bodyVariables) ? value.bodyVariables : [],
+    headerVariables: Array.isArray(value.headerVariables) ? value.headerVariables : [],
+    components: Array.isArray(value.components) ? value.components : []
+  };
 }
 
 async function resolveOrderedWorkflowMediaAssets(workspaceId: string, mediaAssetIds: string[]) {
@@ -664,9 +808,10 @@ async function resolveOrderedWorkflowMediaAssets(workspaceId: string, mediaAsset
       publicUrl: true
     }
   });
-  const mediaAssetMap = new Map(mediaAssets.map((asset) => [asset.id, asset] as const));
+  type OrderedWorkflowMediaAsset = (typeof mediaAssets)[number];
+  const mediaAssetMap = new Map(mediaAssets.map((asset: OrderedWorkflowMediaAsset) => [asset.id, asset] as const));
 
-  return mediaAssetIds.map((mediaAssetId) => mediaAssetMap.get(mediaAssetId)).filter(Boolean) as Array<{
+  return mediaAssetIds.map((mediaAssetId: string) => mediaAssetMap.get(mediaAssetId)).filter(Boolean) as Array<{
     mimeType: string;
     title: string;
     originalName: string;
@@ -678,11 +823,11 @@ async function resolveOrderedWorkflowMediaItems(
   workspaceId: string,
   mediaItems: StructuredWorkflowMediaItem[]
 ) {
-  const mediaAssetIds = mediaItems.map((item) => item.mediaAssetId);
+  const mediaAssetIds = mediaItems.map((item: StructuredWorkflowMediaItem) => item.mediaAssetId);
   const mediaAssets = await resolveOrderedWorkflowMediaAssets(workspaceId, mediaAssetIds);
 
   return mediaItems
-    .map((item, index) => {
+    .map((item: StructuredWorkflowMediaItem, index: number) => {
       const mediaAsset = mediaAssets[index];
       if (!mediaAsset) {
         return null;
@@ -690,24 +835,28 @@ async function resolveOrderedWorkflowMediaItems(
 
       return {
         ...mediaAsset,
+        id: item.mediaAssetId,
         message: item.message?.trim() ?? ""
       };
     })
-    .filter(Boolean) as Array<{ mimeType: string; title: string; originalName: string; publicUrl: string; message: string }>;
+    .filter(Boolean) as Array<{ id: string; mimeType: string; title: string; originalName: string; publicUrl: string; message: string }>;
 }
 
 async function sendAutomatedMediaMessages(input: {
   workspaceId: string;
   conversationId: string;
+  channelId?: string | null;
   to: string;
-  mediaAssets: Array<{ mimeType: string; title: string; originalName: string; publicUrl: string; message?: string | null }>;
+  mediaAssets: Array<{ id?: string; mimeType: string; title: string; originalName: string; publicUrl: string; message?: string | null }>;
 }) {
   for (const asset of input.mediaAssets) {
     await sendAutomatedMessage({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,
+      channelId: input.channelId ?? null,
       to: input.to,
       body: asset.message?.trim() ?? "",
+      mediaAssetId: asset.id ?? null,
       attachmentMimeType: asset.mimeType,
       attachmentName: asset.originalName || asset.title,
       attachmentUrl: resolveMediaAssetUrl(asset.publicUrl)
@@ -718,8 +867,9 @@ async function sendAutomatedMediaMessages(input: {
 async function sendAutomatedAttachmentPayloads(input: {
   workspaceId: string;
   conversationId: string;
+  channelId?: string | null;
   to: string;
-  attachments: Array<{ mimeType?: string | null; name?: string | null; url?: string | null }>;
+  attachments: Array<{ mediaAssetId?: string | null; mimeType?: string | null; name?: string | null; url?: string | null }>;
 }) {
   for (const attachment of input.attachments) {
     if (!attachment.url) {
@@ -729,8 +879,10 @@ async function sendAutomatedAttachmentPayloads(input: {
     await sendAutomatedMessage({
       workspaceId: input.workspaceId,
       conversationId: input.conversationId,
+      channelId: input.channelId ?? null,
       to: input.to,
       body: "",
+      mediaAssetId: attachment.mediaAssetId ?? null,
       attachmentMimeType: attachment.mimeType ?? null,
       attachmentName: attachment.name ?? null,
       attachmentUrl: attachment.url
@@ -786,10 +938,10 @@ async function getOrCreateAutomationSettings(workspaceId: string) {
 
   const activeWorkflowIds = getStoredActiveWorkflowIds(
     settings.activeWorkflowId,
-    workflows.map((workflow) => workflow.id)
+    workflows.map((workflow: (typeof workflows)[number]) => workflow.id)
   );
   const activeWorkflow = activeWorkflowIds.length
-    ? workflows.find((workflow) => workflow.id === activeWorkflowIds[0]) ?? null
+    ? workflows.find((workflow: (typeof workflows)[number]) => workflow.id === activeWorkflowIds[0]) ?? null
     : null;
   const storedActiveWorkflowId = serializeStoredActiveWorkflowIds(activeWorkflowIds);
 
@@ -1178,6 +1330,9 @@ type StructuredWorkflowStep =
       notifyAssignedOwner?: boolean;
       notifyAgentIds?: string[];
       notifyMessage?: string | null;
+      snoozeAction?: "none" | "snooze" | "unsnooze";
+      snoozeDurationMinutes?: number | null;
+      snoozeReason?: string | null;
       leadStage?: string | null;
       nextStepId?: string | null;
     }
@@ -1194,6 +1349,20 @@ type StructuredWorkflowStep =
     }
   | {
       id: string;
+      type: "send_template";
+      title?: string;
+      position?: { x: number; y: number };
+      body?: string | null;
+      templateName: string;
+      languageCode?: string | null;
+      variables?: unknown[];
+      bodyVariables?: unknown[];
+      headerVariables?: unknown[];
+      components?: unknown[];
+      nextStepId?: string | null;
+    }
+  | {
+      id: string;
       type: "update";
       title?: string;
       position?: { x: number; y: number };
@@ -1205,6 +1374,9 @@ type StructuredWorkflowStep =
       assignmentMode?: "none" | "fixed" | "round_robin";
       roundRobinAgentIds?: string[];
       overwriteExistingOwner?: boolean;
+      snoozeAction?: "none" | "snooze" | "unsnooze";
+      snoozeDurationMinutes?: number | null;
+      snoozeReason?: string | null;
       leadStage?: string | null;
       leadAttributeKey?: string | null;
       leadAttributeValue?: string | null;
@@ -1220,6 +1392,17 @@ type StructuredWorkflowStep =
       position?: { x: number; y: number };
       delayMinutes?: number | null;
       businessHoursOnly?: boolean;
+      cancelOnInbound?: boolean;
+      cancelOnHumanReply?: boolean;
+      nextStepId?: string | null;
+    }
+  | {
+      id: string;
+      type: "follow_up";
+      title?: string;
+      position?: { x: number; y: number };
+      delayMinutes?: number | null;
+      reply?: string | null;
       cancelOnInbound?: boolean;
       cancelOnHumanReply?: boolean;
       nextStepId?: string | null;
@@ -1245,6 +1428,7 @@ type StructuredWorkflowWaitingStep =
   | Extract<StructuredWorkflowStep, { type: "question" | "choice" }>;
 
 type WorkflowBranchHistoryEntry = { stepId: string; branchId: string; label: string; at: string };
+type WorkflowFollowUpCountMap = Record<string, number>;
 function renderWorkflowReplyTemplate(template: string | null | undefined, answers: Record<string, string>) {
   if (!template) {
     return "";
@@ -1275,6 +1459,7 @@ async function setStructuredWorkflowWaitingState(input: {
   answers: Record<string, string>;
   retries: Record<string, number>;
   continuationStepIds: string[];
+  followUpCounts: WorkflowFollowUpCountMap;
   sentAt: Date;
 }) {
   const waitingAt = input.sentAt.toISOString();
@@ -1291,6 +1476,7 @@ async function setStructuredWorkflowWaitingState(input: {
         answers: input.answers,
         retries: input.retries,
         continuationStepIds: input.continuationStepIds,
+        followUpCounts: input.followUpCounts,
         waitingAt,
         waitingFor: "reply"
       }),
@@ -1463,12 +1649,12 @@ async function sendWorkflowTeamNotifications(input: {
         }
       }));
 
-    await enqueueOutboundMessage({
+    await sendAutomatedMessage({
       workspaceId: input.workspaceId,
       conversationId: conversation.id,
+      channelId: null,
       to: agentPhone,
       body: messageBody,
-      source: "automation-engine"
     });
   }
 }
@@ -1589,7 +1775,9 @@ async function startStructuredWorkflow(input: {
     branchHistory: [],
     answers: {},
     retries: {},
-    continuationStepIds: []
+    continuationStepIds: [],
+    followUpCounts: {},
+    sourceStepId: null
   });
 
   return true;
@@ -1631,6 +1819,7 @@ async function advanceStructuredWorkflow(input: {
   const answers = { ...flowState.answers };
   const retries = { ...flowState.retries };
   const continuationStepIds = [...flowState.continuationStepIds];
+  const followUpCounts = { ...flowState.followUpCounts };
 
   if (step.saveAs?.trim()) {
     answers[step.saveAs.trim()] = input.inboundText.trim();
@@ -1653,7 +1842,9 @@ async function advanceStructuredWorkflow(input: {
           branchHistory,
           answers,
           retries,
-          continuationStepIds
+          continuationStepIds,
+          followUpCounts,
+          sourceStepId: step.id
         });
         return true;
       }
@@ -1678,7 +1869,9 @@ async function advanceStructuredWorkflow(input: {
           branchHistory,
           answers,
           retries,
-          continuationStepIds: continuationFallback.continuationStepIds
+          continuationStepIds: continuationFallback.continuationStepIds,
+          followUpCounts,
+          sourceStepId: step.id
         });
         return true;
       }
@@ -1696,6 +1889,7 @@ async function advanceStructuredWorkflow(input: {
           answers,
           retries,
           continuationStepIds,
+          followUpCounts,
           endedAt: input.sentAt.toISOString(),
           endStepId: step.id
         }),
@@ -1739,10 +1933,11 @@ async function advanceStructuredWorkflow(input: {
             history: branchHistory,
             answers,
             retries: nextRetries,
-            continuationStepIds,
-            endedAt: input.sentAt.toISOString(),
-            endStepId: step.id,
-            endReason: "MAX_RETRIES"
+          continuationStepIds,
+          followUpCounts,
+          endedAt: input.sentAt.toISOString(),
+          endStepId: step.id,
+          endReason: "MAX_RETRIES"
           }),
           lastAutoReplyAt: input.sentAt
         }
@@ -1766,7 +1961,9 @@ async function advanceStructuredWorkflow(input: {
           branchHistory,
           answers,
           retries: nextRetries,
-          continuationStepIds
+          continuationStepIds,
+          followUpCounts,
+          sourceStepId: step.id
         });
         return true;
       }
@@ -1781,6 +1978,7 @@ async function advanceStructuredWorkflow(input: {
       answers,
       retries: nextRetries,
       continuationStepIds,
+      followUpCounts,
       sentAt: input.sentAt
     });
     return true;
@@ -1840,6 +2038,9 @@ async function advanceStructuredWorkflow(input: {
         answers,
         retries,
         continuationStepIds: branchExecutionPlan.continuationStepIds
+        ,
+        followUpCounts,
+        sourceStepId: step.id
       });
       return true;
     }
@@ -1863,6 +2064,9 @@ async function advanceStructuredWorkflow(input: {
         answers,
         retries,
         continuationStepIds: remainingContinuationStepIds
+        ,
+        followUpCounts,
+        sourceStepId: step.id
       });
       return true;
     }
@@ -1875,7 +2079,150 @@ async function advanceStructuredWorkflow(input: {
     data: {
       activeFlowKey: null,
       activeFlowStep: null,
-      flowStateJson: JSON.stringify({ history: nextHistory, answers, retries, continuationStepIds: branchExecutionPlan.continuationStepIds }),
+      flowStateJson: JSON.stringify({
+        history: nextHistory,
+        answers,
+        retries,
+        continuationStepIds: branchExecutionPlan.continuationStepIds,
+        followUpCounts
+      }),
+      lastAutoReplyAt: input.sentAt
+    }
+  });
+
+  return true;
+}
+
+async function resumeStructuredWorkflowAfterDelayCancellation(input: {
+  workspaceId: string;
+  conversationId: string;
+  contactId: string;
+  contactPhone: string;
+  contactTags: string | null;
+  sentAt: Date;
+  workflowId: string | null;
+  workflow: StructuredWorkflowDefinition | null;
+}) {
+  const state = await prisma.conversationAutomationState.findUnique({
+    where: {
+      conversationId: input.conversationId
+    }
+  });
+
+  if (!state?.activeFlowStep || state.activeFlowKey !== "CONVERSATION_WORKFLOW") {
+    return false;
+  }
+
+  const flowState = parseStructuredWorkflowState(state.flowStateJson);
+  if (flowState.waitingFor !== "delay") {
+    return false;
+  }
+
+  const jobs = await prisma.automationJob.findMany({
+    where: {
+      conversationId: input.conversationId,
+      jobType: AutomationJobType.FOLLOW_UP_MESSAGE,
+      status: {
+        in: [AutomationJobStatus.PENDING, AutomationJobStatus.CANCELED, AutomationJobStatus.RUNNING]
+      }
+    },
+    orderBy: {
+      runAt: "desc"
+    },
+    select: {
+      payloadJson: true
+    }
+  });
+
+  const delayPayload = jobs
+    .map((job) => parseAutomationJobPayload(job.payloadJson))
+    .find(
+      (payload): payload is Extract<AutomationJobPayload, { kind: "workflow-delay" }> =>
+        payload.kind === "workflow-delay" &&
+        payload.stepId === state.activeFlowStep &&
+        payload.cancelOnInbound !== false
+    );
+
+  if (!delayPayload) {
+    return false;
+  }
+
+  const activeStep = input.workflow?.steps.find((step) => step.id === state.activeFlowStep) ?? null;
+  if (!activeStep || activeStep.type !== "follow_up") {
+    return false;
+  }
+  const nextStepId =
+    delayPayload.nextStepId?.trim() ||
+    (activeStep && "nextStepId" in activeStep ? activeStep.nextStepId?.trim() || null : null);
+
+  if (input.workflow && nextStepId && nextStepId !== WORKFLOW_END_ID) {
+    const nextStep = input.workflow.steps.find((step) => step.id === nextStepId);
+    if (nextStep) {
+      await enterStructuredWorkflowStep({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        contactPhone: input.contactPhone,
+        contactTags: input.contactTags,
+        sentAt: input.sentAt,
+        workflowId: input.workflowId,
+        workflow: input.workflow,
+        step: nextStep,
+        branchHistory: flowState.history,
+        answers: flowState.answers,
+        retries: flowState.retries,
+        continuationStepIds: flowState.continuationStepIds,
+        followUpCounts: flowState.followUpCounts,
+        sourceStepId: activeStep.id
+      });
+      return true;
+    }
+  }
+
+  if (input.workflow) {
+    const continuationFallback = resolveWorkflowContinuationFallback({
+      workflow: input.workflow,
+      continuationStepIds: flowState.continuationStepIds
+    });
+    if (continuationFallback) {
+      await enterStructuredWorkflowStep({
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+        contactPhone: input.contactPhone,
+        contactTags: input.contactTags,
+        sentAt: input.sentAt,
+        workflowId: input.workflowId,
+        workflow: input.workflow,
+        step: continuationFallback.step,
+        branchHistory: flowState.history,
+        answers: flowState.answers,
+        retries: flowState.retries,
+        continuationStepIds: continuationFallback.continuationStepIds,
+        followUpCounts: flowState.followUpCounts,
+        sourceStepId: activeStep.id
+      });
+      return true;
+    }
+  }
+
+  await prisma.conversationAutomationState.update({
+    where: {
+      conversationId: input.conversationId
+    },
+    data: {
+      activeFlowKey: null,
+      activeFlowStep: null,
+      flowStateJson: JSON.stringify({
+        history: flowState.history,
+        answers: flowState.answers,
+        retries: flowState.retries,
+        continuationStepIds: flowState.continuationStepIds,
+        followUpCounts: flowState.followUpCounts,
+        endedAt: input.sentAt.toISOString(),
+        endStepId: state.activeFlowStep,
+        endReason: "DELAY_CANCELED_ON_INBOUND"
+      }),
       lastAutoReplyAt: input.sentAt
     }
   });
@@ -1897,7 +2244,10 @@ async function enterStructuredWorkflowStep(input: {
   answers: Record<string, string>;
   retries: Record<string, number>;
   continuationStepIds: string[];
+  followUpCounts?: WorkflowFollowUpCountMap;
+  sourceStepId?: string | null;
 }) {
+  const followUpCounts = input.followUpCounts ?? {};
   if (input.step.type === "question" || input.step.type === "choice") {
     if (input.step.decisionSource === "savedValue" && input.step.decisionSourceKey?.trim()) {
       const savedValue = input.answers[input.step.decisionSourceKey.trim()] ?? "";
@@ -1961,7 +2311,9 @@ async function enterStructuredWorkflowStep(input: {
             contactTags: mergeTags(input.contactTags, matchedBranch?.tags ?? []).join(", "),
             step: nextStep,
             branchHistory: nextHistory,
-            continuationStepIds: branchExecutionPlan.continuationStepIds
+            continuationStepIds: branchExecutionPlan.continuationStepIds,
+            followUpCounts,
+            sourceStepId: input.step.id
           });
           return;
         }
@@ -1976,7 +2328,9 @@ async function enterStructuredWorkflowStep(input: {
             contactTags: mergeTags(input.contactTags, matchedBranch?.tags ?? []).join(", "),
             step: continuationStep,
             branchHistory: nextHistory,
-            continuationStepIds: remainingContinuationStepIds
+            continuationStepIds: remainingContinuationStepIds,
+            followUpCounts,
+            sourceStepId: input.step.id
           });
           return;
         }
@@ -1994,6 +2348,7 @@ async function enterStructuredWorkflowStep(input: {
             answers: input.answers,
             retries: input.retries,
             continuationStepIds: branchExecutionPlan.continuationStepIds,
+            followUpCounts,
             endedAt: input.sentAt.toISOString(),
             endStepId: input.step.id
           }),
@@ -2019,6 +2374,7 @@ async function enterStructuredWorkflowStep(input: {
       answers: input.answers,
       retries: input.retries,
       continuationStepIds: input.continuationStepIds,
+      followUpCounts,
       sentAt: input.sentAt
     });
     return;
@@ -2041,6 +2397,7 @@ async function enterStructuredWorkflowStep(input: {
       answers: input.answers,
       retries: input.retries,
       continuationStepIds: input.continuationStepIds,
+      followUpCounts,
       sentAt: input.sentAt
     });
     return;
@@ -2092,6 +2449,144 @@ async function enterStructuredWorkflowStep(input: {
     return;
   }
 
+  if (input.step.type === "follow_up") {
+    const followUpStep = input.step;
+    const sourceStep =
+      input.sourceStepId ? input.workflow.steps.find((entry) => entry.id === input.sourceStepId) ?? null : null;
+    if (
+      sourceStep &&
+      (sourceStep.type === "ask" || sourceStep.type === "question" || sourceStep.type === "choice")
+    ) {
+      if (followUpStep.nextStepId && followUpStep.nextStepId !== WORKFLOW_END_ID) {
+        const nextStep = input.workflow.steps.find((entry) => entry.id === followUpStep.nextStepId);
+        if (nextStep) {
+          await enterStructuredWorkflowStep({
+            ...input,
+            step: nextStep,
+            followUpCounts,
+            sourceStepId: followUpStep.id
+          });
+          return;
+        }
+      }
+
+      if (followUpStep.nextStepId === WORKFLOW_END_ID || !followUpStep.nextStepId) {
+        const continuationFallback = resolveWorkflowContinuationFallback({
+          workflow: input.workflow,
+          continuationStepIds: input.continuationStepIds
+        });
+        if (continuationFallback) {
+          await enterStructuredWorkflowStep({
+            ...input,
+            step: continuationFallback.step,
+            continuationStepIds: continuationFallback.continuationStepIds,
+            followUpCounts,
+            sourceStepId: followUpStep.id
+          });
+          return;
+        }
+      }
+    }
+
+    if ((followUpCounts[followUpStep.id] ?? 0) > 0) {
+      if (followUpStep.nextStepId && followUpStep.nextStepId !== WORKFLOW_END_ID) {
+        const nextStep = input.workflow.steps.find((entry) => entry.id === followUpStep.nextStepId);
+        if (nextStep) {
+          await enterStructuredWorkflowStep({
+            ...input,
+            step: nextStep,
+            followUpCounts,
+            sourceStepId: followUpStep.id
+          });
+          return;
+        }
+      }
+
+      if (followUpStep.nextStepId === WORKFLOW_END_ID || !followUpStep.nextStepId) {
+        const continuationFallback = resolveWorkflowContinuationFallback({
+          workflow: input.workflow,
+          continuationStepIds: input.continuationStepIds
+        });
+        if (continuationFallback) {
+          await enterStructuredWorkflowStep({
+            ...input,
+            step: continuationFallback.step,
+            continuationStepIds: continuationFallback.continuationStepIds,
+            followUpCounts,
+            sourceStepId: followUpStep.id
+          });
+          return;
+        }
+      }
+
+      await prisma.conversationAutomationState.update({
+        where: {
+          conversationId: input.conversationId
+        },
+        data: {
+          activeFlowKey: null,
+          activeFlowStep: null,
+          flowStateJson: JSON.stringify({
+            history: input.branchHistory,
+            answers: input.answers,
+            retries: input.retries,
+            continuationStepIds: input.continuationStepIds,
+            followUpCounts,
+            endedAt: input.sentAt.toISOString(),
+            endStepId: followUpStep.id
+          }),
+          lastAutoReplyAt: input.sentAt
+        }
+      });
+      return;
+    }
+
+    const delayMinutes = clampDelayMinutes(input.step.delayMinutes);
+    const runAt = new Date(input.sentAt.getTime() + delayMinutes * 60 * 1000);
+
+    await prisma.automationJob.create({
+      data: {
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        jobType: AutomationJobType.FOLLOW_UP_MESSAGE,
+        status: AutomationJobStatus.PENDING,
+        runAt,
+        payloadJson: JSON.stringify({
+          kind: "workflow-delay",
+          workflowId: input.workflowId,
+          stepId: followUpStep.id,
+          nextStepId: followUpStep.nextStepId ?? null,
+          scheduledFrom: input.sentAt.toISOString(),
+          cancelOnInbound: followUpStep.cancelOnInbound !== false,
+          cancelOnHumanReply: Boolean(followUpStep.cancelOnHumanReply)
+        })
+      }
+    });
+
+    await prisma.conversationAutomationState.update({
+      where: {
+        conversationId: input.conversationId
+      },
+      data: {
+        activeFlowKey: "CONVERSATION_WORKFLOW",
+        activeFlowStep: followUpStep.id,
+        flowStateJson: JSON.stringify({
+          workflowId: input.workflowId,
+          history: input.branchHistory,
+          answers: input.answers,
+          retries: input.retries,
+          continuationStepIds: input.continuationStepIds,
+          followUpCounts,
+          waitingAt: input.sentAt.toISOString(),
+          waitingFor: "delay",
+          delaySourceStepId: input.sourceStepId ?? null
+        }),
+        lastAutoReplyAt: input.sentAt
+      }
+    });
+    return;
+  }
+
   if (input.step.type === "go_to") {
     const targetStepId = input.step.targetStepId?.trim() || null;
     if (targetStepId && targetStepId !== input.step.id) {
@@ -2100,6 +2595,9 @@ async function enterStructuredWorkflowStep(input: {
         await enterStructuredWorkflowStep({
           ...input,
           step: targetStep
+          ,
+          followUpCounts,
+          sourceStepId: input.step.id
         });
         return;
       }
@@ -2117,8 +2615,79 @@ async function enterStructuredWorkflowStep(input: {
           answers: input.answers,
           retries: input.retries,
           continuationStepIds: input.continuationStepIds,
+          followUpCounts,
           endedAt: input.sentAt.toISOString(),
           endStepId: input.step.id
+        }),
+        lastAutoReplyAt: input.sentAt
+      }
+    });
+    return;
+  }
+
+  if (input.step.type === "send_template") {
+    const templateStep = input.step;
+    const fallbackBody = renderWorkflowReplyTemplate(templateStep.body, input.answers).trim();
+
+    await sendAutomatedTemplate({
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      channelId: null,
+      to: input.contactPhone,
+      name: templateStep.templateName,
+      languageCode: templateStep.languageCode ?? "en_US",
+      variables: templateStep.variables ?? [],
+      bodyVariables: templateStep.bodyVariables ?? [],
+      headerVariables: templateStep.headerVariables ?? [],
+      components: templateStep.components ?? [],
+      body: fallbackBody
+    });
+
+    if (templateStep.nextStepId && templateStep.nextStepId !== WORKFLOW_END_ID) {
+      const nextStep = input.workflow.steps.find((entry) => entry.id === templateStep.nextStepId);
+      if (nextStep) {
+        await enterStructuredWorkflowStep({
+          ...input,
+          step: nextStep,
+          followUpCounts,
+          sourceStepId: templateStep.id
+        });
+        return;
+      }
+    }
+
+    if (templateStep.nextStepId === WORKFLOW_END_ID || !templateStep.nextStepId) {
+      const continuationFallback = resolveWorkflowContinuationFallback({
+        workflow: input.workflow,
+        continuationStepIds: input.continuationStepIds
+      });
+      if (continuationFallback) {
+        await enterStructuredWorkflowStep({
+          ...input,
+          step: continuationFallback.step,
+          continuationStepIds: continuationFallback.continuationStepIds,
+          followUpCounts,
+          sourceStepId: templateStep.id
+        });
+        return;
+      }
+    }
+
+    await prisma.conversationAutomationState.update({
+      where: {
+        conversationId: input.conversationId
+      },
+      data: {
+        activeFlowKey: null,
+        activeFlowStep: null,
+        flowStateJson: JSON.stringify({
+          history: input.branchHistory,
+          answers: input.answers,
+          retries: input.retries,
+          continuationStepIds: input.continuationStepIds,
+          followUpCounts,
+          endedAt: input.sentAt.toISOString(),
+          endStepId: templateStep.id
         }),
         lastAutoReplyAt: input.sentAt
       }
@@ -2129,6 +2698,18 @@ async function enterStructuredWorkflowStep(input: {
   if (input.step.type === "action" || input.step.type === "update") {
     const actionStep = input.step;
     let resolvedAssigneeId: string | null = null;
+    const currentConversation = await prisma.conversation.findUnique({
+      where: {
+        id: input.conversationId
+      },
+      select: {
+        assigneeId: true,
+        channelId: true,
+        snoozedUntil: true,
+        snoozeReason: true,
+        snoozeStatus: true
+      }
+    });
 
     if (actionStep.tags?.length) {
       await prisma.contact.update({
@@ -2142,17 +2723,8 @@ async function enterStructuredWorkflowStep(input: {
     }
 
     if (actionStep.type === "update") {
-      const conversation = await prisma.conversation.findUnique({
-        where: {
-          id: input.conversationId
-        },
-        select: {
-          assigneeId: true
-        }
-      });
-
       const shouldOverwriteExistingOwner = Boolean(actionStep.overwriteExistingOwner);
-      if (!conversation?.assigneeId || shouldOverwriteExistingOwner) {
+      if (!currentConversation?.assigneeId || shouldOverwriteExistingOwner) {
         const nextAssigneeId = await resolveWorkflowUpdateAssignee({
           workspaceId: input.workspaceId,
           workflowId: input.workflowId,
@@ -2163,7 +2735,7 @@ async function enterStructuredWorkflowStep(input: {
           sentAt: input.sentAt
         });
 
-        if (nextAssigneeId && nextAssigneeId !== conversation?.assigneeId) {
+        if (nextAssigneeId && nextAssigneeId !== currentConversation?.assigneeId) {
           await prisma.conversation.update({
             where: {
               id: input.conversationId
@@ -2174,9 +2746,9 @@ async function enterStructuredWorkflowStep(input: {
           });
         }
 
-        resolvedAssigneeId = nextAssigneeId ?? conversation?.assigneeId ?? null;
+        resolvedAssigneeId = nextAssigneeId ?? currentConversation?.assigneeId ?? null;
       } else {
-        resolvedAssigneeId = conversation.assigneeId;
+        resolvedAssigneeId = currentConversation.assigneeId;
       }
     } else if (actionStep.assignOwnerId) {
       await prisma.conversation.update({
@@ -2189,15 +2761,7 @@ async function enterStructuredWorkflowStep(input: {
       });
       resolvedAssigneeId = actionStep.assignOwnerId;
     } else {
-      const conversation = await prisma.conversation.findUnique({
-        where: {
-          id: input.conversationId
-        },
-        select: {
-          assigneeId: true
-        }
-      });
-      resolvedAssigneeId = conversation?.assigneeId ?? null;
+      resolvedAssigneeId = currentConversation?.assigneeId ?? null;
     }
 
     if (actionStep.leadStage) {
@@ -2250,6 +2814,58 @@ async function enterStructuredWorkflowStep(input: {
       });
     }
 
+    const snoozeAction = normalizeWorkflowSnoozeAction(actionStep.snoozeAction);
+    if (snoozeAction !== "none" && currentConversation) {
+      const nextSnoozedUntil =
+        snoozeAction === "snooze" && actionStep.snoozeDurationMinutes
+          ? new Date(input.sentAt.getTime() + actionStep.snoozeDurationMinutes * 60 * 1000)
+          : null;
+      const nextSnoozeReason =
+        snoozeAction === "snooze" ? actionStep.snoozeReason?.trim() || actionStep.title?.trim() || null : null;
+      const nextSnoozeStatus =
+        snoozeAction === "snooze" ? ConversationSnoozeStatus.ACTIVE : ConversationSnoozeStatus.WORKFLOW;
+      const snoozeTransitionAction = getSnoozeTransitionAction({
+        current: {
+          workspaceId: input.workspaceId,
+          channelId: currentConversation.channelId,
+          conversationId: input.conversationId,
+          snoozedUntil: currentConversation.snoozedUntil,
+          snoozeReason: currentConversation.snoozeReason,
+          snoozeStatus: currentConversation.snoozeStatus
+        },
+        next: {
+          snoozedUntil: nextSnoozedUntil,
+          snoozeReason: nextSnoozeReason,
+          snoozeStatus: nextSnoozeStatus
+        }
+      });
+
+      await prisma.conversation.update({
+        where: {
+          id: input.conversationId
+        },
+        data: {
+          snoozedUntil: nextSnoozedUntil,
+          snoozedById: null,
+          snoozeReason: nextSnoozeReason,
+          snoozeStatus: nextSnoozeStatus
+        }
+      });
+
+      if (snoozeTransitionAction) {
+        await emitConversationSnoozeEvent({
+          action: snoozeTransitionAction,
+          channelId: currentConversation.channelId ?? null,
+          conversationId: input.conversationId,
+          snoozeReason: nextSnoozeReason,
+          snoozeStatus: nextSnoozeStatus,
+          snoozedUntil: nextSnoozedUntil,
+          trigger: "workflow",
+          workspaceId: input.workspaceId
+        });
+      }
+    }
+
     if ((actionStep.notifyAssignedOwner || actionStep.notifyAgentIds?.length) && actionStep.notifyMessage?.trim()) {
       await sendWorkflowTeamNotifications({
         workspaceId: input.workspaceId,
@@ -2273,7 +2889,9 @@ async function enterStructuredWorkflowStep(input: {
         await enterStructuredWorkflowStep({
           ...input,
           contactTags: mergeTags(input.contactTags, actionStep.tags ?? []).join(", "),
-          step: nextStep
+          step: nextStep,
+          followUpCounts,
+          sourceStepId: actionStep.id
         });
         return;
       }
@@ -2289,7 +2907,9 @@ async function enterStructuredWorkflowStep(input: {
           ...input,
           contactTags: mergeTags(input.contactTags, actionStep.tags ?? []).join(", "),
           step: continuationFallback.step,
-          continuationStepIds: continuationFallback.continuationStepIds
+          continuationStepIds: continuationFallback.continuationStepIds,
+          followUpCounts,
+          sourceStepId: actionStep.id
         });
         return;
       }
@@ -2307,6 +2927,7 @@ async function enterStructuredWorkflowStep(input: {
           answers: input.answers,
           retries: input.retries,
           continuationStepIds: input.continuationStepIds,
+          followUpCounts,
           endedAt: input.sentAt.toISOString(),
           endStepId: actionStep.id
         }),
@@ -2353,7 +2974,9 @@ async function enterStructuredWorkflowStep(input: {
       if (nextStep) {
         await enterStructuredWorkflowStep({
           ...input,
-          step: nextStep
+          step: nextStep,
+          followUpCounts,
+          sourceStepId: replyStep.id
         });
         return;
       }
@@ -2368,7 +2991,9 @@ async function enterStructuredWorkflowStep(input: {
         await enterStructuredWorkflowStep({
           ...input,
           step: continuationFallback.step,
-          continuationStepIds: continuationFallback.continuationStepIds
+          continuationStepIds: continuationFallback.continuationStepIds,
+          followUpCounts,
+          sourceStepId: replyStep.id
         });
         return;
       }
@@ -2386,6 +3011,7 @@ async function enterStructuredWorkflowStep(input: {
           answers: input.answers,
           retries: input.retries,
           continuationStepIds: input.continuationStepIds,
+          followUpCounts,
           endedAt: input.sentAt.toISOString(),
           endStepId: replyStep.id
         }),
@@ -2423,7 +3049,9 @@ async function enterStructuredWorkflowStep(input: {
     await enterStructuredWorkflowStep({
       ...input,
       step: endContinuationFallback.step,
-      continuationStepIds: endContinuationFallback.continuationStepIds
+      continuationStepIds: endContinuationFallback.continuationStepIds,
+      followUpCounts,
+      sourceStepId: input.step.id
     });
     return;
   }
@@ -2440,6 +3068,7 @@ async function enterStructuredWorkflowStep(input: {
         answers: input.answers,
         retries: input.retries,
         continuationStepIds: input.continuationStepIds,
+        followUpCounts,
         endedAt: input.sentAt.toISOString(),
         endStepId: input.step.id
       }),
@@ -2502,10 +3131,11 @@ function isWithinBusinessHours(
   settings: Awaited<ReturnType<typeof getOrCreateAutomationSettings>>,
   date: Date
 ) {
+  type BusinessHoursEntry = (typeof settings.businessHours)[number];
   const local = getLocalTimeParts(date, settings.timezone || DEFAULT_TIMEZONE);
   const day = local.day;
   const hours = `${`${local.hour}`.padStart(2, "0")}:${`${local.minute}`.padStart(2, "0")}`;
-  const window = settings.businessHours.find((entry) => entry.day === day);
+  const window = settings.businessHours.find((entry: BusinessHoursEntry) => entry.day === day);
 
   if (!window || !window.enabled) {
     return false;
@@ -2518,6 +3148,7 @@ function getNextBusinessOpening(
   settings: Awaited<ReturnType<typeof getOrCreateAutomationSettings>>,
   date: Date
 ) {
+  type BusinessHoursEntry = (typeof settings.businessHours)[number];
   const timezone = settings.timezone || DEFAULT_TIMEZONE;
   const local = getLocalTimeParts(date, timezone);
   const currentMinutes = local.hour * 60 + local.minute;
@@ -2536,7 +3167,9 @@ function getNextBusinessOpening(
       ),
       timezone
     );
-    const window = settings.businessHours.find((entry) => entry.day === candidateDay.day && entry.enabled);
+    const window = settings.businessHours.find(
+      (entry: BusinessHoursEntry) => entry.day === candidateDay.day && entry.enabled
+    );
 
     if (!window) {
       continue;
@@ -2547,7 +3180,7 @@ function getNextBusinessOpening(
       continue;
     }
 
-    const [hour, minute] = window.start.split(":").map((value) => Number.parseInt(value, 10));
+    const [hour, minute] = window.start.split(":").map((value: string) => Number.parseInt(value, 10));
     return zonedDateTimeToUtc(
       {
         year: candidateDay.year,
@@ -2711,6 +3344,30 @@ function parseWorkflowDefinition(value: string | null | undefined) {
           };
         }
 
+        if (step.type === "send_template") {
+          return {
+            ...step,
+            body: typeof step.body === "string" ? step.body.trim() || null : null,
+            templateName: typeof step.templateName === "string" ? step.templateName.trim() : "",
+            languageCode: typeof step.languageCode === "string" ? step.languageCode.trim() || "en_US" : "en_US",
+            variables: Array.isArray(step.variables) ? step.variables : [],
+            bodyVariables: Array.isArray(step.bodyVariables) ? step.bodyVariables : [],
+            headerVariables: Array.isArray(step.headerVariables) ? step.headerVariables : [],
+            components: Array.isArray(step.components) ? step.components : [],
+            nextStepId: typeof step.nextStepId === "string" ? step.nextStepId.trim() || null : null
+          };
+        }
+
+        if (step.type === "follow_up") {
+          return {
+            ...step,
+            delayMinutes: clampDelayMinutes(step.delayMinutes),
+            reply: typeof step.reply === "string" ? step.reply.trim() || null : null,
+            cancelOnInbound: step.cancelOnInbound !== false,
+            cancelOnHumanReply: Boolean(step.cancelOnHumanReply)
+          };
+        }
+
         if (step.type === "update") {
           const assignOwnerId = typeof step.assignOwnerId === "string" ? step.assignOwnerId.trim() || null : null;
           return {
@@ -2722,6 +3379,12 @@ function parseWorkflowDefinition(value: string | null | undefined) {
             notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage.trim() || null : null,
             roundRobinAgentIds: normalizeWorkflowRoundRobinAgentIds(step.roundRobinAgentIds),
             overwriteExistingOwner: Boolean(step.overwriteExistingOwner),
+            snoozeAction: normalizeWorkflowSnoozeAction(step.snoozeAction),
+            snoozeDurationMinutes:
+              typeof step.snoozeDurationMinutes === "number" && step.snoozeDurationMinutes > 0
+                ? Math.round(step.snoozeDurationMinutes)
+                : null,
+            snoozeReason: typeof step.snoozeReason === "string" ? step.snoozeReason.trim() || null : null,
             leadAttributeKey: normalizeWorkflowLeadAttributeKey(step.leadAttributeKey),
             leadAttributeValue:
               typeof step.leadAttributeValue === "string" ? step.leadAttributeValue.trim() : null,
@@ -2741,7 +3404,13 @@ function parseWorkflowDefinition(value: string | null | undefined) {
             assignOwnerId,
             notifyAssignedOwner: Boolean(step.notifyAssignedOwner),
             notifyAgentIds: normalizeWorkflowRoundRobinAgentIds(step.notifyAgentIds),
-            notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage.trim() || null : null
+            notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage.trim() || null : null,
+            snoozeAction: normalizeWorkflowSnoozeAction(step.snoozeAction),
+            snoozeDurationMinutes:
+              typeof step.snoozeDurationMinutes === "number" && step.snoozeDurationMinutes > 0
+                ? Math.round(step.snoozeDurationMinutes)
+                : null,
+            snoozeReason: typeof step.snoozeReason === "string" ? step.snoozeReason.trim() || null : null
           };
         }
 
@@ -2830,8 +3499,10 @@ function parseStructuredWorkflowState(value: string | null) {
   const answersPayload = parsed.answers;
   const retriesPayload = parsed.retries;
   const continuationStepIdsPayload = parsed.continuationStepIds;
+  const followUpCountsPayload = parsed.followUpCounts;
   const waitingAtPayload = typeof parsed.waitingAt === "string" ? parsed.waitingAt : null;
   const waitingForPayload = parsed.waitingFor === "delay" || parsed.waitingFor === "reply" ? parsed.waitingFor : null;
+  const delaySourceStepIdPayload = typeof parsed.delaySourceStepId === "string" ? parsed.delaySourceStepId : null;
 
   const normalizedHistory = Array.isArray(history)
     ? history.filter(
@@ -2866,6 +3537,14 @@ function parseStructuredWorkflowState(value: string | null) {
       : {};
 
   const normalizedContinuationStepIds = normalizeWorkflowContinuationStepIds(continuationStepIdsPayload);
+  const normalizedFollowUpCounts =
+    followUpCountsPayload && typeof followUpCountsPayload === "object"
+      ? Object.fromEntries(
+          Object.entries(followUpCountsPayload).filter(
+            (entry): entry is [string, number] => typeof entry[0] === "string" && typeof entry[1] === "number"
+          )
+        )
+      : {};
   const workflowIdPayload = typeof parsed.workflowId === "string" ? parsed.workflowId : null;
 
   return {
@@ -2874,8 +3553,10 @@ function parseStructuredWorkflowState(value: string | null) {
     answers: normalizedAnswers,
     retries: normalizedRetries,
     continuationStepIds: normalizedContinuationStepIds,
+    followUpCounts: normalizedFollowUpCounts,
     waitingAt: waitingAtPayload,
-    waitingFor: waitingForPayload
+    waitingFor: waitingForPayload,
+    delaySourceStepId: delaySourceStepIdPayload
   };
 }
 
@@ -2927,10 +3608,20 @@ type AutomationJobPayload =
       scheduledFrom?: string | null;
       cancelOnInbound?: boolean;
       body?: string | null;
+      template?: {
+        name?: string | null;
+        languageCode?: string | null;
+        variables?: unknown[] | null;
+        bodyVariables?: unknown[] | null;
+        headerVariables?: unknown[] | null;
+        components?: unknown[] | null;
+      } | null;
       attachmentMimeType?: string | null;
       attachmentName?: string | null;
       attachmentUrl?: string | null;
+      mediaAssetId?: string | null;
       attachments?: Array<{
+        mediaAssetId?: string | null;
         mimeType?: string | null;
         name?: string | null;
         url?: string | null;
@@ -2980,18 +3671,37 @@ function parseAutomationJobPayload(value: string): AutomationJobPayload {
     };
   }
 
+  const parsedTemplate =
+    parsed.template && typeof parsed.template === "object"
+      ? (parsed.template as Record<string, unknown>)
+      : null;
+
   return {
     kind: "rule-follow-up",
     scheduledFrom: typeof parsed.scheduledFrom === "string" ? parsed.scheduledFrom : null,
     cancelOnInbound: parsed.cancelOnInbound !== false,
     body: typeof parsed.body === "string" ? parsed.body : null,
+    template:
+      parsedTemplate
+        ? {
+            name: typeof parsedTemplate.name === "string" ? parsedTemplate.name : null,
+            languageCode:
+              typeof parsedTemplate.languageCode === "string" ? parsedTemplate.languageCode : null,
+            variables: Array.isArray(parsedTemplate.variables) ? parsedTemplate.variables : [],
+            bodyVariables: Array.isArray(parsedTemplate.bodyVariables) ? parsedTemplate.bodyVariables : [],
+            headerVariables: Array.isArray(parsedTemplate.headerVariables) ? parsedTemplate.headerVariables : [],
+            components: Array.isArray(parsedTemplate.components) ? parsedTemplate.components : []
+          }
+        : null,
     attachmentMimeType: typeof parsed.attachmentMimeType === "string" ? parsed.attachmentMimeType : null,
     attachmentName: typeof parsed.attachmentName === "string" ? parsed.attachmentName : null,
     attachmentUrl: typeof parsed.attachmentUrl === "string" ? parsed.attachmentUrl : null,
+    mediaAssetId: typeof parsed.mediaAssetId === "string" ? parsed.mediaAssetId : null,
     attachments: Array.isArray(parsed.attachments)
       ? parsed.attachments
           .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
           .map((item) => ({
+            mediaAssetId: typeof item.mediaAssetId === "string" ? item.mediaAssetId : null,
             mimeType: typeof item.mimeType === "string" ? item.mimeType : null,
             name: typeof item.name === "string" ? item.name : null,
             url: typeof item.url === "string" ? item.url : null
@@ -3050,6 +3760,10 @@ function normalizeWorkflowMediaItems(value: unknown, fallbackMediaAssetIds?: unk
 
 function normalizeWorkflowAssignmentMode(value: unknown): "none" | "fixed" | "round_robin" {
   return value === "round_robin" ? "round_robin" : value === "fixed" ? "fixed" : "none";
+}
+
+function normalizeWorkflowSnoozeAction(value: unknown): "none" | "snooze" | "unsnooze" {
+  return value === "snooze" ? "snooze" : value === "unsnooze" ? "unsnooze" : "none";
 }
 
 function normalizeWorkflowRoundRobinAgentIds(value: unknown) {
@@ -3237,7 +3951,7 @@ async function resolveWorkflowUpdateAssignee(input: {
   assignmentMode?: "none" | "fixed" | "round_robin";
   roundRobinAgentIds?: string[];
   sentAt: Date;
-}) {
+}): Promise<string | null> {
   const assignmentMode =
     input.assignmentMode ?? (input.assignOwnerId?.trim() ? "fixed" : "none");
 
@@ -3267,7 +3981,10 @@ async function resolveWorkflowUpdateAssignee(input: {
     }
   });
 
-  const activeAgentIds = requestedAgentIds.filter((agentId) => activeAgents.some((agent) => agent.id === agentId));
+  type ActiveAgent = (typeof activeAgents)[number];
+  const activeAgentIds = requestedAgentIds.filter((agentId: string) =>
+    activeAgents.some((agent: ActiveAgent) => agent.id === agentId)
+  );
   if (!activeAgentIds.length) {
     return null;
   }
@@ -3276,7 +3993,7 @@ async function resolveWorkflowUpdateAssignee(input: {
     return activeAgentIds[0];
   }
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: TransactionClient): Promise<string> => {
     await tx.automationWorkflowAssignmentCursor.upsert({
       where: {
         workflowId_stepId: {
@@ -3292,12 +4009,13 @@ async function resolveWorkflowUpdateAssignee(input: {
       update: {}
     });
 
-    const [cursor] = await tx.$queryRaw<Array<{ id: string; nextIndex: number }>>`
+    const rows = await tx.$queryRaw<Array<{ id: string; nextIndex: number }>>`
       SELECT id, "nextIndex"
       FROM "AutomationWorkflowAssignmentCursor"
       WHERE "workflowId" = ${input.workflowId!} AND "stepId" = ${input.stepId}
       FOR UPDATE
     `;
+    const [cursor] = rows;
 
     if (!cursor) {
       return activeAgentIds[0];
@@ -3338,7 +4056,7 @@ async function cancelPendingAutomationJobsOnInbound(input: {
   });
 
   const jobsToCancel = jobs
-    .filter((job) => {
+    .filter((job: (typeof jobs)[number]) => {
       const payload = parseAutomationJobPayload(job.payloadJson);
       if (payload.kind === "workflow-delay") {
         return payload.cancelOnInbound !== false;
@@ -3350,7 +4068,7 @@ async function cancelPendingAutomationJobsOnInbound(input: {
 
       return shouldCancelRuleFollowUpOnReply(payload);
     })
-    .map((job) => job.id);
+    .map((job: (typeof jobs)[number]) => job.id);
 
   if (!jobsToCancel.length) {
     return;
@@ -3565,26 +4283,90 @@ async function processWorkflowDelayJob(
     throw new Error("Active workflow definition is unavailable.");
   }
 
-  const delayStep = workflow.steps.find(
-    (step): step is Extract<StructuredWorkflowStep, { type: "delay" }> =>
-      step.id === payload.stepId && step.type === "delay"
+  const delayedStep = workflow.steps.find(
+    (step) => step.id === payload.stepId && (step.type === "delay" || step.type === "follow_up")
   );
 
-  if (!delayStep) {
+  if (!delayedStep) {
     await prisma.automationJob.update({
       where: {
         id: job.id
       },
       data: {
         status: AutomationJobStatus.CANCELED,
-        lastError: "Delay step no longer exists in the workflow."
+        lastError: "Delayed workflow step no longer exists in the workflow."
       }
     });
     return "canceled" as const;
   }
 
-  const nextStepId = payload.nextStepId ?? delayStep.nextStepId ?? null;
+  if (delayedStep.type !== "delay" && delayedStep.type !== "follow_up") {
+    await prisma.automationJob.update({
+      where: {
+        id: job.id
+      },
+      data: {
+        status: AutomationJobStatus.CANCELED,
+        lastError: "Delayed workflow step changed to an unsupported type."
+      }
+    });
+    return "canceled" as const;
+  }
+
   const flowState = parseStructuredWorkflowState(conversation.automationState.flowStateJson);
+  let effectiveFollowUpCounts = flowState.followUpCounts;
+  if (delayedStep.type === "follow_up") {
+    if (delayedStep.reply?.trim()) {
+      await sendAutomatedMessage({
+        workspaceId: job.workspaceId,
+        conversationId: job.conversationId,
+        to: conversation.contact.phone,
+        body: renderWorkflowReplyTemplate(delayedStep.reply, flowState.answers)
+      });
+    }
+
+    effectiveFollowUpCounts = {
+      ...flowState.followUpCounts,
+      [delayedStep.id]: (flowState.followUpCounts[delayedStep.id] ?? 0) + 1
+    };
+    const returnStepId = flowState.delaySourceStepId?.trim() || null;
+    if (returnStepId && returnStepId !== delayedStep.id) {
+      const returnStep = workflow.steps.find((step) => step.id === returnStepId);
+      if (returnStep) {
+        await enterStructuredWorkflowStep({
+          workspaceId: job.workspaceId,
+          conversationId: job.conversationId,
+          contactId: conversation.contactId,
+          contactPhone: conversation.contact.phone,
+          contactTags: conversation.contact.tags,
+          sentAt: new Date(),
+          workflowId: workflowRecord?.id ?? settings.activeWorkflowId,
+          workflow,
+          step: returnStep,
+          branchHistory: flowState.history,
+          answers: flowState.answers,
+          retries: flowState.retries,
+          continuationStepIds: flowState.continuationStepIds,
+          followUpCounts: effectiveFollowUpCounts,
+          sourceStepId: delayedStep.id
+        });
+
+        await prisma.automationJob.update({
+          where: {
+            id: job.id
+          },
+          data: {
+            status: AutomationJobStatus.SENT,
+            lastError: null
+          }
+        });
+
+        return "sent" as const;
+      }
+    }
+  }
+
+  const nextStepId = payload.nextStepId ?? delayedStep.nextStepId ?? null;
 
   if (!nextStepId) {
     if (flowState.continuationStepIds.length) {
@@ -3604,7 +4386,9 @@ async function processWorkflowDelayJob(
           branchHistory: flowState.history,
           answers: flowState.answers,
           retries: flowState.retries,
-          continuationStepIds: remainingContinuationStepIds
+          continuationStepIds: remainingContinuationStepIds,
+          followUpCounts: effectiveFollowUpCounts,
+          sourceStepId: delayedStep.id
         });
       } else {
         await prisma.conversationAutomationState.update({
@@ -3619,8 +4403,9 @@ async function processWorkflowDelayJob(
               answers: flowState.answers,
               retries: flowState.retries,
               continuationStepIds: flowState.continuationStepIds,
+              followUpCounts: effectiveFollowUpCounts,
               endedAt: new Date().toISOString(),
-              endStepId: delayStep.id
+              endStepId: delayedStep.id
             }),
             lastAutoReplyAt: new Date()
           }
@@ -3639,8 +4424,9 @@ async function processWorkflowDelayJob(
             answers: flowState.answers,
             retries: flowState.retries,
             continuationStepIds: flowState.continuationStepIds,
+            followUpCounts: effectiveFollowUpCounts,
             endedAt: new Date().toISOString(),
-            endStepId: delayStep.id
+            endStepId: delayedStep.id
           }),
           lastAutoReplyAt: new Date()
         }
@@ -3665,7 +4451,9 @@ async function processWorkflowDelayJob(
       branchHistory: flowState.history,
       answers: flowState.answers,
       retries: flowState.retries,
-      continuationStepIds: flowState.continuationStepIds
+      continuationStepIds: flowState.continuationStepIds,
+      followUpCounts: effectiveFollowUpCounts,
+      sourceStepId: delayedStep.id
     });
   }
 
@@ -3851,7 +4639,9 @@ async function processWorkflowWaitTimeoutJob(
       branchHistory: flowState.history,
       answers: flowState.answers,
       retries: flowState.retries,
-      continuationStepIds: flowState.continuationStepIds
+      continuationStepIds: flowState.continuationStepIds,
+      followUpCounts: flowState.followUpCounts,
+      sourceStepId: waitingStep.id
     });
   } else {
     await prisma.conversationAutomationState.update({
@@ -3866,6 +4656,7 @@ async function processWorkflowWaitTimeoutJob(
           answers: flowState.answers,
           retries: flowState.retries,
           continuationStepIds: flowState.continuationStepIds,
+          followUpCounts: flowState.followUpCounts,
           endedAt: sentAt.toISOString(),
           endStepId: waitingStep.id,
           endReason: "WAIT_TIMEOUT"
@@ -3986,7 +4777,7 @@ function detectMessageLanguage(value: string) {
 }
 
 function countKeywordHits(input: string, keywords: string[]) {
-  return keywords.reduce((total, keyword) => (input.includes(keyword) ? total + 1 : total), 0);
+  return keywords.reduce((total: number, keyword: string) => (input.includes(keyword) ? total + 1 : total), 0);
 }
 
 function normalizeLanguageName(value: string) {

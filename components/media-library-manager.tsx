@@ -2,23 +2,36 @@
 
 import { useRouter } from "next/navigation";
 import { useMemo, useRef, useState, useTransition } from "react";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { useConfirmation } from "@/components/confirmation-provider";
 import { useToast } from "@/components/toast-provider";
 import { MediaAssetKind } from "@/lib/db-types";
+import { INBOX_UPLOAD_LIMITS_HELPER, UPLOAD_PROXY_LIMIT_ERROR } from "@/lib/inbox-upload";
+import { buildMediaStorageExceededMessage } from "@/lib/media-library-quota";
 import {
   formatMediaAssetSize,
   getMediaAssetAccept,
   getMediaKindLabel,
-  isPdfMimeType,
+  isAudioMimeType,
+  isDocumentMimeType,
   type MediaLibraryAsset
 } from "@/lib/media-library-shared";
 
 type MediaLibraryManagerProps = {
   assets: MediaLibraryAsset[];
   limits: {
-    maxItems: number;
+    totalAssets: number;
+    imageCount: number;
+    audioCount: number;
+    videoCount: number;
+    documentCount: number;
+    usedStorageBytes: number;
+    storageLimitBytes: number | null;
+    remainingStorageBytes: number | null;
+    storageUsagePercentage: number | null;
+    isStorageUnlimited: boolean;
+    hasStorageLimitConfigured: boolean;
     maxFileBytes: number;
-    remainingItems: number;
   };
 };
 
@@ -28,55 +41,77 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
   const { success, error: showError } = useToast();
   const [isPending, startTransition] = useTransition();
   const [assetList, setAssetList] = useState(assets);
+  const [isDragActive, setIsDragActive] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  const remainingItems = Math.max(0, limits.maxItems - assetList.length);
+  const usedStorageBytes = useMemo(
+    () => assetList.reduce((sum, asset) => sum + asset.sizeBytes, 0),
+    [assetList]
+  );
+  const remainingStorageBytes =
+    limits.remainingStorageBytes === null ? null : Math.max((limits.storageLimitBytes ?? 0) - usedStorageBytes, 0);
+  const storageUsagePercentage =
+    limits.storageLimitBytes && limits.storageLimitBytes > 0
+      ? Math.min(100, Math.round((usedStorageBytes / limits.storageLimitBytes) * 100))
+      : limits.isStorageUnlimited
+        ? null
+        : 0;
+  const selectedFileExceedsRemainingStorage =
+    selectedFile && remainingStorageBytes !== null ? selectedFile.size > remainingStorageBytes : false;
   const groupedCounts = useMemo(
     () => ({
       image: assetList.filter((asset) => asset.kind === MediaAssetKind.IMAGE).length,
-      audio: assetList.filter((asset) => asset.kind === MediaAssetKind.AUDIO).length,
-      video: assetList.filter((asset) => asset.kind === MediaAssetKind.VIDEO && !isPdfMimeType(asset.mimeType)).length,
-      document: assetList.filter((asset) => isPdfMimeType(asset.mimeType)).length
+      audio: assetList.filter((asset) => isAudioMimeType(asset.mimeType) || asset.kind === MediaAssetKind.AUDIO).length,
+      video: assetList.filter((asset) => asset.kind === MediaAssetKind.VIDEO && !isDocumentMimeType(asset.mimeType)).length,
+      document: assetList.filter((asset) => isDocumentMimeType(asset.mimeType)).length
     }),
     [assetList]
   );
+  const storageHeadline = limits.isStorageUnlimited
+    ? `${formatMediaAssetSize(usedStorageBytes)} used`
+    : limits.storageLimitBytes !== null
+      ? `${formatMediaAssetSize(usedStorageBytes)} of ${formatMediaAssetSize(limits.storageLimitBytes)} used`
+      : "Storage limit unavailable";
+  const storageRemainingLabel = limits.isStorageUnlimited
+    ? "Unlimited storage"
+    : remainingStorageBytes !== null
+      ? `${formatMediaAssetSize(remainingStorageBytes)} remaining`
+      : "Unlimited storage";
 
-  const uploadAsset = () => {
+  const uploadAsset = async () => {
     if (!selectedFile) {
       setError("Choose a file to upload.");
       return;
     }
 
+    if (selectedFileExceedsRemainingStorage) {
+      setError(buildStorageExceededMessage(usedStorageBytes, limits.storageLimitBytes, selectedFile.size));
+      return;
+    }
+
     setError(null);
-    startTransition(async () => {
-      const formData = new FormData();
-      formData.append("file", selectedFile);
+    setUploadProgress(0);
 
-      const response = await fetch("/api/media-library", {
-        method: "POST",
-        body: formData
-      });
-      const payload = (await response.json().catch(() => null)) as { error?: string; asset?: MediaLibraryAsset } | null;
-
-      if (!response.ok || !payload?.asset) {
-        const message = payload?.error ?? "Unable to upload media.";
-        setError(message);
-        showError("Upload failed", message);
-        return;
-      }
-
-      setAssetList((current) => [...current, payload.asset!]);
+    try {
+      const payload = await uploadMediaLibraryFileWithProgress(selectedFile, setUploadProgress);
+      setAssetList((current) => [...current, payload.asset]);
       setSelectedFile(null);
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
       success("Media uploaded", `${payload.asset.title} is available for automation now.`);
       router.refresh();
-    });
+    } catch (uploadError) {
+      const message = uploadError instanceof Error ? uploadError.message : "Unable to upload media.";
+      setError(message);
+      showError("Upload failed", message);
+    } finally {
+      setUploadProgress(null);
+    }
   };
 
   const startRename = (asset: MediaLibraryAsset) => {
@@ -164,15 +199,45 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
           <div className="card-header">
             <div>
               <h3 className="card-title">Upload media</h3>
-              <p className="muted">Keep approved WhatsApp images, audio clips, videos, and PDFs here for automation reuse.</p>
+              <p className="muted">Keep approved WhatsApp images, audio clips, videos, and documents here for automation reuse.</p>
             </div>
             <div className="media-library-capacity">
-              <strong>{assetList.length}</strong>
-              <span>{`of ${limits.maxItems} used`}</span>
+              <strong>{storageUsagePercentage ?? "∞"}{storageUsagePercentage !== null ? "%" : ""}</strong>
+              <span>{storageHeadline}</span>
             </div>
           </div>
 
-          <div className="media-library-upload-dropzone">
+          <div
+            className={`media-library-upload-dropzone${isDragActive ? " dragging" : ""}${selectedFile ? " filled" : ""}`}
+            onClick={() => fileInputRef.current?.click()}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setIsDragActive(true);
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              if (event.currentTarget === event.target) {
+                setIsDragActive(false);
+              }
+            }}
+            onDragOver={(event) => {
+              event.preventDefault();
+              setIsDragActive(true);
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              setIsDragActive(false);
+              setSelectedFile(event.dataTransfer.files?.[0] ?? null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                fileInputRef.current?.click();
+              }
+            }}
+            role="button"
+            tabIndex={0}
+          >
             <input
               accept={getMediaAssetAccept()}
               className="inbox-hidden-file-input"
@@ -182,7 +247,7 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
             />
             <div className="media-library-upload-hero">
               <strong>Drag in a file or choose one manually</strong>
-              <span>Supported: image, audio, video, PDF</span>
+              <span>Supported: images, videos, audio, and documents.</span>
             </div>
             <button className="button button-secondary" onClick={() => fileInputRef.current?.click()} type="button">
               Choose file
@@ -190,9 +255,21 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
           </div>
 
           <div className="media-library-upload-meta">
-            <span>{`Max ${formatMediaAssetSize(limits.maxFileBytes)} each`}</span>
-            <span>{remainingItems} slots left</span>
+            <span>{INBOX_UPLOAD_LIMITS_HELPER}</span>
+            <span>{storageRemainingLabel}</span>
           </div>
+
+          {!limits.isStorageUnlimited && limits.storageLimitBytes !== null ? (
+            <div className="media-library-storage-meter" aria-label="Media Library storage usage">
+              <div className="media-library-storage-meter-bar" aria-hidden="true">
+                <span style={{ width: `${Math.max(storageUsagePercentage ?? 0, assetList.length ? 4 : 0)}%` }} />
+              </div>
+              <div className="media-library-storage-meter-copy">
+                <span>{storageHeadline}</span>
+                <span>{storageRemainingLabel}</span>
+              </div>
+            </div>
+          ) : null}
 
           {selectedFile ? (
             <div className="media-library-selected-file">
@@ -215,14 +292,38 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
             </div>
           ) : null}
 
+          {uploadProgress !== null ? (
+            <div className="inbox-upload-progress-list" role="status">
+              <div className="inbox-upload-progress-item">
+                <div className="inbox-upload-progress-copy">
+                  <strong>
+                    <span className="inbox-upload-spinner" aria-hidden="true" />
+                    {selectedFile?.name ?? "Uploading media"}
+                  </strong>
+                  <span>{Math.max(0, Math.min(100, uploadProgress))}% uploaded</span>
+                </div>
+                <div className="inbox-upload-progress-bar">
+                  <span style={{ width: `${Math.max(6, uploadProgress)}%` }} />
+                </div>
+              </div>
+            </div>
+          ) : null}
+
           <div className="media-library-upload-actions">
             <button
               className="button button-primary"
-              disabled={isPending || !selectedFile || remainingItems === 0}
-              onClick={uploadAsset}
+              disabled={
+                isPending ||
+                uploadProgress !== null ||
+                !selectedFile ||
+                selectedFileExceedsRemainingStorage
+              }
+              onClick={() => {
+                void uploadAsset();
+              }}
               type="button"
             >
-              {isPending ? "Uploading..." : "Upload to library"}
+              {uploadProgress !== null ? "Uploading..." : "Upload to library"}
             </button>
           </div>
 
@@ -280,9 +381,9 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
         </div>
 
         {assetList.length ? (
-          <div className="media-library-grid">
+          <ul className="media-library-list">
             {assetList.map((asset) => (
-              <article className={`media-library-card kind-${asset.kind.toLowerCase()}`} key={asset.id}>
+              <li className={`media-library-list-item kind-${asset.kind.toLowerCase()}`} key={asset.id}>
                 <div className="media-library-preview-shell">
                   <div className="media-library-card-type">
                     <span className={`pill-muted media-library-kind-pill kind-${asset.kind.toLowerCase()}`}>
@@ -290,25 +391,15 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                     </span>
                   </div>
                   <div className="media-library-preview">
-                  {asset.kind === MediaAssetKind.IMAGE ? (
-                    <img alt={asset.title} className="media-library-preview-image" src={asset.publicUrl} />
-                  ) : null}
-                  {asset.kind === MediaAssetKind.AUDIO ? (
-                    <audio className="media-library-preview-audio" controls preload="metadata" src={asset.publicUrl}>
-                      Your browser does not support audio playback.
-                    </audio>
-                  ) : null}
-                  {asset.kind === MediaAssetKind.VIDEO && !isPdfMimeType(asset.mimeType) ? (
-                    <video className="media-library-preview-video" controls preload="metadata" src={asset.publicUrl}>
-                      Your browser does not support video playback.
-                    </video>
-                  ) : null}
-                  {isPdfMimeType(asset.mimeType) ? (
-                    <a className="media-library-preview-audio" href={asset.publicUrl} rel="noreferrer" target="_blank">
-                      Open PDF
-                    </a>
-                  ) : null}
-                </div>
+                    <AttachmentPreview
+                      fileName={asset.originalName || asset.title}
+                      fit="cover"
+                      mimeType={asset.mimeType}
+                      openLabel="Open attachment"
+                      sizeLabel={formatMediaAssetSize(asset.sizeBytes)}
+                      url={asset.publicUrl}
+                    />
+                  </div>
                 </div>
 
                 <div className="media-library-card-copy">
@@ -341,9 +432,6 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                 </div>
 
                 <div className="media-library-card-actions">
-                  <a className="inbox-search-tool" href={asset.publicUrl} rel="noreferrer" target="_blank">
-                    Open
-                  </a>
                   <button className="inbox-search-tool" onClick={() => startRename(asset)} type="button">
                     Rename
                   </button>
@@ -351,16 +439,73 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                     Delete
                   </button>
                 </div>
-              </article>
+              </li>
             ))}
-          </div>
+          </ul>
         ) : (
           <div className="media-library-empty">
             <h3>No media uploaded yet</h3>
-            <p>Upload approved images, audio, videos, and PDFs here so automation can reuse them safely.</p>
+            <p>Upload approved images, audio, videos, and documents here so automation can reuse them safely.</p>
           </div>
         )}
       </article>
     </section>
   );
+}
+
+function uploadMediaLibraryFileWithProgress(file: File, onProgress: (progress: number) => void) {
+  return new Promise<{ asset: MediaLibraryAsset }>((resolve, reject) => {
+    const formData = new FormData();
+    formData.append("file", file);
+
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/media-library");
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable) {
+        return;
+      }
+
+      onProgress(Math.round((event.loaded / event.total) * 100));
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status === 413) {
+        reject(new Error(UPLOAD_PROXY_LIMIT_ERROR));
+        return;
+      }
+
+      try {
+        const payload = JSON.parse(xhr.responseText || "{}") as { asset?: MediaLibraryAsset; error?: string };
+        if (xhr.status >= 200 && xhr.status < 300 && payload.asset) {
+          onProgress(100);
+          resolve({ asset: payload.asset });
+          return;
+        }
+
+        reject(new Error(payload.error || "Unable to upload media."));
+      } catch {
+        reject(new Error("Unable to upload media."));
+      }
+    });
+
+    xhr.addEventListener("error", () => reject(new Error("Unable to upload media.")));
+    xhr.send(formData);
+  });
+}
+
+function buildStorageExceededMessage(usedStorageBytes: number, storageLimitBytes: number | null, requestedUploadBytes: number) {
+  if (storageLimitBytes === null) {
+    return "Upload failed because this workspace does not have enough Media Library storage.";
+  }
+
+  return buildMediaStorageExceededMessage({
+    usedStorageBytes: formatForDisplay(usedStorageBytes),
+    storageLimitBytes: formatForDisplay(storageLimitBytes),
+    requestedUploadBytes: formatForDisplay(requestedUploadBytes)
+  });
+}
+
+function formatForDisplay(sizeBytes: number) {
+  return formatMediaAssetSize(sizeBytes);
 }

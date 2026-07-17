@@ -1,5 +1,10 @@
 "use client";
 
+import { useRouter } from "next/navigation";
+import { useState, useTransition } from "react";
+import { AttachmentPreview } from "@/components/attachment-preview";
+import { useConfirmation } from "@/components/confirmation-provider";
+import { useToast } from "@/components/toast-provider";
 import type { MessageLogsFilter } from "@/lib/message-logs";
 
 type MessageLogsBoardProps = {
@@ -18,7 +23,9 @@ type MessageLogsBoardProps = {
     contactName: string;
     phone: string;
     preview: string;
+    attachmentMimeType: string | null;
     attachmentName: string | null;
+    attachmentUrl: string | null;
     direction: "Inbound" | "Outbound";
     source: "Connexa outbound" | "Inbound" | "Manual outbound";
     status: "Canceled" | "Failed" | "Inbound" | "Processing" | "Queued" | "Sent";
@@ -39,6 +46,7 @@ type MessageLogsBoardProps = {
     failed: number;
     canceled: number;
   };
+  hasLinkedWhatsAppNumbers: boolean;
 };
 
 const FILTER_OPTIONS: Array<{ key: MessageLogsFilter; label: string }> = [
@@ -52,59 +60,168 @@ const FILTER_OPTIONS: Array<{ key: MessageLogsFilter; label: string }> = [
   { key: "outbound", label: "Outbound" }
 ];
 
-export function MessageLogsBoard({ conversationId = null, filter, pagination, rows, summary }: MessageLogsBoardProps) {
-  return (
-    <>
-      <section className="settings-dark-hero">
-        <div className="settings-dark-copy">
-          <span className="badge connexa-public-badge">Message logs</span>
-          <h1>Every message event should be visible outside the live inbox.</h1>
-          <p>
-            Review sent, queued, processing, failed, canceled, and inbound message history in one dedicated audit surface.
-          </p>
-        </div>
+export function MessageLogsBoard({
+  conversationId = null,
+  filter,
+  pagination,
+  rows,
+  summary,
+  hasLinkedWhatsAppNumbers
+}: MessageLogsBoardProps) {
+  const router = useRouter();
+  const { confirm } = useConfirmation();
+  const { success, error: showError } = useToast();
+  const [isPending, startTransition] = useTransition();
+  const [pageError, setPageError] = useState<string | null>(null);
 
-        <div className="settings-dark-status">
-          <div className="settings-dark-status-card">
-            <span>History coverage</span>
-            <strong>{summary.total}</strong>
-            <p>{conversationId ? "Message history for one conversation." : "Full workspace message history across inbound and outbound events."}</p>
+  const canDeleteLogs = summary.total > 0 && !hasLinkedWhatsAppNumbers;
+
+  const deleteLogs = async () => {
+    const accepted = await confirm({
+      title: "Delete message logs?",
+      description: "This will permanently remove all message log entries in this workspace.",
+      confirmLabel: "Delete logs",
+      tone: "danger"
+    });
+
+    if (!accepted) {
+      return;
+    }
+
+    setPageError(null);
+    startTransition(async () => {
+      const response = await fetch("/api/message-logs", {
+        method: "DELETE"
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            error?: string;
+            result?: {
+              deletedMessageCount: number;
+            };
+          }
+        | null;
+
+      if (!response.ok) {
+        const message = payload?.error ?? "Unable to delete message logs.";
+        setPageError(message);
+        showError("Delete failed", message);
+        return;
+      }
+
+      success(
+        "Message logs deleted",
+        `${payload?.result?.deletedMessageCount ?? 0} log entries were removed from this workspace.`
+      );
+      router.refresh();
+    });
+  };
+
+  return (
+    <section className="auth-page-stack">
+      <section className="auth-page-hero auth-page-hero-compact message-logs-hero">
+        <div className="auth-page-hero-copy">
+          <span className="auth-page-kicker">Message intelligence</span>
+          <h2>Message Logs</h2>
+          <p>
+            {conversationId
+              ? "Track delivery, source, and message history for this conversation in one operational view."
+              : "Review inbound and outbound delivery history with clear status, filtering, and recovery actions."}
+          </p>
+          <div className="auth-page-hero-metrics">
+            <span className="auth-page-hero-stat">
+              <strong>{summary.total}</strong>
+              <small>total events</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{summary.sent}</strong>
+              <small>sent</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{summary.failed}</strong>
+              <small>failed</small>
+            </span>
+            <span className="auth-page-hero-panel message-logs-current-view-card">
+              <span className="auth-page-hero-panel-label">Current view</span>
+              <strong>
+                Showing {pagination.pageCount} of {pagination.total} events
+              </strong>
+              <p>
+                {hasLinkedWhatsAppNumbers
+                  ? "Linked WhatsApp numbers are active, so bulk deletion is disabled until they are disconnected."
+                  : "Use filters and paging below to isolate failed, queued, inbound, or outbound events."}
+              </p>
+            </span>
+          </div>
+        </div>
+        <div className="auth-page-hero-side">
+          <div className="auth-page-hero-actions">
+            {summary.total > 0 ? (
+              <button
+                className="button button-secondary"
+                disabled={isPending || !canDeleteLogs}
+                onClick={() => void deleteLogs()}
+                title={
+                  hasLinkedWhatsAppNumbers
+                    ? "Disconnect all linked WhatsApp numbers before deleting message logs."
+                    : "Delete all message logs in this workspace"
+                }
+                type="button"
+              >
+                {isPending ? "Deleting..." : "Delete logs"}
+              </button>
+            ) : null}
           </div>
         </div>
       </section>
 
-      <section className="metrics-grid">
-        <article className="content-card metric-card">
-          <div className="metric-label">Sent</div>
-          <div className="metric-value">{summary.sent}</div>
-          <div className="table-subtle">Outbound messages accepted by the provider</div>
-        </article>
-        <article className="content-card metric-card">
-          <div className="metric-label">Queued</div>
-          <div className="metric-value">{summary.queued}</div>
-          <div className="table-subtle">Outbound messages waiting for delivery</div>
-        </article>
-        <article className="content-card metric-card">
-          <div className="metric-label">Failed</div>
-          <div className="metric-value">{summary.failed}</div>
-          <div className="table-subtle">Outbound attempts that need operator attention</div>
-        </article>
-        <article className="content-card metric-card">
-          <div className="metric-label">Inbound</div>
-          <div className="metric-value">{summary.inbound}</div>
-          <div className="table-subtle">Incoming customer messages captured in the workspace</div>
-        </article>
-      </section>
-
-      <section className="content-card scheduled-messages-shell">
-        <div className="card-header scheduled-messages-head">
+      <section className="content-card scheduled-messages-shell message-logs-shell">
+        <div className="card-header scheduled-messages-head message-logs-head">
           <div>
-            <h3 className="card-title">Logs</h3>
+            <h3 className="card-title">Delivery view</h3>
             <p className="muted">
-              {conversationId ? "Viewing message history for one conversation." : "Switch between message states and direction-specific history."}
+              {conversationId ? "Viewing message history for one conversation." : "Review inbound and outbound delivery history from one clean log."}
             </p>
           </div>
-          <div className="message-logs-controls">
+          <div className="scheduled-inline-stats message-logs-inline-stats">
+            <span>{summary.total} total</span>
+            <span>{summary.sent} sent</span>
+            <span>{summary.failed} failed</span>
+            <span>{summary.inbound} inbound</span>
+          </div>
+          <div className="message-logs-toolbar">
+            <div className="scheduled-messages-filters message-logs-filters">
+              {FILTER_OPTIONS.map((option) => (
+                <a
+                  className={`scheduled-filter-chip message-logs-filter-chip${filter === option.key ? " active" : ""}`}
+                  href={buildMessageLogsHref({
+                    filter: option.key,
+                    conversationId,
+                    page: 1,
+                    pageSize: pagination.pageSize
+                  })}
+                  key={option.key}
+                >
+                  {option.label}
+                </a>
+              ))}
+            </div>
+            <div className="message-logs-controls">
+            {summary.total > 0 ? (
+              <button
+                className="button button-secondary"
+                disabled={isPending || !canDeleteLogs}
+                onClick={() => void deleteLogs()}
+                title={
+                  hasLinkedWhatsAppNumbers
+                    ? "Disconnect all linked WhatsApp numbers before deleting message logs."
+                    : "Delete all message logs in this workspace"
+                }
+                type="button"
+              >
+                {isPending ? "Deleting..." : "Delete"}
+              </button>
+            ) : null}
             <span className="table-subtle">
               Showing {pagination.pageCount} of {pagination.total} events
             </span>
@@ -131,52 +248,53 @@ export function MessageLogsBoard({ conversationId = null, filter, pagination, ro
               </button>
             </form>
           </div>
-          <div className="scheduled-messages-filters">
-            {FILTER_OPTIONS.map((option) => (
-              <a
-                className={`scheduled-filter-chip${filter === option.key ? " active" : ""}`}
-                href={buildMessageLogsHref({
-                  filter: option.key,
-                  conversationId,
-                  page: 1,
-                  pageSize: pagination.pageSize
-                })}
-                key={option.key}
-              >
-                {option.label}
-              </a>
-            ))}
           </div>
+          {pageError ? <div className="scheduled-message-error message-logs-error">{pageError}</div> : null}
         </div>
 
         {rows.length ? (
-          <div className="scheduled-message-list">
+          <div className="scheduled-message-list message-logs-list">
             {rows.map((row) => (
-              <article className="scheduled-message-row" key={row.id}>
-                <div className="scheduled-message-main">
-                  <div className="scheduled-message-topline">
-                    <div>
+              <article className={`scheduled-message-row message-logs-row ${row.statusKey}`} key={row.id}>
+                <div className="scheduled-message-main message-logs-main">
+                  <div className="scheduled-message-topline message-logs-topline">
+                    <div className="message-logs-identity">
                       <strong>{row.contactName}</strong>
-                      <span>{row.phone}</span>
+                      <div className="message-logs-subline">
+                        <span>{row.phone}</span>
+                        <span className="message-logs-direction">{row.direction}</span>
+                      </div>
                     </div>
                     <span className={`scheduled-status-pill ${row.statusKey}`}>{row.status}</span>
                   </div>
 
-                  <p className="scheduled-message-preview">{row.preview}</p>
+                  <p className="scheduled-message-preview message-logs-preview">{row.preview}</p>
 
-                  <div className="scheduled-message-meta">
+                  {row.attachmentUrl ? (
+                    <div className="message-logs-attachment">
+                      <AttachmentPreview
+                        className="attachment-preview-compact"
+                        fileName={row.attachmentName}
+                        mimeType={row.attachmentMimeType}
+                        openLabel="Open attachment"
+                        url={row.attachmentUrl}
+                      />
+                    </div>
+                  ) : null}
+
+                  <div className="scheduled-message-meta message-logs-meta">
                     <span>{row.direction}</span>
                     <span>{row.source}</span>
                     <span>{row.sentAt}</span>
                     <span>By {row.createdBy}</span>
                     {row.providerMessageId ? <span>Provider ID {row.providerMessageId}</span> : null}
-                    {row.attachmentName ? <span>Attachment {row.attachmentName}</span> : null}
+                    {row.attachmentName && !row.attachmentUrl ? <span>Attachment {row.attachmentName}</span> : null}
                   </div>
 
-                  {row.lastError ? <div className="scheduled-message-error">{row.lastError}</div> : null}
+                  {row.lastError ? <div className="scheduled-message-error message-logs-error">{row.lastError}</div> : null}
                 </div>
 
-                <div className="scheduled-message-actions">
+                <div className="scheduled-message-actions message-logs-actions">
                   <a className="button button-secondary" href={`/inbox?conversationId=${row.conversationId}`}>
                     Open conversation
                   </a>
@@ -190,10 +308,9 @@ export function MessageLogsBoard({ conversationId = null, filter, pagination, ro
             <p className="muted">This filter currently has no matching message events.</p>
           </div>
         )}
-      </section>
 
       {pagination.totalPages > 1 ? (
-        <div className="content-card contacts-pagination">
+        <div className="contacts-pagination scheduled-pagination">
           <a
             aria-disabled={pagination.page <= 1}
             className={`button button-secondary${pagination.page <= 1 ? " is-disabled" : ""}`}
@@ -236,7 +353,8 @@ export function MessageLogsBoard({ conversationId = null, filter, pagination, ro
           </a>
         </div>
       ) : null}
-    </>
+      </section>
+    </section>
   );
 }
 

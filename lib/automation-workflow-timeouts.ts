@@ -1,6 +1,6 @@
-import { AutomationJobStatus } from "@prisma/client";
 import { getPlatformAutomationWorkflowConfig } from "@/lib/platform-config";
 import { prisma } from "@/lib/prisma";
+import { AutomationJobStatus } from "@/lib/db-types";
 
 type ConversationAutomationTimeoutState = {
   activeFlowKey: string | null;

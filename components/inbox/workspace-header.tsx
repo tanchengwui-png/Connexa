@@ -1,7 +1,13 @@
-import type { InboxFilterKey, InboxSummary } from "@/components/inbox/types";
+import type {
+  InboxBuiltInFilterKey,
+  InboxCustomFilter,
+  InboxFilterKey,
+  InboxSummary
+} from "@/components/inbox/types";
 
 type WorkspaceHeaderProps = {
   activeFilter: InboxFilterKey;
+  activeCustomFilter?: InboxCustomFilter | null;
   canSimulateInbound?: boolean;
   isDetailsVisible?: boolean;
   onToggleDetails?: () => void;
@@ -11,17 +17,19 @@ type WorkspaceHeaderProps = {
   summary: InboxSummary;
 };
 
-const FILTER_COPY: Record<InboxFilterKey, string> = {
+const FILTER_COPY: Record<InboxBuiltInFilterKey, string> = {
   all: "All live conversations across the shared inbox.",
   "assigned-others": "Threads currently owned by other teammates.",
   hot: "Priority conversations that need operator attention now.",
   mine: "Threads currently assigned to you.",
+  snoozed: "Conversations temporarily removed from the live queue until they return.",
   unassigned: "Threads waiting for ownership.",
   unread: "Unread work that still needs triage."
 };
 
 export function WorkspaceHeader({
   activeFilter,
+  activeCustomFilter = null,
   canSimulateInbound = false,
   isDetailsVisible = true,
   onToggleDetails,
@@ -35,7 +43,7 @@ export function WorkspaceHeader({
       <div className="inbox-workspace-header-copy">
         <span className="badge connexa-public-badge">Shared Inbox</span>
         <h2 className="inbox-title">Customer conversations</h2>
-        <p className="muted inbox-topbar-copy">{FILTER_COPY[activeFilter]}</p>
+        <p className="muted inbox-topbar-copy">{getFilterCopy(activeFilter, activeCustomFilter)}</p>
       </div>
 
       <div className="inbox-topbar-side">
@@ -57,4 +65,12 @@ export function WorkspaceHeader({
       </div>
     </div>
   );
+}
+
+function getFilterCopy(activeFilter: InboxFilterKey, activeCustomFilter: InboxCustomFilter | null) {
+  if (activeCustomFilter) {
+    return `Conversations tagged with ${activeCustomFilter.label}.`;
+  }
+
+  return FILTER_COPY[activeFilter as InboxBuiltInFilterKey] ?? "Customer conversations in the shared inbox.";
 }

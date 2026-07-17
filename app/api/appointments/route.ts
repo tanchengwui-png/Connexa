@@ -1,6 +1,6 @@
-import { AppointmentType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { createAppointment } from "@/lib/appointments";
+import { AppointmentType } from "@/lib/db-types";
 
 export async function POST(request: NextRequest) {
   try {

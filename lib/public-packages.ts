@@ -12,6 +12,7 @@ export const publicPackages = {
     cta: "Create Starter workspace",
     featured: false,
     limits: {
+      mediaLibraryStorageLimitBytes: null,
       maxOutboundMessages: 1000,
       maxActiveContacts: 500,
       maxActiveAutomations: 3,
@@ -35,6 +36,7 @@ export const publicPackages = {
     cta: "Create Professional workspace",
     featured: false,
     limits: {
+      mediaLibraryStorageLimitBytes: null,
       maxOutboundMessages: 5000,
       maxActiveContacts: 2000,
       maxActiveAutomations: 10,
@@ -58,6 +60,7 @@ export const publicPackages = {
     cta: "Create Growth workspace",
     featured: true,
     limits: {
+      mediaLibraryStorageLimitBytes: null,
       maxOutboundMessages: 15000,
       maxActiveContacts: 5000,
       maxActiveAutomations: 25,
@@ -81,6 +84,7 @@ export const publicPackages = {
     cta: "Create Enterprise workspace",
     featured: false,
     limits: {
+      mediaLibraryStorageLimitBytes: null,
       maxOutboundMessages: null,
       maxActiveContacts: null,
       maxActiveAutomations: null,
@@ -106,6 +110,7 @@ export const publicPackages = {
     cta: string;
     featured: boolean;
     limits: {
+      mediaLibraryStorageLimitBytes: number | null;
       maxOutboundMessages: number | null;
       maxActiveContacts: number | null;
       maxActiveAutomations: number | null;

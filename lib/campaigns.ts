@@ -1,15 +1,25 @@
-import { CampaignRunRecipientStatus, ConversationStatus, OutboundMessageJobStatus } from "@prisma/client";
 import { applyHumanTakeoverPause } from "@/lib/automation-engine";
 import { MALAYSIA_TIME_ZONE, parseMalaysiaDateTimeLocalInput } from "@/lib/malaysia-time";
 import { resolveMediaAssetUrl } from "@/lib/media-library-urls";
+import { CampaignRunRecipientStatus, ConversationStatus, OutboundMessageJobStatus } from "@/lib/db-types";
 import { enqueueOutboundMessage } from "@/lib/outbound-message-jobs";
 import { assertWorkspaceHasWhatsAppCampaignCapacity } from "@/lib/package-feature-limits";
 import { prisma } from "@/lib/prisma";
 import { getAllVisibleContactsData } from "@/lib/contacts";
 import { getQuickRepliesData } from "@/lib/quick-replies";
 import { requireCurrentApiAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { resolveWorkspaceDefaultChannelId } from "@/lib/whatsapp-channel-routing";
 
-type CampaignDraftRecord = {
+type CampaignTemplateInput = {
+  name: string;
+  languageCode?: string | null;
+  components?: unknown[] | null;
+  variables?: unknown[] | null;
+  bodyVariables?: unknown[] | null;
+  headerVariables?: unknown[] | null;
+};
+
+export type CampaignDraftRecord = {
   id: string;
   name: string;
   messageBody: string;
@@ -21,7 +31,7 @@ type CampaignDraftRecord = {
   createdByName: string | null;
 };
 
-type CampaignRunRecord = {
+export type CampaignRunRecord = {
   id: string;
   name: string;
   messageBody: string;
@@ -39,7 +49,7 @@ type CampaignRunRecord = {
   createdByName: string | null;
 };
 
-export async function getCampaignsData() {
+export async function getCampaignEditorData() {
   const [workspaceId, { contacts, agents }, { quickReplies, mediaAssets }] = await Promise.all([
     requireCurrentWorkspaceId(),
     getAllVisibleContactsData(),
@@ -67,6 +77,39 @@ export async function getCampaignsData() {
     drafts,
     runs
   };
+}
+
+export async function getCampaignsData() {
+  return getCampaignEditorData();
+}
+
+export async function getCampaignDraftListData() {
+  const workspaceId = await requireCurrentWorkspaceId();
+  const [drafts, runs] = await Promise.all([listCampaignDrafts(workspaceId), listCampaignRuns(workspaceId)]);
+
+  return {
+    drafts,
+    runs
+  };
+}
+
+export async function getCampaignDraftById(id: string, workspaceId?: string) {
+  const resolvedWorkspaceId = workspaceId ?? (await requireCurrentWorkspaceId());
+  const draft = await prisma.campaignDraft.findFirst({
+    where: {
+      id,
+      workspaceId: resolvedWorkspaceId
+    },
+    include: {
+      createdBy: {
+        select: {
+          name: true
+        }
+      }
+    }
+  });
+
+  return draft ? mapCampaignDraftRecord(draft) : null;
 }
 
 export async function listCampaignDrafts(workspaceId?: string) {
@@ -290,7 +333,7 @@ export async function getCampaignRunDetail(runId: string) {
 
   return {
     ...mapCampaignRunRecord(run),
-    recipients: run.recipients.map((recipient) => {
+    recipients: run.recipients.map((recipient: (typeof run.recipients)[number]) => {
       let scheduledJobCount = 0;
       let processingJobCount = 0;
       let sentJobCount = 0;
@@ -342,7 +385,7 @@ export async function getCampaignRunDetail(runId: string) {
         sentJobCount,
         failedJobCount,
         canceledJobCount,
-        jobs: recipient.outboundMessageJobs.map((job) => ({
+        jobs: recipient.outboundMessageJobs.map((job: (typeof recipient.outboundMessageJobs)[number]) => ({
           id: job.id,
           status: job.status,
           availableAt: job.availableAt.toISOString(),
@@ -357,12 +400,16 @@ export async function getCampaignRunDetail(runId: string) {
 export async function launchCampaign(input: {
   name: string;
   messageBody: string;
+  channelId?: string | null;
   scheduleAt?: string | null;
   selectedContactIds?: string[];
   selectedAttachmentIds?: string[];
+  template?: CampaignTemplateInput | null;
 }) {
   const agent = await requireCurrentApiAgent();
   const normalized = await normalizeCampaignDraftInput(agent.workspaceId, input);
+  const channelId = input.channelId ?? (await resolveWorkspaceDefaultChannelId(agent.workspaceId));
+  const channelKind = await resolveCampaignChannelKind(channelId);
 
   await assertWorkspaceHasWhatsAppCampaignCapacity(agent.workspaceId);
 
@@ -389,7 +436,7 @@ export async function launchCampaign(input: {
     throw new Error("No selected contacts were found.");
   }
 
-  const contactsById = new Map(contacts.map((contact) => [contact.id, contact] as const));
+  const contactsById = new Map(contacts.map((contact: (typeof contacts)[number]) => [contact.id, contact] as const));
   const selectedMediaAssets = normalized.selectedAttachmentIds.length
     ? await prisma.workspaceMediaAsset.findMany({
         where: {
@@ -400,7 +447,9 @@ export async function launchCampaign(input: {
         }
       })
     : [];
-  const mediaAssetsById = new Map(selectedMediaAssets.map((asset) => [asset.id, asset] as const));
+  const mediaAssetsById = new Map(
+    selectedMediaAssets.map((asset: (typeof selectedMediaAssets)[number]) => [asset.id, asset] as const)
+  );
 
   const orderedContacts = normalized.selectedContactIds
     .map((contactId) => contactsById.get(contactId) ?? null)
@@ -409,11 +458,20 @@ export async function launchCampaign(input: {
     .map((assetId) => mediaAssetsById.get(assetId) ?? null)
     .filter(Boolean) as typeof selectedMediaAssets;
 
+  if (normalized.template && channelKind !== "cloud") {
+    throw new Error("Template broadcasts require a WhatsApp Cloud channel.");
+  }
+
+  if (normalized.template && orderedMediaAssets.length > 0) {
+    throw new Error("Template campaigns do not support attachments in the same broadcast yet.");
+  }
+
   const existingConversations = await prisma.conversation.findMany({
     where: {
       workspaceId: agent.workspaceId,
+      ...(channelId ? { channelId } : {}),
       contactId: {
-        in: orderedContacts.map((contact) => contact.id)
+        in: orderedContacts.map((contact: (typeof orderedContacts)[number]) => contact.id)
       }
     },
     orderBy: [{ contactId: "asc" }, { updatedAt: "desc" }]
@@ -429,6 +487,7 @@ export async function launchCampaign(input: {
   const campaignRun = await prisma.campaignRun.create({
     data: {
       workspaceId: agent.workspaceId,
+      channelId,
       createdById: agent.id,
       name: normalized.name,
       messageBody: normalized.messageBody,
@@ -440,6 +499,7 @@ export async function launchCampaign(input: {
   let queuedCount = 0;
   let excludedCount = 0;
   let recipientCount = 0;
+  let providerMessageIndex = 0;
 
   for (const contact of orderedContacts) {
     const phone = contact.phone.trim();
@@ -465,11 +525,12 @@ export async function launchCampaign(input: {
       (await prisma.conversation.create({
         data: {
           workspaceId: agent.workspaceId,
+          channelId,
           contactId: contact.id,
           status: ConversationStatus.OPEN,
           unreadCount: 0,
           isHotLead: contact.isHotLead,
-          lastMessagePreview: normalized.messageBody.trim() || normalized.name,
+          lastMessagePreview: buildCampaignPreviewText(normalized.messageBody, normalized.template, normalized.name),
           lastMessageAt: normalized.scheduleAt ?? new Date()
         }
       }));
@@ -488,18 +549,49 @@ export async function launchCampaign(input: {
 
     let lastQueuedAt: Date | null = null;
     let recipientQueuedJobCount = 0;
-
-    if (normalized.messageBody.trim()) {
-      const textMessage = await enqueueOutboundMessage({
+    if (normalized.template) {
+      const templateMessage = await enqueueOutboundMessage({
         workspaceId: agent.workspaceId,
         conversationId: conversation.id,
+        channelId,
         campaignRunId: campaignRun.id,
         campaignRunRecipientId: campaignRecipient.id,
         to: phone,
         body: normalized.messageBody,
-        availableAt: normalized.scheduleAt,
+        availableAt: computeCampaignMessageAvailableAt({
+          baseAt: normalized.scheduleAt,
+          providerKind: channelKind,
+          messageIndex: providerMessageIndex
+        }),
         senderId: agent.id,
         source: "manual-reply",
+        mediaAssetId: null,
+        attachmentMimeType: null,
+        attachmentName: null,
+        attachmentUrl: null,
+        template: normalized.template
+      });
+      lastQueuedAt = templateMessage.sentAt;
+      queuedCount += 1;
+      recipientQueuedJobCount += 1;
+      providerMessageIndex += 1;
+    } else if (normalized.messageBody.trim()) {
+      const textMessage = await enqueueOutboundMessage({
+        workspaceId: agent.workspaceId,
+        conversationId: conversation.id,
+        channelId,
+        campaignRunId: campaignRun.id,
+        campaignRunRecipientId: campaignRecipient.id,
+        to: phone,
+        body: normalized.messageBody,
+        availableAt: computeCampaignMessageAvailableAt({
+          baseAt: normalized.scheduleAt,
+          providerKind: channelKind,
+          messageIndex: providerMessageIndex
+        }),
+        senderId: agent.id,
+        source: "manual-reply",
+        mediaAssetId: null,
         attachmentMimeType: null,
         attachmentName: null,
         attachmentUrl: null
@@ -507,19 +599,26 @@ export async function launchCampaign(input: {
       lastQueuedAt = textMessage.sentAt;
       queuedCount += 1;
       recipientQueuedJobCount += 1;
+      providerMessageIndex += 1;
     }
 
     for (const mediaAsset of orderedMediaAssets) {
       const mediaMessage = await enqueueOutboundMessage({
         workspaceId: agent.workspaceId,
         conversationId: conversation.id,
+        channelId,
         campaignRunId: campaignRun.id,
         campaignRunRecipientId: campaignRecipient.id,
         to: phone,
         body: "",
-        availableAt: normalized.scheduleAt,
+        availableAt: computeCampaignMessageAvailableAt({
+          baseAt: normalized.scheduleAt,
+          providerKind: channelKind,
+          messageIndex: providerMessageIndex
+        }),
         senderId: agent.id,
         source: "manual-reply",
+        mediaAssetId: mediaAsset.id,
         attachmentMimeType: mediaAsset.mimeType,
         attachmentName: mediaAsset.originalName || mediaAsset.title,
         attachmentUrl: resolveMediaAssetUrl(mediaAsset.publicUrl)
@@ -527,6 +626,7 @@ export async function launchCampaign(input: {
       lastQueuedAt = mediaMessage.sentAt;
       queuedCount += 1;
       recipientQueuedJobCount += 1;
+      providerMessageIndex += 1;
     }
 
     await prisma.campaignRunRecipient.update({
@@ -599,18 +699,20 @@ async function normalizeCampaignDraftInput(
     scheduleAt?: string | null;
     selectedContactIds?: string[];
     selectedAttachmentIds?: string[];
+    template?: CampaignTemplateInput | null;
   }
 ) {
   const name = input.name.trim();
   const messageBody = input.messageBody;
   const selectedContactIds = normalizeStringArray(input.selectedContactIds);
   const selectedAttachmentIds = normalizeStringArray(input.selectedAttachmentIds);
+  const template = normalizeCampaignTemplate(input.template);
 
   if (!name) {
     throw new Error("Campaign name is required.");
   }
 
-  if (!messageBody.trim() && selectedAttachmentIds.length === 0) {
+  if (!messageBody.trim() && selectedAttachmentIds.length === 0 && !template) {
     throw new Error("Campaign draft needs message text or at least one media item.");
   }
 
@@ -651,8 +753,104 @@ async function normalizeCampaignDraftInput(
     messageBody,
     scheduleAt,
     selectedContactIds,
-    selectedAttachmentIds
+    selectedAttachmentIds,
+    template
   };
+}
+
+function normalizeCampaignTemplate(input: CampaignTemplateInput | null | undefined) {
+  if (!input?.name?.trim()) {
+    return null;
+  }
+
+  return {
+    name: input.name.trim(),
+    languageCode: input.languageCode?.trim() || "en_US",
+    components: Array.isArray(input.components) ? input.components : [],
+    variables: Array.isArray(input.variables) ? input.variables : [],
+    bodyVariables: Array.isArray(input.bodyVariables) ? input.bodyVariables : [],
+    headerVariables: Array.isArray(input.headerVariables) ? input.headerVariables : []
+  };
+}
+
+function buildCampaignPreviewText(
+  messageBody: string,
+  template: CampaignTemplateInput | null,
+  fallbackName: string
+) {
+  const normalizedBody = messageBody.trim();
+  if (normalizedBody) {
+    return normalizedBody;
+  }
+
+  if (template?.name?.trim()) {
+    return `Template: ${template.name.trim()}`;
+  }
+
+  return fallbackName;
+}
+
+async function resolveCampaignChannelKind(channelId?: string | null) {
+  if (!channelId) {
+    return "personal" as const;
+  }
+
+  const channel = await prisma.whatsAppChannel.findUnique({
+    where: {
+      id: channelId
+    },
+    select: {
+      phoneNumberId: true,
+      accessTokenCiphertext: true
+    }
+  });
+
+  if (channel?.phoneNumberId && channel.accessTokenCiphertext) {
+    return "cloud" as const;
+  }
+
+  return "personal" as const;
+}
+
+function computeCampaignMessageAvailableAt(input: {
+  baseAt: Date | null;
+  providerKind: "personal" | "cloud";
+  messageIndex: number;
+}) {
+  const batchSize = getCampaignProviderBatchSize(input.providerKind);
+  const batchWindowMs = getCampaignProviderBatchWindowMs(input.providerKind);
+  const batchIndex = Math.floor(Math.max(0, input.messageIndex) / batchSize);
+  const baseAt = input.baseAt ?? new Date();
+
+  return new Date(baseAt.getTime() + batchIndex * batchWindowMs);
+}
+
+function getCampaignProviderBatchSize(providerKind: "personal" | "cloud") {
+  const fallback = providerKind === "cloud" ? 100 : 25;
+  const configured = Number.parseInt(
+    process.env[
+      providerKind === "cloud"
+        ? "WHATSAPP_CLOUD_BROADCAST_BATCH_SIZE"
+        : "WHATSAPP_PERSONAL_BROADCAST_BATCH_SIZE"
+    ] ?? `${fallback}`,
+    10
+  );
+
+  return Number.isFinite(configured) && configured > 0 ? configured : fallback;
+}
+
+function getCampaignProviderBatchWindowMs(providerKind: "personal" | "cloud") {
+  const fallback = providerKind === "cloud" ? 60_000 : 90_000;
+  const configured = Number.parseInt(
+    process.env[
+      providerKind === "cloud"
+        ? "WHATSAPP_CLOUD_BROADCAST_BATCH_WINDOW_MS"
+        : "WHATSAPP_PERSONAL_BROADCAST_BATCH_WINDOW_MS"
+    ] ?? `${fallback}`,
+    10
+  );
+
+  return Number.isFinite(configured) && configured > 0 ? configured : fallback;
 }
 
 function mapCampaignDraftRecord(

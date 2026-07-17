@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { OutboundMessageJobStatus } from "@prisma/client";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
+import { OutboundMessageJobStatus } from "@/lib/db-types";
 import { supportsCanceledOutboundMessageJobs } from "@/lib/outbound-message-job-status";
 import { prisma } from "@/lib/prisma";
 
@@ -58,8 +58,9 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       return NextResponse.json({ error: "No outbound jobs were found for this campaign run." }, { status: 404 });
     }
 
+    type CampaignRunJob = (typeof jobs)[number];
     const actionableJobs = jobs.filter(
-      (job) =>
+      (job: CampaignRunJob) =>
         !job.message.providerMessageId &&
         job.status !== OutboundMessageJobStatus.RUNNING &&
         (!(body.action === "cancel") || job.status !== OutboundMessageJobStatus.CANCELED)
@@ -73,7 +74,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
       const result = await prisma.outboundMessageJob.updateMany({
         where: {
           id: {
-            in: actionableJobs.map((job) => job.id)
+            in: actionableJobs.map((job: CampaignRunJob) => job.id)
           }
         },
         data: {
@@ -91,7 +92,7 @@ export async function PATCH(request: NextRequest, context: RouteContext) {
     const result = await prisma.outboundMessageJob.updateMany({
       where: {
         id: {
-          in: actionableJobs.map((job) => job.id)
+          in: actionableJobs.map((job: CampaignRunJob) => job.id)
         }
       },
       data: {

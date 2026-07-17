@@ -1,5 +1,11 @@
 import { AgentRole, AgentStatus } from "@/lib/db-types";
 import {
+  getBillingDetailsErrorMessage,
+  normalizeBillingDetails,
+  type BillingDetails,
+  validateBillingDetails
+} from "@/lib/billing-details";
+import {
   createAccountRecord,
   createPendingWorkspaceCheckout,
   createWorkspaceAndManager,
@@ -30,15 +36,22 @@ import {
   resolveCheckoutDiscount
 } from "@/lib/platform-discounts";
 import { normalizeWorkspacePlan } from "@/lib/workspace-plan";
+import {
+  createPaidInvoice,
+  finalizeInvoiceDocumentAndEmail,
+  saveBillingProfile,
+  sendInvoiceIssuedEmail
+} from "@/lib/billing-management";
+import { normalizePackageBillingPeriod, PACKAGE_BILLING_PERIOD } from "@/lib/package-pricing";
 
 function getNextBillingAt(billingPeriod: string | null) {
-  if (billingPeriod === "YEARLY") {
+  if (billingPeriod === PACKAGE_BILLING_PERIOD.YEARLY) {
     const next = new Date();
     next.setUTCFullYear(next.getUTCFullYear() + 1);
     return next;
   }
 
-  if (billingPeriod === "MONTHLY") {
+  if (billingPeriod === PACKAGE_BILLING_PERIOD.MONTHLY) {
     const next = new Date();
     next.setUTCMonth(next.getUTCMonth() + 1);
     return next;
@@ -93,6 +106,8 @@ export async function beginWorkspaceCheckout(input: {
   workspaceName: string;
   password: string;
   plan: string;
+  billingPeriod: string;
+  billingDetails: BillingDetails;
   remember: boolean;
   discountCode?: string | null;
 }) {
@@ -101,16 +116,22 @@ export async function beginWorkspaceCheckout(input: {
   const workspaceName = input.workspaceName.trim();
   const password = input.password;
   const plan = normalizeWorkspacePlan(input.plan);
+  const billingPeriod = normalizePackageBillingPeriod(input.billingPeriod);
+  const billingDetails = normalizeBillingDetails(input.billingDetails);
 
   if (!name || !email || !workspaceName || !password) {
     throw new Error("Name, email, workspace name, and password are required.");
+  }
+  const billingValidationError = getBillingDetailsErrorMessage(validateBillingDetails(billingDetails));
+  if (billingValidationError) {
+    throw new Error(billingValidationError);
   }
 
   if (password.length < 8) {
     throw new Error("Password must be at least 8 characters.");
   }
 
-  const packageSnapshot = await getPackageBillingSnapshot(normalizeWorkspacePackageKey(plan));
+  const packageSnapshot = await getPackageBillingSnapshot(normalizeWorkspacePackageKey(plan), billingPeriod);
 
   if (packageSnapshot.priceAmount === null) {
     throw new Error("This package requires manual billing support.");
@@ -135,10 +156,20 @@ export async function beginWorkspaceCheckout(input: {
   const passwordHash = existingAccount?.passwordHash ?? hashPassword(password);
   const pendingCheckout = await createPendingWorkspaceCheckout({
     plan,
+    billingPeriod,
     name,
     email,
     workspaceName,
     passwordHash,
+    billingName: billingDetails.billingName,
+    billingPhoneNumber: billingDetails.billingPhoneNumber,
+    billingAddressLine1: billingDetails.billingAddressLine1,
+    billingAddressLine2: billingDetails.billingAddressLine2,
+    billingCity: billingDetails.billingCity,
+    billingState: billingDetails.billingState,
+    billingPostcode: billingDetails.billingPostcode,
+    billingCountry: billingDetails.billingCountry,
+    billingTaxId: billingDetails.billingTaxId,
     remember: input.remember,
     provider: "billplz",
     discountCode: discount.code,
@@ -152,7 +183,7 @@ export async function beginWorkspaceCheckout(input: {
     name,
     email,
     amount: discount.finalAmount,
-    description: `${packageSnapshot.name} workspace package for ${workspaceName}`,
+    description: `${packageSnapshot.name} ${billingPeriod === PACKAGE_BILLING_PERIOD.YEARLY ? "yearly" : "monthly"} workspace package for ${workspaceName}`,
     callbackUrl: `${appBaseUrl}/api/billing/billplz/callback`,
     redirectUrl: `${appBaseUrl}/api/public/checkout/complete`
   });
@@ -186,7 +217,8 @@ async function completePendingCheckout(providerReference: string, paidAt: Date |
       return {
         pendingCheckout,
         createdAgentId: null as string | null,
-        verificationRequired: false
+        verificationRequired: false,
+        invoiceId: null as string | null
       };
     }
 
@@ -198,7 +230,10 @@ async function completePendingCheckout(providerReference: string, paidAt: Date |
         passwordHash: pendingCheckout.passwordHash
       }));
 
-    const packageSnapshot = await getPackageBillingSnapshot(normalizeWorkspacePackageKey(pendingCheckout.plan));
+    const packageSnapshot = await getPackageBillingSnapshot(
+      normalizeWorkspacePackageKey(pendingCheckout.plan),
+      pendingCheckout.billingPeriod ?? PACKAGE_BILLING_PERIOD.MONTHLY
+    );
     const checkoutAmountSnapshot = getCheckoutAmountSnapshot({
       originalAmount: pendingCheckout.originalAmount,
       finalAmount: pendingCheckout.finalAmount
@@ -216,9 +251,11 @@ async function completePendingCheckout(providerReference: string, paidAt: Date |
       packageCode: packageSnapshot.code,
       packageName: packageSnapshot.name,
       packageDescription: packageSnapshot.description,
-      packagePriceAmount: checkoutPriceAmount,
+      packagePriceAmount: packageSnapshot.monthlyPriceAmount,
       packageCurrency: pendingCheckout.currency ?? packageSnapshot.currency,
-      packageBillingPeriod: packageSnapshot.billingPeriod,
+      packageBillingPeriod: packageSnapshot.packageBillingPeriod,
+      subscriptionPriceAmount: checkoutPriceAmount,
+      subscriptionBillingPeriod: packageSnapshot.billingPeriod,
       subscriptionStatus: SubscriptionStatus.ACTIVE,
       agentName: pendingCheckout.name,
       agentEmail: pendingCheckout.email,
@@ -228,14 +265,54 @@ async function completePendingCheckout(providerReference: string, paidAt: Date |
       executor: client
     });
 
+    await saveBillingProfile({
+      workspaceId: result.workspace.id,
+      billingName: pendingCheckout.billingName,
+      billingEmail: pendingCheckout.email,
+      billingPhoneNumber: pendingCheckout.billingPhoneNumber,
+      billingAddressLine1: pendingCheckout.billingAddressLine1,
+      billingAddressLine2: pendingCheckout.billingAddressLine2,
+      billingCity: pendingCheckout.billingCity,
+      billingState: pendingCheckout.billingState,
+      billingPostcode: pendingCheckout.billingPostcode,
+      billingCountry: pendingCheckout.billingCountry,
+      billingTaxId: pendingCheckout.billingTaxId,
+      executor: client
+    });
+
+    const invoice =
+      result.subscription && paidAmount !== null
+        ? await createPaidInvoice({
+            workspaceId: result.workspace.id,
+            subscriptionId: result.subscription.id,
+            packageId: result.subscription.packageId,
+            customerName: pendingCheckout.name,
+            customerEmail: pendingCheckout.email,
+            packageName: packageSnapshot.name,
+            amount: paidAmount,
+            currency: pendingCheckout.currency ?? packageSnapshot.currency ?? "MYR",
+            transactionType: "NEW_SUBSCRIPTION",
+            subscriptionStartDate: result.subscription.startedAt,
+            subscriptionEndDate: nextBillingAt,
+            paymentDate: paidAt ?? new Date(),
+            providerReference,
+            executor: client
+          })
+        : null;
+
     if (result.subscription && paidAmount !== null) {
       await recordWorkspacePayment({
         workspaceId: result.workspace.id,
         subscriptionId: result.subscription.id,
+        invoiceId: invoice?.id ?? null,
+        transactionId: providerReference,
         amount: paidAmount,
         currency: pendingCheckout.currency ?? packageSnapshot.currency ?? "MYR",
         provider: "billplz",
         providerReference,
+        paymentMethod: "Billplz",
+        receiptNumber: invoice?.receiptNumber ?? null,
+        receiptIssuedAt: invoice?.receiptIssuedAt ?? null,
         status: PaymentStatus.PAID,
         paidAt,
         executor: client
@@ -268,12 +345,21 @@ async function completePendingCheckout(providerReference: string, paidAt: Date |
     return {
       pendingCheckout: updatedCheckout,
       createdAgentId: result.agent.id,
-      verificationRequired: !existingAccount?.emailVerifiedAt
+      verificationRequired: !existingAccount?.emailVerifiedAt,
+      invoiceId: invoice?.id ?? null
     };
   });
 
   if (completion.verificationRequired && completion.createdAgentId) {
     await createEmailVerification(completion.createdAgentId);
+  }
+  if (completion.invoiceId) {
+    await sendInvoiceIssuedEmail(completion.invoiceId).catch((error) => {
+      console.error("[billing] unable to send checkout invoice email", error);
+    });
+    await finalizeInvoiceDocumentAndEmail(completion.invoiceId).catch((error) => {
+      console.error("[billing] unable to finalize checkout invoice", error);
+    });
   }
 
   return completion.pendingCheckout;

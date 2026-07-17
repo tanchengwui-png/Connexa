@@ -2,20 +2,26 @@
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { ScheduleSendDialog } from "@/components/inbox/schedule-send-dialog";
 import { addMalaysiaDays, getMalaysiaDateKey } from "@/lib/malaysia-time";
 import type { ScheduledMessagesFilter } from "@/lib/scheduled-messages";
 
 type ScheduledMessagesBoardProps = {
   conversationId?: string | null;
+  channelId?: string | null;
   filter: ScheduledMessagesFilter;
   rows: Array<{
     id: string;
+    channelId: string | null;
+    channelLabel: string | null;
     conversationId: string;
     contactName: string;
     phone: string;
     bodyPreview: string;
+    attachmentMimeType: string | null;
     attachmentName: string | null;
+    attachmentUrl: string | null;
     scheduledFor: string;
     scheduledForIso: string;
     createdAt: string;
@@ -46,6 +52,7 @@ const FILTER_OPTIONS: Array<{ key: ScheduledMessagesFilter; label: string }> = [
 
 export function ScheduledMessagesBoard({
   conversationId = null,
+  channelId = null,
   filter,
   rows,
   summary
@@ -60,15 +67,7 @@ export function ScheduledMessagesBoard({
   const actionableRows = rows.filter(
     (row) => row.statusKey === "scheduled" || row.statusKey === "due" || row.statusKey === "failed"
   );
-  const attentionRows = rows.filter(
-    (row) => row.statusKey === "due" || row.statusKey === "failed" || row.statusKey === "processing"
-  );
-  const historyRows = rows.filter(
-    (row) => row.statusKey === "scheduled" || row.statusKey === "sent" || row.statusKey === "canceled"
-  );
   const allActionableSelected = actionableRows.length > 0 && actionableRows.every((row) => selectedIds.includes(row.id));
-  const needsAttentionCount = summary.due + summary.failed;
-  const completedCount = summary.sent + summary.canceled;
 
   const runAction = (jobId: string, payload: { action: "cancel" | "reschedule" | "send-now"; scheduledFor?: string }) => {
     setErrorById((current) => ({ ...current, [jobId]: "" }));
@@ -130,93 +129,61 @@ export function ScheduledMessagesBoard({
 
   return (
     <>
-      <section className="settings-dark-hero scheduled-messages-hero">
-        <div className="settings-dark-copy">
-          <span className="badge connexa-public-badge">Scheduled messages</span>
-          <h1>Scheduled queue should feel operational at a glance.</h1>
-          <p>
-            Review what needs action now, what is waiting in the queue, and what already finished without digging
-            through live conversations.
-          </p>
-        </div>
+      <section className="auth-page-stack">
+        <section className="auth-page-hero auth-page-hero-compact scheduled-messages-hero">
+          <div className="auth-page-hero-copy">
+            <span className="auth-page-kicker">Outbound queue</span>
+            <h2>Scheduled Messages</h2>
+            <p>
+              {conversationId
+                ? "Manage outbound jobs for this conversation with clear queue state, timing, and recovery actions."
+                : "Review, bulk-manage, and reschedule queued outbound jobs from one controlled queue."}
+            </p>
+            <div className="auth-page-hero-metrics">
+              <span className="auth-page-hero-stat">
+                <strong>{summary.total}</strong>
+                <small>total jobs</small>
+              </span>
+              <span className="auth-page-hero-stat">
+                <strong>{summary.due}</strong>
+                <small>due now</small>
+              </span>
+              <span className="auth-page-hero-stat">
+                <strong>{summary.failed}</strong>
+                <small>failed</small>
+              </span>
+              <span className="auth-page-hero-panel scheduled-queue-status-card">
+                <span className="auth-page-hero-panel-label">Queue status</span>
+                <strong>{selectedIds.length ? `${selectedIds.length} selected for bulk action` : `${actionableRows.length} actionable jobs`}</strong>
+                <p>
+                  Filter by scheduled, due, failed, canceled, or sent jobs, then act on the queue below.
+                </p>
+              </span>
+            </div>
+          </div>
+        </section>
 
-        <div className="scheduled-hero-strip">
-          <div className="settings-dark-status-card scheduled-hero-card waiting">
-            <span>Waiting</span>
-            <strong>{summary.scheduled}</strong>
-            <p>Jobs queued for future send times.</p>
-          </div>
-          <div className="settings-dark-status-card scheduled-hero-card attention">
-            <span>Needs attention</span>
-            <strong>{needsAttentionCount}</strong>
-            <p>Due now or failed jobs that need an operator.</p>
-          </div>
-          <div className="settings-dark-status-card scheduled-hero-card completed">
-            <span>Completed</span>
-            <strong>{completedCount}</strong>
-            <p>Sent and canceled jobs preserved in queue history.</p>
-          </div>
-        </div>
-      </section>
-
-      <section className="scheduled-overview-grid">
-        <article className="content-card scheduled-overview-card">
-          <div className="scheduled-overview-head">
-            <strong>Queue health</strong>
-            <span>{summary.total} visible jobs</span>
-          </div>
-          <div className="scheduled-overview-stats">
-            <div className="scheduled-overview-stat">
-              <span>Due now</span>
-              <strong>{summary.due}</strong>
-            </div>
-            <div className="scheduled-overview-stat">
-              <span>Failed</span>
-              <strong>{summary.failed}</strong>
-            </div>
-            <div className="scheduled-overview-stat">
-              <span>Processing</span>
-              <strong>{rows.filter((row) => row.statusKey === "processing").length}</strong>
-            </div>
-          </div>
-        </article>
-        <article className="content-card scheduled-overview-card">
-          <div className="scheduled-overview-head">
-            <strong>Queue mix</strong>
-            <span>What is waiting vs completed</span>
-          </div>
-          <div className="scheduled-overview-stats">
-            <div className="scheduled-overview-stat">
-              <span>Scheduled</span>
-              <strong>{summary.scheduled}</strong>
-            </div>
-            <div className="scheduled-overview-stat">
-              <span>Sent</span>
-              <strong>{summary.sent}</strong>
-            </div>
-            <div className="scheduled-overview-stat">
-              <span>Canceled</span>
-              <strong>{summary.canceled}</strong>
-            </div>
-          </div>
-        </article>
-      </section>
-
-      <section className="content-card scheduled-messages-shell">
+        <section className="content-card scheduled-messages-shell">
         <div className="card-header scheduled-messages-head">
           <div>
-            <h3 className="card-title">Queue</h3>
+            <h3 className="card-title">Queue view</h3>
             <p className="muted">
               {conversationId
                 ? "Viewing scheduled outbound activity for one conversation."
-                : "Switch views based on when outbound messages should fire and whether they need action."}
+                : "Review and manage queued outbound jobs from one clean list."}
             </p>
+          </div>
+          <div className="scheduled-inline-stats">
+            <span>{summary.total} total</span>
+            <span>{summary.due} due</span>
+            <span>{summary.failed} failed</span>
+            <span>{summary.sent} sent</span>
           </div>
           <div className="scheduled-messages-filters">
             {FILTER_OPTIONS.map((option) => (
               <a
                 className={`scheduled-filter-chip${filter === option.key ? " active" : ""}`}
-                href={buildScheduledMessagesHref(option.key, conversationId)}
+                href={buildScheduledMessagesHref(option.key, conversationId, channelId)}
                 key={option.key}
               >
                 <span>{option.label}</span>
@@ -267,10 +234,10 @@ export function ScheduledMessagesBoard({
         {rows.length ? (
           <div className="scheduled-queue-sections">
             {renderQueueSection({
-              title: "Needs attention",
-              description: "Due now, failed, or actively processing jobs that deserve the first look.",
-              rows: filter === "all" ? attentionRows : rows,
-              emptyText: getAttentionEmptyText(filter),
+              title: getQueueTitle(filter),
+              description: getQueueDescription(filter, conversationId),
+              rows,
+              emptyText: getEmptyTitle(filter),
               selectedIds,
               toggleSelected,
               isPending,
@@ -278,20 +245,6 @@ export function ScheduledMessagesBoard({
               runAction,
               setRescheduleTarget
             })}
-            {filter === "all"
-              ? renderQueueSection({
-                  title: "Queue history",
-                  description: "Scheduled sends and completed jobs that do not need immediate intervention.",
-                  rows: historyRows,
-                  emptyText: "No waiting or historical jobs in this view.",
-                  selectedIds,
-                  toggleSelected,
-                  isPending,
-                  errorById,
-                  runAction,
-                  setRescheduleTarget
-                })
-              : null}
           </div>
         ) : (
           <div className="scheduled-messages-empty">
@@ -299,6 +252,7 @@ export function ScheduledMessagesBoard({
             <p className="muted">{getEmptyDescription(filter, conversationId)}</p>
           </div>
         )}
+        </section>
       </section>
 
       <ScheduleSendDialog
@@ -321,7 +275,11 @@ export function ScheduledMessagesBoard({
   );
 }
 
-function buildScheduledMessagesHref(filter: ScheduledMessagesFilter, conversationId?: string | null) {
+function buildScheduledMessagesHref(
+  filter: ScheduledMessagesFilter,
+  conversationId?: string | null,
+  channelId?: string | null
+) {
   const params = new URLSearchParams();
 
   if (filter !== "scheduled") {
@@ -330,6 +288,9 @@ function buildScheduledMessagesHref(filter: ScheduledMessagesFilter, conversatio
 
   if (conversationId) {
     params.set("conversationId", conversationId);
+  }
+  if (channelId) {
+    params.set("channelId", channelId);
   }
 
   const query = params.toString();
@@ -394,12 +355,42 @@ function getEmptyDescription(filter: ScheduledMessagesFilter, conversationId?: s
   }
 }
 
-function getAttentionEmptyText(filter: ScheduledMessagesFilter) {
-  if (filter === "all") {
-    return "Nothing needs attention right now.";
+function getQueueTitle(filter: ScheduledMessagesFilter) {
+  switch (filter) {
+    case "due":
+      return "Due Now";
+    case "failed":
+      return "Failed Jobs";
+    case "canceled":
+      return "Canceled Jobs";
+    case "sent":
+      return "Sent Jobs";
+    case "all":
+      return "All Jobs";
+    default:
+      return "Scheduled Jobs";
+  }
+}
+
+function getQueueDescription(filter: ScheduledMessagesFilter, conversationId?: string | null) {
+  if (conversationId) {
+    return "Outbound jobs for the selected conversation, grouped by scheduled time.";
   }
 
-  return "No jobs in this view need immediate action.";
+  switch (filter) {
+    case "due":
+      return "Jobs that should be sent now or need immediate operator review.";
+    case "failed":
+      return "Outbound jobs that need a retry or manual intervention.";
+    case "canceled":
+      return "Canceled jobs preserved for operational history.";
+    case "sent":
+      return "Completed outbound sends grouped by their scheduled time.";
+    case "all":
+      return "The full outbound queue in one grouped list.";
+    default:
+      return "Future outbound jobs waiting in the queue.";
+  }
 }
 
 function groupRowsByTimeBucket(rows: ScheduledMessagesBoardProps["rows"]) {
@@ -500,7 +491,7 @@ function renderQueueSection(input: {
 
   return (
     <section className="scheduled-queue-section">
-      <div className="scheduled-queue-section-head">
+      <div className={`scheduled-queue-section-head ${input.title === "All Jobs" ? "is-all-jobs" : ""}`}>
         <div>
           <h4>{input.title}</h4>
           <p>{input.description}</p>
@@ -509,7 +500,7 @@ function renderQueueSection(input: {
       </div>
       <div className="scheduled-bucket-list">
         {groupRowsByTimeBucket(input.rows).map((bucket) => (
-          <section className="scheduled-time-bucket" key={bucket.key}>
+          <section className={`scheduled-time-bucket ${bucket.key === "overdue" ? "is-overdue" : ""}`} key={bucket.key}>
             <div className="scheduled-time-bucket-head">
               <div>
                 <h5>{bucket.label}</h5>
@@ -540,6 +531,7 @@ function renderQueueSection(input: {
                           <div className="scheduled-message-identity-copy">
                             <strong>{row.contactName}</strong>
                             <span>{row.phone}</span>
+                            {row.channelLabel ? <span>{row.channelLabel}</span> : null}
                           </div>
                         </div>
                         <span className={`scheduled-status-pill ${row.statusKey}`}>{row.status}</span>
@@ -547,11 +539,23 @@ function renderQueueSection(input: {
 
                       <p className="scheduled-message-preview">{row.bodyPreview}</p>
 
+                      {row.attachmentUrl ? (
+                        <div className="scheduled-message-attachment">
+                          <AttachmentPreview
+                            className="attachment-preview-compact"
+                            fileName={row.attachmentName}
+                            mimeType={row.attachmentMimeType}
+                            openLabel="Open attachment"
+                            url={row.attachmentUrl}
+                          />
+                        </div>
+                      ) : null}
+
                       <div className="scheduled-message-meta">
                         <span>Scheduled for {row.scheduledFor}</span>
                         <span>Queued {row.createdAt}</span>
                         <span>Created by {row.createdBy}</span>
-                        {row.attachmentName ? <span>Attachment {row.attachmentName}</span> : null}
+                        {row.attachmentName && !row.attachmentUrl ? <span>Attachment {row.attachmentName}</span> : null}
                       </div>
 
                       {row.lastError ? <div className="scheduled-message-error">{row.lastError}</div> : null}

@@ -1,7 +1,7 @@
-import { AutomationMatchType, AutomationTriggerType } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
 import { deleteAutomationRule, updateAutomationRule } from "@/lib/automation-rules";
+import { AutomationMatchType, AutomationTriggerType } from "@/lib/db-types";
 
 type RouteContext = {
   params: Promise<{

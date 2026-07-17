@@ -16,7 +16,17 @@ export default async function PlatformDiscountsPage() {
         items={getPlatformAdminNavItems()}
         title="Discount codes should be easy to issue, inspect, and retire without touching package pricing."
       >
-        <PlatformDiscountsManager initialDiscounts={discounts} />
+        <div className="platform-page-stack">
+          <div className="platform-admin-toolbar">
+            <div className="settings-dark-status-card platform-page-summary-card">
+              <span>Current section</span>
+              <strong>Discounts</strong>
+              <p>Generate checkout codes, control expiry, and keep redemption history visible from one owner screen.</p>
+            </div>
+          </div>
+
+          <PlatformDiscountsManager initialDiscounts={discounts} />
+        </div>
       </PlatformAdminShell>
     </main>
   );

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { OutboundMessageJobStatus } from "@prisma/client";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
+import { OutboundMessageJobStatus } from "@/lib/db-types";
 import { parseMalaysiaDateTimeLocalInput } from "@/lib/malaysia-time";
 import { supportsCanceledOutboundMessageJobs } from "@/lib/outbound-message-job-status";
 import { prisma } from "@/lib/prisma";

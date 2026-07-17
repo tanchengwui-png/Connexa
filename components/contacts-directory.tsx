@@ -1,7 +1,8 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { useToast } from "@/components/toast-provider";
 import { parseContactPasteBlock } from "@/lib/contact-paste-parser";
 import { validateContactAddress } from "@/lib/contact-address";
 
@@ -29,6 +30,8 @@ const EMPTY_CREATE_FORM = {
   tags: "",
   phoneNumber: ""
 };
+
+const CONTACT_IMPORT_ACCEPT = ".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 type ContactSummary = {
   id: string;
@@ -81,8 +84,22 @@ type ContactsDirectoryProps = {
   search: string;
 };
 
+type ContactImportSummary = {
+  totalRows: number;
+  readyRows: number;
+  importedRows: number;
+  skippedRows: number;
+  failedRows: number;
+  duplicateExistingRows: number;
+  duplicateFileRows: number;
+  duplicateBehavior: "skip" | "update";
+};
+
 export function ContactsDirectory({ agents, contacts, pagination, search }: ContactsDirectoryProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const { success: showSuccessToast, error: showErrorToast } = useToast();
+  const importFileInputRef = useRef<HTMLInputElement | null>(null);
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -97,6 +114,18 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
   const [countryCode, setCountryCode] = useState(DEFAULT_COUNTRY_CODE);
   const [ownerId, setOwnerId] = useState("");
   const [teammateIds, setTeammateIds] = useState<string[]>([]);
+  const [isExporting, setIsExporting] = useState(false);
+  const [isDownloadingTemplate, setIsDownloadingTemplate] = useState(false);
+  const [isImportDialogOpen, setIsImportDialogOpen] = useState(false);
+  const [isImportDragging, setIsImportDragging] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [duplicateBehavior, setDuplicateBehavior] = useState<"skip" | "update">("skip");
+  const [importSummary, setImportSummary] = useState<ContactImportSummary | null>(null);
+  const [previewedFileSignature, setPreviewedFileSignature] = useState("");
+  const [importStage, setImportStage] = useState<"idle" | "validating" | "ready" | "importing">("idle");
+  const [importProgress, setImportProgress] = useState(0);
+  const [isImportSubmitting, setIsImportSubmitting] = useState(false);
+  const persistentFilterParams = buildPersistentContactFilterParams(searchParams);
 
   useEffect(() => {
     setContactList(contacts);
@@ -110,6 +139,206 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
     setCountryCode(DEFAULT_COUNTRY_CODE);
     setOwnerId("");
     setTeammateIds([]);
+  };
+
+  const closeImportDialog = (force = false) => {
+    if (isImportSubmitting && !force) {
+      return;
+    }
+
+    setIsImportDialogOpen(false);
+    setIsImportDragging(false);
+    setImportFile(null);
+    setDuplicateBehavior("skip");
+    setImportSummary(null);
+    setPreviewedFileSignature("");
+    setImportStage("idle");
+    setImportProgress(0);
+    if (importFileInputRef.current) {
+      importFileInputRef.current.value = "";
+    }
+  };
+
+  const applyImportFile = (file: File | null) => {
+    setImportFile(file);
+    setImportSummary(null);
+    setPreviewedFileSignature("");
+    setImportStage("idle");
+    setImportProgress(0);
+    setError(null);
+  };
+
+  const handleOpenImportDialog = () => {
+    setError(null);
+    setIsImportDialogOpen(true);
+  };
+
+  const handleExportContacts = async () => {
+    if (isExporting) {
+      return;
+    }
+
+    setError(null);
+    setIsExporting(true);
+
+    try {
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      params.delete("page");
+      params.delete("pageSize");
+
+      const response = await fetch(`/api/contacts/export${params.toString() ? `?${params.toString()}` : ""}`, {
+        method: "GET"
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Unable to export contacts.");
+      }
+
+      const blob = await response.blob();
+      const contentDisposition = response.headers.get("content-disposition") ?? "";
+      const filenameMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+      const filename = filenameMatch?.[1] ?? "contacts_export.xlsx";
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Unable to export contacts.");
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const handleDownloadTemplate = async () => {
+    if (isDownloadingTemplate) {
+      return;
+    }
+
+    setError(null);
+    setIsDownloadingTemplate(true);
+
+    try {
+      const response = await fetch("/api/contacts/import/template", {
+        method: "GET"
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(payload?.error ?? "Unable to download the import template.");
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = "contact_import_template.xlsx";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+    } catch (caughtError) {
+      const message =
+        caughtError instanceof Error ? caughtError.message : "Unable to download the import template.";
+      setError(message);
+      showErrorToast("Template download failed", message);
+    } finally {
+      setIsDownloadingTemplate(false);
+    }
+  };
+
+  const handleValidateImport = async () => {
+    if (!importFile || isImportSubmitting) {
+      return;
+    }
+
+    const fileSignature = getImportFileSignature(importFile);
+    if (fileSignature === previewedFileSignature && importSummary) {
+      return;
+    }
+
+    setError(null);
+    setIsImportSubmitting(true);
+    setImportStage("validating");
+    setImportProgress(6);
+
+    try {
+      const payload = (await sendContactImportRequest({
+        file: importFile,
+        mode: "preview",
+        duplicateBehavior,
+        onProgress: (ratio) => {
+          setImportProgress(Math.min(55, Math.max(8, Math.round(ratio * 55))));
+        }
+      })) as { summary?: ContactImportSummary; error?: string };
+
+      if (!payload.summary) {
+        throw new Error(payload.error ?? "Unable to validate the contact import template.");
+      }
+
+      setImportSummary(payload.summary);
+      setPreviewedFileSignature(fileSignature);
+      setImportStage("ready");
+      setImportProgress(100);
+    } catch (caughtError) {
+      const message =
+        caughtError instanceof Error ? caughtError.message : "Unable to validate the contact import template.";
+      setImportSummary(null);
+      setPreviewedFileSignature("");
+      setImportStage("idle");
+      setImportProgress(0);
+      setError(message);
+      showErrorToast(message.includes("empty Name or Phone") ? message : "Import failed", message);
+    } finally {
+      setIsImportSubmitting(false);
+    }
+  };
+
+  const handleImportContacts = async () => {
+    if (!importFile || isImportSubmitting) {
+      return;
+    }
+
+    setError(null);
+    setIsImportSubmitting(true);
+    setImportStage("importing");
+    setImportProgress(10);
+
+    try {
+      const payload = (await sendContactImportRequest({
+        file: importFile,
+        mode: "import",
+        duplicateBehavior,
+        onProgress: (ratio) => {
+          setImportProgress(Math.min(85, Math.max(12, Math.round(ratio * 85))));
+        }
+      })) as { summary?: ContactImportSummary; error?: string };
+
+      if (!payload.summary) {
+        throw new Error(payload.error ?? "Unable to import contacts.");
+      }
+
+      setImportSummary(payload.summary);
+      setImportProgress(100);
+      showSuccessToast(
+        "Contacts imported successfully",
+        `Total ${payload.summary.totalRows} · Imported ${payload.summary.importedRows} · Skipped ${payload.summary.skippedRows} · Failed ${payload.summary.failedRows}`
+      );
+      closeImportDialog(true);
+      router.refresh();
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : "Unable to import contacts.";
+      setImportStage("ready");
+      setImportProgress(0);
+      setError(message);
+      showErrorToast(message.includes("empty Name or Phone") ? message : "Import failed", message);
+    } finally {
+      setIsImportSubmitting(false);
+    }
   };
 
   const handleAutofillPastedContact = () => {
@@ -376,37 +605,101 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
     }));
   };
 
-  return (
-    <article className="table-card contacts-directory-card">
-      <div className="card-header">
-        <div>
-          <h3 className="card-title">Contact list</h3>
-          <p className="muted">Shared customer directory for support, follow-up, and sales handoff.</p>
-        </div>
-        <div className="contacts-directory-toolbar">
-          <span className="product-catalog-count">
-            Showing {pagination.pageCount} of {pagination.total}{" "}
-            {pagination.total === 1 ? "contact" : "contacts"}
-          </span>
-          <button
-            className="button button-primary"
-            onClick={() => {
-              setError(null);
-              setIsCreateDialogOpen(true);
-            }}
-            type="button"
-          >
-            Add contact
-          </button>
-        </div>
-      </div>
+  const hotLeadCount = contactList.filter((contact) => contact.isHotLead).length;
+  const assignedContactCount = contactList.filter((contact) => contact.ownerId).length;
+  const hasContacts = contactList.length > 0;
 
-      <form action="/contacts" className="search-form contacts-directory-search">
+  return (
+    <section className="contacts-directory-shell">
+      <section className="contacts-directory-hero">
+        <div className="contacts-directory-hero-copy">
+          <span className="contacts-directory-kicker">Customer directory</span>
+          <h2>Contacts</h2>
+          <p>Keep contact details, ownership, notes, and follow-up context in one clean operating view.</p>
+          <div className="contacts-directory-hero-metrics">
+            <span className="contacts-directory-hero-stat">
+              <strong>{pagination.total}</strong>
+              <small>{pagination.total === 1 ? "total contact" : "total contacts"}</small>
+            </span>
+            <span className="contacts-directory-hero-stat">
+              <strong>{hotLeadCount}</strong>
+              <small>{hotLeadCount === 1 ? "hot lead" : "hot leads"}</small>
+            </span>
+            <span className="contacts-directory-hero-stat">
+              <strong>{assignedContactCount}</strong>
+              <small>assigned owners</small>
+            </span>
+          </div>
+        </div>
+        <div className="contacts-directory-hero-side">
+          <div className="contacts-directory-hero-actions">
+            <button
+              className="button button-secondary"
+              disabled={isDownloadingTemplate || isImportSubmitting}
+              onClick={() => void handleDownloadTemplate()}
+              type="button"
+            >
+              {isDownloadingTemplate ? "Preparing..." : "Download Template"}
+            </button>
+            <button
+              className="button button-secondary"
+              disabled={isImportSubmitting}
+              onClick={handleOpenImportDialog}
+              type="button"
+            >
+              Import Contacts
+            </button>
+            <button
+              className="button button-primary"
+              onClick={() => {
+                setError(null);
+                setIsCreateDialogOpen(true);
+              }}
+              type="button"
+            >
+              Add contact
+            </button>
+          </div>
+          <div className="contacts-directory-hero-panel">
+            <span className="contacts-directory-hero-panel-label">Directory status</span>
+            <strong>
+              Showing {pagination.pageCount} of {pagination.total}{" "}
+              {pagination.total === 1 ? "contact" : "contacts"}
+            </strong>
+            <p>
+              {search.trim()
+                ? "Search filters are active. Clear them to return to the full directory."
+                : "Import spreadsheets, assign ownership, and keep internal notes close to each contact."}
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <article className="table-card contacts-directory-card">
+        <div className="card-header">
+          <div>
+            <h3 className="card-title">Directory view</h3>
+            <p className="muted">Search, edit, and route your customer records from one workspace.</p>
+          </div>
+          <div className="contacts-directory-toolbar">
+            <span className="product-catalog-count">
+              Page {pagination.page} of {pagination.totalPages}
+            </span>
+            <span className="product-catalog-count">
+              {pagination.pageSize} rows per page
+            </span>
+          </div>
+        </div>
+
+        <form action="/contacts" className="search-form contacts-directory-search">
+        {persistentFilterParams.map(([key, value]) => (
+          <input key={`search-${key}-${value}`} name={key} type="hidden" value={value} />
+        ))}
         <input
           className="search-input"
           defaultValue={search}
           name="q"
-          placeholder="Search contact, phone, or tag..."
+          placeholder="Search contact, phone, tag, or owner..."
           type="search"
         />
         <input name="page" type="hidden" value="1" />
@@ -414,13 +707,24 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
         <button className="button button-secondary" type="submit">
           Search
         </button>
-      </form>
+        <button
+          className="button button-secondary"
+          disabled={isExporting}
+          onClick={() => void handleExportContacts()}
+          type="button"
+        >
+          {isExporting ? "Exporting..." : "Export Contacts"}
+        </button>
+        </form>
 
-      <div className="contacts-directory-toolbar contacts-directory-toolbar-secondary">
-        <span className="table-subtle">
-          Page {pagination.page} of {pagination.totalPages}
-        </span>
-        <form action="/contacts" className="contacts-pagination-form">
+        <div className="contacts-directory-toolbar contacts-directory-toolbar-secondary">
+          <span className="table-subtle">
+            Showing up to {pagination.pageSize} contacts per page. Adjust the list density below.
+          </span>
+          <form action="/contacts" className="contacts-pagination-form">
+          {persistentFilterParams.map(([key, value]) => (
+            <input key={`paginate-${key}-${value}`} name={key} type="hidden" value={value} />
+          ))}
           <input name="q" type="hidden" value={search} />
           <input name="page" type="hidden" value="1" />
           <label className="contacts-page-size-label">
@@ -440,14 +744,14 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
           <button className="button button-secondary" type="submit">
             Apply
           </button>
-        </form>
-      </div>
+          </form>
+        </div>
 
-      {error ? <div className="form-error">{error}</div> : null}
+        {error ? <div className="form-error">{error}</div> : null}
 
-      <div className="timeline-list">
-            {contactList.length ? (
-          contactList.map((contact) => {
+        <div className="timeline-list">
+          {hasContacts ? (
+            contactList.map((contact) => {
             const initials = getContactInitials(contact.displayName);
 
             return (
@@ -521,8 +825,11 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                   </div>
 
                   <div className="contact-directory-badges">
-                    <span className="contact-owner-pill">
-                    <span className="contact-owner-pill-label">Owner</span>
+                    <span
+                      className={`contact-owner-pill${contact.ownerId ? " is-assigned" : " is-unassigned"}`}
+                      style={contact.ownerId ? getOwnerPillStyle(contact.ownerId) : undefined}
+                    >
+                      <span className="contact-owner-pill-label">Owner</span>
                       <strong>{contact.ownerName ?? "Unassigned"}</strong>
                     </span>
                     {contact.teammates.length ? (
@@ -532,7 +839,7 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                       </span>
                     ) : null}
                     {contact.tags.map((tag) => (
-                      <span className="lead-chip" key={tag}>
+                      <span className={getContactTagClassName(tag)} key={tag}>
                         {tag}
                       </span>
                     ))}
@@ -589,23 +896,50 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                 ) : null}
               </article>
             );
-          })
-        ) : (
-          <div className="lead-record-empty contact-directory-empty">
-            No contacts yet. Add one to start building your directory.
-          </div>
-        )}
-      </div>
+            })
+          ) : (
+            <div className="lead-record-empty contact-directory-empty">
+              <div className="contact-directory-empty-illustration" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+              </div>
+              <strong>No contacts yet</strong>
+              <p>Add your first contact manually or import a spreadsheet to start building the shared directory.</p>
+              <div className="contact-directory-empty-actions">
+                <button
+                  className="button button-primary"
+                  onClick={() => {
+                    setError(null);
+                    setIsCreateDialogOpen(true);
+                  }}
+                  type="button"
+                >
+                  Add contact
+                </button>
+                <button
+                  className="button button-secondary"
+                  disabled={isImportSubmitting}
+                  onClick={handleOpenImportDialog}
+                  type="button"
+                >
+                  Import Contacts
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
 
-      {pagination.totalPages > 1 ? (
-        <div className="contacts-pagination">
+        {pagination.totalPages > 1 ? (
+          <div className="contacts-pagination">
           <a
             aria-disabled={pagination.page <= 1}
             className={`button button-secondary${pagination.page <= 1 ? " is-disabled" : ""}`}
             href={buildContactsPageHref({
               search,
               page: Math.max(1, pagination.page - 1),
-              pageSize: pagination.pageSize
+              pageSize: pagination.pageSize,
+              filters: persistentFilterParams
             })}
           >
             Previous
@@ -617,7 +951,8 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                 href={buildContactsPageHref({
                   search,
                   page: pageNumber,
-                  pageSize: pagination.pageSize
+                  pageSize: pagination.pageSize,
+                  filters: persistentFilterParams
                 })}
                 key={pageNumber}
               >
@@ -631,13 +966,15 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
             href={buildContactsPageHref({
               search,
               page: Math.min(pagination.totalPages, pagination.page + 1),
-              pageSize: pagination.pageSize
+              pageSize: pagination.pageSize,
+              filters: persistentFilterParams
             })}
           >
             Next
           </a>
-        </div>
-      ) : null}
+          </div>
+        ) : null}
+      </article>
 
       {isCreateDialogOpen ? (
         <div className="inbox-dialog-backdrop" onClick={closeCreateDialog}>
@@ -862,6 +1199,201 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                 type="button"
               >
                 {isPending ? "Creating..." : "Create contact"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isImportDialogOpen ? (
+        <div className="inbox-dialog-backdrop" onClick={() => closeImportDialog()}>
+          <div
+            aria-modal="true"
+            className="inbox-dialog contact-dialog"
+            onClick={(event) => event.stopPropagation()}
+            role="dialog"
+          >
+            <div className="inbox-dialog-head">
+              <div>
+                <strong>Import contacts</strong>
+                <p>Upload the Excel template, validate the rows, then import everything into this workspace.</p>
+              </div>
+              <button className="inbox-dialog-close" onClick={() => closeImportDialog()} type="button">
+                ×
+              </button>
+            </div>
+
+            <div className="contact-import-progress-card">
+              <div className="contact-import-progress-copy">
+                <span>{describeImportStage(importStage)}</span>
+                <strong>
+                  {importSummary
+                    ? `Ready ${importSummary.readyRows} of ${importSummary.totalRows} rows`
+                    : importFile
+                      ? importFile.name
+                      : "Use the provided template to keep the column format correct."}
+                </strong>
+                <p>
+                  {importSummary
+                    ? `Imported ${importSummary.importedRows} · Skipped ${importSummary.skippedRows} · Failed ${importSummary.failedRows}`
+                    : "Required columns: Name and Phone. Tags can contain multiple comma-separated values."}
+                </p>
+              </div>
+              <div className="contact-import-progress-track" aria-hidden="true">
+                <div style={{ width: `${importProgress}%` }} />
+              </div>
+            </div>
+
+            <div className="contact-import-actions">
+              <button
+                className="button button-secondary"
+                disabled={isDownloadingTemplate || isImportSubmitting}
+                onClick={() => void handleDownloadTemplate()}
+                type="button"
+              >
+                {isDownloadingTemplate ? "Preparing..." : "Download Template"}
+              </button>
+              <label className="contact-import-duplicate-label">
+                <span>Duplicates</span>
+                <select
+                  className="inbox-dialog-input app-select"
+                  disabled={isImportSubmitting}
+                  onChange={(event) => {
+                    const nextBehavior = event.target.value === "update" ? "update" : "skip";
+                    setDuplicateBehavior(nextBehavior);
+                    setImportSummary(null);
+                    setPreviewedFileSignature("");
+                    setImportStage("idle");
+                    setImportProgress(0);
+                  }}
+                  value={duplicateBehavior}
+                >
+                  <option value="skip">Skip existing contacts</option>
+                  <option value="update">Update existing contacts</option>
+                </select>
+              </label>
+            </div>
+
+            <div
+              className={`contact-import-dropzone${isImportDragging ? " dragging" : ""}${importFile ? " filled" : ""}`}
+              onClick={() => importFileInputRef.current?.click()}
+              onDragEnter={(event) => {
+                event.preventDefault();
+                setIsImportDragging(true);
+              }}
+              onDragLeave={(event) => {
+                event.preventDefault();
+                if (event.currentTarget === event.target) {
+                  setIsImportDragging(false);
+                }
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsImportDragging(true);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+                setIsImportDragging(false);
+                applyImportFile(event.dataTransfer.files[0] ?? null);
+              }}
+              role="button"
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  importFileInputRef.current?.click();
+                }
+              }}
+            >
+              <input
+                accept={CONTACT_IMPORT_ACCEPT}
+                hidden
+                onChange={(event) => applyImportFile(event.target.files?.[0] ?? null)}
+                ref={importFileInputRef}
+                type="file"
+              />
+              <strong>{importFile ? importFile.name : "Drag and drop your completed template here"}</strong>
+              <p>
+                {importFile
+                  ? `${Math.max(1, Math.round(importFile.size / 1024))} KB selected`
+                  : "Only .xlsx files generated from the template are accepted."}
+              </p>
+            </div>
+
+            {importSummary ? (
+              <div className="contact-import-summary-grid">
+                <div className="settings-dark-status-card">
+                  <span>Total rows</span>
+                  <strong>{importSummary.totalRows}</strong>
+                </div>
+                <div className="settings-dark-status-card">
+                  <span>Ready</span>
+                  <strong>{importSummary.readyRows}</strong>
+                </div>
+                <div className="settings-dark-status-card">
+                  <span>Skipped</span>
+                  <strong>{importSummary.skippedRows}</strong>
+                </div>
+                <div className="settings-dark-status-card">
+                  <span>Failed</span>
+                  <strong>{importSummary.failedRows}</strong>
+                </div>
+              </div>
+            ) : null}
+
+            {importSummary ? (
+              <div className="contact-import-callout">
+                <strong>Import summary</strong>
+                <p>
+                  Total rows {importSummary.totalRows} · Imported {importSummary.importedRows} · Ready{" "}
+                  {importSummary.readyRows} · Skipped {importSummary.skippedRows} · Failed {importSummary.failedRows}
+                </p>
+                <p>
+                  Duplicate in workspace {importSummary.duplicateExistingRows} · Duplicate in file{" "}
+                  {importSummary.duplicateFileRows}
+                </p>
+              </div>
+            ) : null}
+
+            {error ? <div className="form-error contact-dialog-error">{error}</div> : null}
+
+            <div className="inbox-dialog-actions">
+              <button className="inbox-dialog-secondary" disabled={isImportSubmitting} onClick={() => closeImportDialog()} type="button">
+                Cancel
+              </button>
+              <button
+                className="inbox-dialog-secondary"
+                disabled={
+                  !importFile ||
+                  isImportSubmitting ||
+                  (previewedFileSignature === getImportFileSignature(importFile) && importSummary !== null)
+                }
+                onClick={() => void handleValidateImport()}
+                type="button"
+              >
+                {isImportSubmitting && importStage === "validating" ? (
+                  <span className="contact-import-button-copy">
+                    <span className="contact-import-spinner" aria-hidden="true" />
+                    Validating...
+                  </span>
+                ) : (
+                  "Validate template"
+                )}
+              </button>
+              <button
+                className="inbox-dialog-primary"
+                disabled={!importFile || !importSummary || isImportSubmitting || importSummary.readyRows < 1}
+                onClick={() => void handleImportContacts()}
+                type="button"
+              >
+                {isImportSubmitting && importStage === "importing" ? (
+                  <span className="contact-import-button-copy">
+                    <span className="contact-import-spinner" aria-hidden="true" />
+                    Importing...
+                  </span>
+                ) : (
+                  "Import contacts"
+                )}
               </button>
             </div>
           </div>
@@ -1172,8 +1704,32 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
           </div>
         </div>
       ) : null}
-    </article>
+    </section>
   );
+}
+
+function getOwnerPillStyle(ownerId: string) {
+  const hue = Array.from(ownerId).reduce((total, character) => total + character.charCodeAt(0), 0) % 360;
+
+  return {
+    borderColor: `hsla(${hue}, 85%, 72%, 0.32)`,
+    color: `hsl(${hue}, 92%, 88%)`,
+    background: `hsla(${hue}, 72%, 22%, 0.34)`
+  };
+}
+
+function getContactTagClassName(tag: string) {
+  const normalized = tag.trim().toLowerCase();
+
+  if (normalized === "whatsapp") {
+    return "lead-chip contact-tag-chip contact-tag-chip-whatsapp";
+  }
+
+  if (normalized === "hot lead" || normalized === "hot") {
+    return "lead-chip contact-tag-chip contact-tag-chip-hot";
+  }
+
+  return "lead-chip contact-tag-chip";
 }
 
 function SupportingTeammatePicker({
@@ -1375,14 +1931,114 @@ function formatContactAddress(contact: {
     .join(", ");
 }
 
-function buildContactsPageHref(input: { search: string; page: number; pageSize: number }) {
+function getImportFileSignature(file: File) {
+  return [file.name, file.size, file.lastModified].join(":");
+}
+
+function describeImportStage(stage: "idle" | "validating" | "ready" | "importing") {
+  if (stage === "validating") {
+    return "Validating template";
+  }
+
+  if (stage === "ready") {
+    return "Import summary";
+  }
+
+  if (stage === "importing") {
+    return "Importing contacts";
+  }
+
+  return "Upload template";
+}
+
+function sendContactImportRequest(input: {
+  file: File;
+  mode: "preview" | "import";
+  duplicateBehavior: "skip" | "update";
+  onProgress?: (ratio: number) => void;
+}) {
+  return new Promise<unknown>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/contacts/import");
+    xhr.responseType = "json";
+
+    xhr.upload.onprogress = (event) => {
+      if (!input.onProgress || !event.lengthComputable) {
+        return;
+      }
+
+      input.onProgress(event.total > 0 ? event.loaded / event.total : 0);
+    };
+
+    xhr.onerror = () => {
+      reject(new Error("Unable to upload the contact import file."));
+    };
+
+    xhr.onload = () => {
+      const payload =
+        typeof xhr.response === "object" && xhr.response !== null
+          ? xhr.response
+          : safeParseJson(xhr.responseText);
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload);
+        return;
+      }
+
+      const message =
+        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
+          ? payload.error
+          : "Unable to process the contact import file.";
+      reject(new Error(message));
+    };
+
+    const formData = new FormData();
+    formData.append("file", input.file);
+    formData.append("mode", input.mode);
+    formData.append("duplicateBehavior", input.duplicateBehavior);
+    xhr.send(formData);
+  });
+}
+
+function safeParseJson(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function buildContactsPageHref(input: { search: string; page: number; pageSize: number; filters?: Array<[string, string]> }) {
   const params = new URLSearchParams();
+  input.filters?.forEach(([key, value]) => {
+    params.append(key, value);
+  });
   if (input.search.trim()) {
     params.set("q", input.search.trim());
   }
   params.set("page", String(input.page));
   params.set("pageSize", String(input.pageSize));
   return `/contacts?${params.toString()}`;
+}
+
+function buildPersistentContactFilterParams(searchParams: ReturnType<typeof useSearchParams>) {
+  if (!searchParams) {
+    return [] as Array<[string, string]>;
+  }
+
+  const persistentKeys = new Set(["tags", "tag", "ownerId", "ownerIds", "assignee", "assigneeIds"]);
+  const values: Array<[string, string]> = [];
+
+  persistentKeys.forEach((key) => {
+    searchParams.getAll(key).forEach((value) => {
+      const normalized = value.trim();
+      if (normalized) {
+        values.push([key, normalized]);
+      }
+    });
+  });
+
+  return values;
 }
 
 function buildVisiblePageNumbers(currentPage: number, totalPages: number) {

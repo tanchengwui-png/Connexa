@@ -17,15 +17,21 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Unauthorized worker request." }, { status: 401 });
   }
 
-  const url = new URL(request.url);
-  const workspaceId = url.searchParams.get("workspaceId")?.trim() ?? "";
-  if (!workspaceId) {
-    return NextResponse.json({ error: "workspaceId is required." }, { status: 400 });
+  try {
+    const url = new URL(request.url);
+    const workspaceId = url.searchParams.get("workspaceId")?.trim() ?? "";
+    if (!workspaceId) {
+      return NextResponse.json({ error: "workspaceId is required." }, { status: 400 });
+    }
+
+    const rawLimit = Number(url.searchParams.get("limit") ?? "10");
+    const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 10;
+    const result = await processPendingOutboundMessageJobs(limit, workspaceId);
+
+    return NextResponse.json(result);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to process outbound message jobs.";
+    console.error("[outbound-worker] process request failed", error);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  const rawLimit = Number(url.searchParams.get("limit") ?? "10");
-  const limit = Number.isFinite(rawLimit) ? Math.min(50, Math.max(1, Math.floor(rawLimit))) : 10;
-  const result = await processPendingOutboundMessageJobs(limit, workspaceId);
-
-  return NextResponse.json(result);
 }

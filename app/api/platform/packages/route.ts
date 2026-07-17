@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiPlatformAdmin } from "@/lib/platform-auth/current-user";
 import { getPlatformPackageAdminView, savePlatformPackageSettings } from "@/lib/platform-packages";
+import { parseYearlyDiscountPercentage } from "@/lib/package-pricing";
 import { isPublicPackageKey, type PublicPackageKey } from "@/lib/public-packages";
 
 export async function GET() {
@@ -23,6 +24,8 @@ export async function PUT(request: NextRequest) {
         isVisible?: boolean;
         displayOrder?: number;
         priceAmount?: number | null;
+        yearlyDiscountPercentage?: number | string | null;
+        mediaLibraryStorageLimitBytes?: number | null;
         maxOutboundMessages?: number | null;
         maxActiveContacts?: number | null;
         maxActiveAutomations?: number | null;
@@ -35,6 +38,8 @@ export async function PUT(request: NextRequest) {
       isVisible: boolean;
       displayOrder: number;
       priceAmount: number | null;
+      yearlyDiscountPercentage: number;
+      mediaLibraryStorageLimitBytes: number | null;
       maxOutboundMessages: number | null;
       maxActiveContacts: number | null;
       maxActiveAutomations: number | null;
@@ -53,6 +58,8 @@ export async function PUT(request: NextRequest) {
         isVisible: Boolean(item.isVisible),
         displayOrder: Number(item.displayOrder ?? 0),
         priceAmount: parseOptionalPrice(item.priceAmount),
+        yearlyDiscountPercentage: parseYearlyDiscountPercentage(item.yearlyDiscountPercentage),
+        mediaLibraryStorageLimitBytes: parseOptionalLimit(item.mediaLibraryStorageLimitBytes),
         maxOutboundMessages: parseOptionalLimit(item.maxOutboundMessages),
         maxActiveContacts: parseOptionalLimit(item.maxActiveContacts),
         maxActiveAutomations: parseOptionalLimit(item.maxActiveAutomations),

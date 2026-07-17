@@ -1,8 +1,13 @@
 import { prisma } from "@/lib/prisma";
 import { getOutboundMessageJobStatus } from "@/lib/outbound-message-jobs";
+import { MessageDirection } from "@/lib/db-types";
 import type { WorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
+import { getWhatsAppChannelStatusById, getWorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
+import {
+  isWhatsAppConnectedRuntimeStatus,
+  isWhatsAppDisconnectedRuntimeStatus
+} from "@/lib/whatsapp-runtime-status";
 import { getWorkspaceWhatsAppRuntimeStatus } from "@/lib/whatsapp-runtime";
-import { MessageDirection } from "@prisma/client";
 
 const WHATSAPP_HISTORY_STUCK_MS = Math.max(
   60_000,
@@ -12,6 +17,11 @@ const WHATSAPP_HISTORY_STUCK_MS = Math.max(
 const WHATSAPP_CONNECTION_STALL_MS = Math.max(
   45_000,
   Number.parseInt(process.env.WHATSAPP_CONNECTION_STALL_MS ?? "90000", 10) || 90000
+);
+
+const WHATSAPP_PAGE_HEALTH_TIMEOUT_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.WHATSAPP_PAGE_HEALTH_TIMEOUT_MS ?? "3000", 10) || 3000
 );
 
 function getDateTimestamp(value: Date | string | null | undefined) {
@@ -30,17 +40,17 @@ function getDateTimestamp(value: Date | string | null | undefined) {
 export async function getWorkspaceWhatsAppHealth(input: {
   workspaceId: string;
   agentId: string;
+  channelId?: string | null;
 }) {
   const [runtime, conversationCount, messageCount, workerStatus, lastInboundMessage, lastOutboundMessage] = await Promise.all([
     getWorkspaceWhatsAppRuntimeStatus({
       workspaceId: input.workspaceId,
-      agentId: input.agentId
+      agentId: input.agentId,
+      channelId: input.channelId ?? null
     }).catch(async (error) => {
-      const fallbackChannel = await prisma.whatsAppChannel.findUnique({
-        where: {
-          workspaceId: input.workspaceId
-        }
-      });
+      const fallbackChannel = input.channelId
+        ? await getWhatsAppChannelStatusById(input.channelId)
+        : await getWorkspaceWhatsAppChannelStatus(input.workspaceId);
 
       return {
         channel: fallbackChannel,
@@ -56,22 +66,25 @@ export async function getWorkspaceWhatsAppHealth(input: {
     }),
     prisma.conversation.count({
       where: {
-        workspaceId: input.workspaceId
+        workspaceId: input.workspaceId,
+        ...(input.channelId ? { channelId: input.channelId } : {})
       }
     }),
     prisma.message.count({
       where: {
         conversation: {
-          workspaceId: input.workspaceId
+          workspaceId: input.workspaceId,
+          ...(input.channelId ? { channelId: input.channelId } : {})
         }
       }
     }),
-    getOutboundMessageJobStatus(input.workspaceId),
+    getOutboundMessageJobStatus(input.workspaceId, input.channelId ?? null),
     prisma.message.findFirst({
       where: {
         direction: MessageDirection.INBOUND,
         conversation: {
-          workspaceId: input.workspaceId
+          workspaceId: input.workspaceId,
+          ...(input.channelId ? { channelId: input.channelId } : {})
         }
       },
       orderBy: {
@@ -85,7 +98,8 @@ export async function getWorkspaceWhatsAppHealth(input: {
       where: {
         direction: MessageDirection.OUTBOUND,
         conversation: {
-          workspaceId: input.workspaceId
+          workspaceId: input.workspaceId,
+          ...(input.channelId ? { channelId: input.channelId } : {})
         }
       },
       orderBy: {
@@ -99,7 +113,7 @@ export async function getWorkspaceWhatsAppHealth(input: {
 
   const channel = runtime.channel as WorkspaceWhatsAppChannelStatus | null;
   const runtimeStatus = runtime.runtimeStatus ?? channel?.connectionStatus ?? "DISCONNECTED";
-  const isDisconnectedRuntime = runtimeStatus === "DISCONNECTED" || runtimeStatus === "AUTH_FAILED";
+  const isDisconnectedRuntime = isWhatsAppDisconnectedRuntimeStatus(runtimeStatus);
   const isIntermediateRuntime = runtimeStatus === "INITIALIZING" || runtimeStatus === "AUTHENTICATED";
   const hasImportedHistory = conversationCount > 0 || messageCount > 0;
   const connectedAtTime = getDateTimestamp(channel?.connectedAt);
@@ -110,21 +124,15 @@ export async function getWorkspaceWhatsAppHealth(input: {
     isIntermediateRuntime &&
     intermediateReferenceTime !== null &&
     Date.now() - intermediateReferenceTime >= WHATSAPP_CONNECTION_STALL_MS;
-  const isLiveRuntime =
-    runtimeStatus === "READY" ||
-    runtimeStatus === "SYNCING_HISTORY" ||
-    runtimeStatus === "CONNECTED" ||
-    runtimeStatus === "AUTHENTICATED" ||
-    runtimeStatus === "QR_READY" ||
-    runtimeStatus === "INITIALIZING";
+  const isLiveRuntime = isWhatsAppConnectedRuntimeStatus(runtimeStatus);
   const isHistoryStabilizing =
     !isDisconnectedRuntime && (runtimeStatus === "CONNECTED" || runtimeStatus === "SYNCING_HISTORY") && !hasImportedHistory;
   const isHistoryStuck =
     isHistoryStabilizing &&
     referenceTime !== null &&
     Date.now() - referenceTime >= WHATSAPP_HISTORY_STUCK_MS;
-  const isLiveOnlyMode = !isDisconnectedRuntime && isHistoryStuck && isLiveRuntime;
-  const isInboxReady = !isDisconnectedRuntime && (runtimeStatus === "READY" || hasImportedHistory || isLiveOnlyMode);
+  const isLiveOnlyMode = false;
+  const isInboxReady = !isDisconnectedRuntime && (runtimeStatus === "READY" || hasImportedHistory);
   const hasRecentInbound = Boolean(lastInboundMessage);
   const hasRecentOutbound = Boolean(lastOutboundMessage);
   const verificationState =
@@ -156,5 +164,86 @@ export async function getWorkspaceWhatsAppHealth(input: {
     importedMessageCount: messageCount,
     lastSyncError: runtime.lastError ?? channel?.lastError ?? null,
     workerStatus
+  };
+}
+
+export type WorkspaceWhatsAppHealth = Awaited<ReturnType<typeof getWorkspaceWhatsAppHealth>>;
+
+export async function getWorkspaceWhatsAppHealthForPage(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId?: string | null;
+  fallbackChannel?: WorkspaceWhatsAppChannelStatus | null;
+  timeoutMs?: number;
+}): Promise<WorkspaceWhatsAppHealth> {
+  const timeoutMs = Math.max(1000, input.timeoutMs ?? WHATSAPP_PAGE_HEALTH_TIMEOUT_MS);
+  const healthPromise = getWorkspaceWhatsAppHealth({
+    workspaceId: input.workspaceId,
+    agentId: input.agentId,
+    channelId: input.channelId ?? null
+  }).catch((error) => buildPageHealthFallback(input.fallbackChannel ?? null, getHealthErrorMessage(error)));
+
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  const timeoutPromise = new Promise<WorkspaceWhatsAppHealth>((resolve) => {
+    timeout = setTimeout(() => {
+      resolve(
+        buildPageHealthFallback(
+          input.fallbackChannel ?? null,
+          `WhatsApp health check timed out after ${timeoutMs}ms. Showing the latest saved channel status.`
+        )
+      );
+    }, timeoutMs);
+  });
+
+  try {
+    return await Promise.race([healthPromise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+function getHealthErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unable to load WhatsApp health. Showing the latest saved channel status.";
+}
+
+function buildPageHealthFallback(
+  channel: WorkspaceWhatsAppChannelStatus | null,
+  lastSyncError: string | null
+): WorkspaceWhatsAppHealth {
+  const runtimeStatus = channel?.connectionStatus ?? "DISCONNECTED";
+  const isDisconnectedRuntime = isWhatsAppDisconnectedRuntimeStatus(runtimeStatus);
+  const isLiveRuntime = isWhatsAppConnectedRuntimeStatus(runtimeStatus);
+  const isHistoryStabilizing = runtimeStatus === "CONNECTED" || runtimeStatus === "SYNCING_HISTORY";
+
+  return {
+    runtimeStatus,
+    channel,
+    supervisor: null,
+    isLiveRuntime,
+    isConnectionStalled: false,
+    isInboxReady: !isDisconnectedRuntime && runtimeStatus === "READY",
+    isHistoryStabilizing,
+    isHistoryStuck: false,
+    isLiveOnlyMode: false,
+    hasImportedHistory: false,
+    hasRecentInbound: false,
+    hasRecentOutbound: false,
+    lastInboundAt: null,
+    lastOutboundAt: null,
+    verificationState: "unverified",
+    importedConversationCount: 0,
+    importedMessageCount: 0,
+    lastSyncError,
+    workerStatus: {
+      pending: 0,
+      running: 0,
+      sent: 0,
+      failed: 0,
+      oldestPendingAt: null,
+      latestFailure: null,
+      heartbeat: null
+    }
   };
 }

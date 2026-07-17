@@ -1,13 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useConfirmation } from "@/components/confirmation-provider";
 import { HelpNotice } from "@/components/help-notice";
 
 type WebQrSetupPanelProps = {
+  channelId?: string | null;
+  channelSelectionBasePath?: string;
+  channelSelectionHref?: string | null;
   initialValues: {
+    id?: string;
     connectionStatus: string;
     connectedByAgentName: string;
     displayName: string;
@@ -31,7 +35,14 @@ type WebQrSetupPanelProps = {
   onboardingMode?: "guided" | "settings";
 };
 
+function buildSettingsWhatsAppUrl(channelId?: string | null) {
+  return channelId ? `/api/settings/whatsapp?channelId=${encodeURIComponent(channelId)}` : "/api/settings/whatsapp";
+}
+
 export function WebQrSetupPanel({
+  channelId = null,
+  channelSelectionBasePath = "/settings/whatsapp",
+  channelSelectionHref = null,
   initialValues,
   health,
   onBack,
@@ -45,6 +56,9 @@ export function WebQrSetupPanel({
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [finalizeRetryToken, setFinalizeRetryToken] = useState(0);
+  const [clearChatsAndContacts, setClearChatsAndContacts] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
+  const lastLinkedRefreshKeyRef = useRef<string | null>(null);
   const [status, setStatus] = useState({
     connectionStatus: initialValues.connectionStatus,
     connectedByAgentName: initialValues.connectedByAgentName,
@@ -55,19 +69,20 @@ export function WebQrSetupPanel({
     qrCodeDataUrl: initialValues.qrCodeDataUrl,
     isSyncingHistory: false
   });
+  const channelScopedUrl = buildSettingsWhatsAppUrl(channelId);
+  const hasSelectedChannel = Boolean(channelId?.trim());
+  const isRelinkableError = status.connectionStatus === "ERROR";
 
   const hasActiveSession =
-    status.connectionStatus !== "DISCONNECTED" && status.connectionStatus !== "AUTH_FAILED";
-  const connectedAtTimestamp = status.connectedAt ? new Date(status.connectedAt).getTime() : null;
-  const isStuckConnectedState =
-    status.connectionStatus === "CONNECTED" &&
-    connectedAtTimestamp !== null &&
-    !Number.isNaN(connectedAtTimestamp) &&
-    Date.now() - connectedAtTimestamp >= 90_000;
+    status.connectionStatus !== "DISCONNECTED" &&
+    status.connectionStatus !== "AUTH_FAILED" &&
+    !isRelinkableError;
   const canRefreshQr =
+    hasSelectedChannel &&
     !isPending &&
     (status.connectionStatus === "DISCONNECTED" ||
       status.connectionStatus === "AUTH_FAILED" ||
+      isRelinkableError ||
       status.connectionStatus === "QR_READY" ||
       status.connectionStatus === "INITIALIZING");
   const isLinkingInProgress =
@@ -75,11 +90,19 @@ export function WebQrSetupPanel({
     status.connectionStatus === "CONNECTED" ||
     status.connectionStatus === "SYNCING_HISTORY" ||
     status.connectionStatus === "READY";
-  const canRemoveConnection =
-    !isPending &&
-    !["INITIALIZING", "QR_READY", "AUTHENTICATED", "SYNCING_HISTORY"].includes(status.connectionStatus) &&
-    (status.connectionStatus !== "CONNECTED" || isStuckConnectedState) &&
+  const canManageConnection =
+    hasSelectedChannel &&
     (hasActiveSession || Boolean(status.phoneNumber) || Boolean(status.lastError) || Boolean(status.connectedAt));
+  const showsConnectedSummary =
+    !isRelinkableError &&
+    (Boolean(status.connectedAt) ||
+      ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus));
+  const shouldRefreshParentForLinkedState =
+    hasSelectedChannel &&
+    !isRelinkableError &&
+    (Boolean(status.connectedAt) ||
+      Boolean(status.phoneNumber) ||
+      ["AUTHENTICATED", "CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus));
 
   const statusLabel = useMemo(() => {
     if (status.isSyncingHistory || status.connectionStatus === "SYNCING_HISTORY") {
@@ -115,8 +138,69 @@ export function WebQrSetupPanel({
     status.isSyncingHistory
   );
 
+  useEffect(() => {
+    lastLinkedRefreshKeyRef.current = null;
+  }, [channelId]);
+
+  useEffect(() => {
+    setStatus({
+      connectionStatus: initialValues.connectionStatus,
+      connectedByAgentName: initialValues.connectedByAgentName,
+      displayName: initialValues.displayName,
+      phoneNumber: initialValues.phoneNumber,
+      lastError: initialValues.lastError,
+      connectedAt: initialValues.connectedAt,
+      qrCodeDataUrl: initialValues.qrCodeDataUrl,
+      isSyncingHistory: false
+    });
+    setSuccess(null);
+    setError(null);
+    setFinalizeRetryToken(0);
+    setClearChatsAndContacts(false);
+    setIsDisconnecting(false);
+  }, [channelId, initialValues]);
+
+  useEffect(() => {
+    if (shouldRefreshParentForLinkedState) {
+      return;
+    }
+
+    lastLinkedRefreshKeyRef.current = null;
+  }, [shouldRefreshParentForLinkedState]);
+
+  useEffect(() => {
+    if (!shouldRefreshParentForLinkedState) {
+      return;
+    }
+
+    const refreshKey = [
+      channelId ?? "",
+      status.connectionStatus,
+      status.phoneNumber,
+      status.connectedAt
+    ].join("|");
+
+    if (lastLinkedRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+
+    lastLinkedRefreshKeyRef.current = refreshKey;
+    router.refresh();
+  }, [
+    channelId,
+    router,
+    shouldRefreshParentForLinkedState,
+    status.connectedAt,
+    status.connectionStatus,
+    status.phoneNumber
+  ]);
+
   async function refreshStatus() {
-    const response = await fetch("/api/settings/whatsapp", {
+    if (!hasSelectedChannel) {
+      return;
+    }
+
+    const response = await fetch(channelScopedUrl, {
       method: "GET"
     });
 
@@ -158,8 +242,12 @@ export function WebQrSetupPanel({
   }
 
   async function waitForQrReady(attempts = 8) {
+    if (!hasSelectedChannel) {
+      return false;
+    }
+
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const response = await fetch("/api/settings/whatsapp", {
+      const response = await fetch(channelScopedUrl, {
         method: "GET"
       });
 
@@ -216,16 +304,21 @@ export function WebQrSetupPanel({
   }
 
   useEffect(() => {
+    if (!hasSelectedChannel) {
+      return;
+    }
+
     void refreshStatus();
     const interval = window.setInterval(() => {
       void refreshStatus();
     }, 3000);
 
     return () => window.clearInterval(interval);
-  }, []);
+  }, [channelScopedUrl, hasSelectedChannel]);
 
   useEffect(() => {
     if (
+      !hasSelectedChannel ||
       !connectionName.trim() ||
       isPending ||
       status.isSyncingHistory ||
@@ -244,10 +337,9 @@ export function WebQrSetupPanel({
 
     const finalizeTimer = window.setTimeout(() => {
       startTransition(async () => {
-        const response = await fetch("/api/settings/whatsapp", {
+        const response = await fetch(channelScopedUrl, {
           method: "PATCH"
         });
-
         const payload = (await response.json().catch(() => null)) as
           | {
               error?: string;
@@ -299,20 +391,27 @@ export function WebQrSetupPanel({
       }
     };
   }, [
+    channelScopedUrl,
     connectionName,
     finalizeRetryToken,
     isPending,
     startTransition,
     status.connectionStatus,
-    status.isSyncingHistory
+    status.isSyncingHistory,
+    hasSelectedChannel
   ]);
 
   function handleRefreshQr() {
+    if (!hasSelectedChannel) {
+      setError("Select a WhatsApp channel before generating a QR code.");
+      return;
+    }
+
     setError(null);
     setSuccess(null);
 
     startTransition(async () => {
-      const response = await fetch("/api/settings/whatsapp", {
+      const response = await fetch(channelScopedUrl, {
         method: "POST"
       });
 
@@ -335,6 +434,11 @@ export function WebQrSetupPanel({
   }
 
   async function handleFreshStart() {
+    if (!hasSelectedChannel) {
+      setError("Select a WhatsApp channel before starting a fresh WhatsApp session.");
+      return;
+    }
+
     const shouldReset = await confirm({
       title: "Start fresh WhatsApp session",
       description:
@@ -351,13 +455,14 @@ export function WebQrSetupPanel({
     setSuccess(null);
 
     startTransition(async () => {
-      const response = await fetch("/api/settings/whatsapp", {
+      const response = await fetch(channelScopedUrl, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          action: "fresh-start"
+          action: "fresh-start",
+          channelId
         })
       });
 
@@ -381,11 +486,18 @@ export function WebQrSetupPanel({
   }
 
   async function handleRemoveConnection() {
+    if (!hasSelectedChannel) {
+      setError("Select a WhatsApp channel before removing a connection.");
+      return;
+    }
+
     const shouldRemove = await confirm({
-      title: "Remove connected number",
+      title: "Disconnect WhatsApp number",
       description:
-        "Remove this WhatsApp number and clear the saved session from Connexa? You can link the number again with a new QR code.",
-      confirmLabel: "Remove number",
+        clearChatsAndContacts
+          ? "Disconnect this WhatsApp number, clear the saved session, and delete imported chats plus orphaned contacts for this channel? You can link the number again with a new QR code."
+          : "Disconnect this WhatsApp number and clear the saved session from Connexa? You can link the number again with a new QR code.",
+      confirmLabel: clearChatsAndContacts ? "Disconnect and clear data" : "Disconnect",
       tone: "danger"
     });
 
@@ -395,32 +507,66 @@ export function WebQrSetupPanel({
 
     setError(null);
     setSuccess(null);
+    setIsDisconnecting(true);
 
     startTransition(async () => {
-      const response = await fetch("/api/settings/whatsapp", {
-        method: "DELETE"
-      });
+      try {
+        const response = await fetch(channelScopedUrl, {
+          method: "DELETE",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            clearChatsAndContacts
+          })
+        });
 
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        const payload = (await response.json().catch(() => null)) as
+          | {
+              cleanupResult?: {
+                deletedContactCount?: number;
+                deletedConversationCount?: number;
+              } | null;
+              error?: string;
+              nextChannelId?: string | null;
+            }
+          | null;
 
-      if (!response.ok) {
-        setError(payload?.error ?? "Unable to remove the connected WhatsApp number.");
-        return;
+        if (!response.ok) {
+          setError(payload?.error ?? "Unable to remove the connected WhatsApp number.");
+          return;
+        }
+
+        setStatus({
+          connectionStatus: "DISCONNECTED",
+          connectedByAgentName: initialValues.connectedByAgentName,
+          displayName: "",
+          phoneNumber: "",
+          lastError: "",
+          connectedAt: null,
+          qrCodeDataUrl: null,
+          isSyncingHistory: false
+        });
+        setFinalizeRetryToken(0);
+        setClearChatsAndContacts(false);
+        setSuccess(
+          clearChatsAndContacts
+            ? `WhatsApp was disconnected. Removed ${
+                payload?.cleanupResult?.deletedConversationCount ?? 0
+              } chats and ${
+                payload?.cleanupResult?.deletedContactCount ?? 0
+              } contacts for this channel.`
+            : "The WhatsApp connection was removed. Generate a new QR code to link a number again."
+        );
+        if (payload?.nextChannelId) {
+          router.push(`${channelSelectionBasePath}?channelId=${encodeURIComponent(payload.nextChannelId)}`);
+        } else {
+          router.push(channelSelectionBasePath);
+        }
+        router.refresh();
+      } finally {
+        setIsDisconnecting(false);
       }
-
-      setStatus({
-        connectionStatus: "DISCONNECTED",
-        connectedByAgentName: initialValues.connectedByAgentName,
-        displayName: "",
-        phoneNumber: "",
-        lastError: "",
-        connectedAt: null,
-        qrCodeDataUrl: null,
-        isSyncingHistory: false
-      });
-      setFinalizeRetryToken(0);
-      setSuccess("The WhatsApp connection was removed. Generate a new QR code to link a number again.");
-      router.refresh();
     });
   }
 
@@ -429,120 +575,185 @@ export function WebQrSetupPanel({
       <article className="content-card settings-dark-panel wa-setup-card">
         <div className="wa-step-header">
           <div>
-            <span className="wa-step-kicker">{onboardingMode === "guided" ? "First login" : "Step 2"}</span>
-            <h2>{onboardingMode === "guided" ? "Connect your business WhatsApp" : "Setup Connection"}</h2>
+            <span className="wa-step-kicker">{onboardingMode === "guided" ? "First login" : showsConnectedSummary ? "Connected number" : "Step 2"}</span>
+            <h2>
+              {showsConnectedSummary
+                ? status.phoneNumber || "WhatsApp connected"
+                : onboardingMode === "guided"
+                  ? "Connect your business WhatsApp"
+                  : "Setup Connection"}
+            </h2>
             <p>
-              {onboardingMode === "guided"
+              {showsConnectedSummary
+                ? "This number is already connected. Disconnect it here when you need to relink the phone or clear the imported inbox data for this channel."
+                : onboardingMode === "guided"
                 ? "Scan the QR code from the phone that owns your business WhatsApp so the shared inbox can go live."
                 : "Use QR-based WhatsApp Web onboarding for a fast connection that your team can activate today."}
             </p>
           </div>
         </div>
 
-        <div className="wa-form-grid">
-          <label className="control-block">
-            <span className="control-label">Connection Name</span>
-            <input
-              className="control-input"
-              onChange={(event) => setConnectionName(event.target.value)}
-              placeholder="Sales team WhatsApp"
-              value={connectionName}
-            />
-          </label>
-        </div>
-
-        <div className="wa-web-grid">
-          <div className="wa-qr-panel">
-            <div className="wa-qr-panel-head">
-              <strong>QR connection</strong>
-              <span>{statusLabel}</span>
-            </div>
-
-            {status.qrCodeDataUrl ? (
-              <img alt="WhatsApp QR code" className="wa-qr-image" src={status.qrCodeDataUrl} />
-            ) : (
-              <div className="wa-qr-placeholder">
-                <span className="wa-qr-placeholder-icon" aria-hidden="true">
-                  #
-                </span>
-                <strong>QR code will appear here</strong>
-                <p>Generate or refresh the QR session to start linking a phone.</p>
-              </div>
-            )}
-
-            <div className="wa-status-strip">
-              <span className={`wa-status-dot ${status.connectionStatus.toLowerCase()}`} aria-hidden="true" />
-              <span>{status.phoneNumber || "No phone linked yet"}</span>
-              {status.connectedAt ? <span>Connected at {status.connectedAt}</span> : null}
-            </div>
-          </div>
-
-          <div className="wa-instruction-panel">
-            <strong>How to connect</strong>
-            <ol className="wa-instruction-list">
-              <li>Open WhatsApp on your phone.</li>
-              <li>Tap Linked Devices.</li>
-              <li>Scan the QR code.</li>
-              <li>Wait for connection confirmation.</li>
-            </ol>
-
+        {showsConnectedSummary ? (
+          <div className="wa-connected-summary">
             <div className="wa-runtime-meta">
               <div>
-                <span>Session owner</span>
-                <strong>{status.connectedByAgentName || "No active session"}</strong>
+                <span>Connected number</span>
+                <strong>{status.phoneNumber || "Unknown number"}</strong>
+              </div>
+              <div>
+                <span>Channel</span>
+                <strong>{channelSelectionHref || channelId || "Not available"}</strong>
               </div>
               <div>
                 <span>Profile name</span>
-                <strong>{status.displayName || "Not connected"}</strong>
+                <strong>{status.displayName || "Not available"}</strong>
+              </div>
+              <div>
+                <span>Status</span>
+                <strong>{statusLabel}</strong>
+              </div>
+              <div>
+                <span>Connected at</span>
+                <strong>{status.connectedAt || "Not available"}</strong>
               </div>
             </div>
 
-            <button
-              className="button button-secondary"
-              disabled={!canRefreshQr}
-              onClick={handleRefreshQr}
-              type="button"
-            >
-              {isPending ? "Preparing..." : status.connectionStatus === "DISCONNECTED" ? "Generate QR" : "Refresh QR"}
-            </button>
-
-            <div className="table-subtle">
-              {isLinkingInProgress
-                ? "Linking is already in progress. Refresh stays locked so the current QR handoff can finish."
-                : "Refreshing generates a new QR code and replaces any previous code still on screen."}
-            </div>
-
-            <button className="button button-secondary" disabled={isPending} onClick={handleFreshStart} type="button">
-              {isPending ? "Preparing..." : "Start fresh session"}
-            </button>
-
-            <div className="table-subtle">
-              Use this after the phone logged out, the linked-device session broke, or the QR flow needs a clean restart.
-            </div>
-
-            <button
-              className="button button-secondary"
-              disabled={!canRemoveConnection}
-              onClick={handleRemoveConnection}
-              type="button"
-            >
-              {isPending ? "Removing..." : "Remove connected number"}
-            </button>
-
-            <div className="table-subtle">
-              {canRemoveConnection
-                ? "Use this if the current linked number is stuck or failed. You can add it again immediately with a new QR session."
-                : status.connectionStatus === "CONNECTED"
-                  ? "Removal stays locked briefly while Connexa finishes the connection. If it stays stuck, this button will unlock automatically."
-                  : "Removal is temporarily locked while Connexa is generating, linking, or finishing this WhatsApp session."}
+            <div className="wa-disconnect-panel">
+              <strong>Disconnect options</strong>
+              <label className="auth-checkbox wa-disconnect-checkbox">
+                <input
+                  checked={clearChatsAndContacts}
+                  onChange={(event) => setClearChatsAndContacts(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Also clear imported chats and orphaned contacts for this WhatsApp channel</span>
+              </label>
+              <button
+                className="button button-secondary"
+                disabled={!canManageConnection || isDisconnecting}
+                onClick={handleRemoveConnection}
+                type="button"
+              >
+                {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+              </button>
+              <div className="table-subtle">
+                {canManageConnection
+                  ? "Disconnect opens a confirmation step, keeps the workspace number slot, and lets you relink later."
+                  : "Disconnect will appear once this WhatsApp channel has a linked session or saved phone details."}
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <>
+            <div className="wa-form-grid">
+              <label className="control-block">
+                <span className="control-label">Connection Name</span>
+                <input
+                  className="control-input"
+                  onChange={(event) => setConnectionName(event.target.value)}
+                  placeholder="Sales team WhatsApp"
+                  value={connectionName}
+                />
+              </label>
+            </div>
+
+            <div className="wa-web-grid">
+              <div className="wa-qr-panel">
+                <div className="wa-qr-panel-head">
+                  <strong>QR connection</strong>
+                  <span>{statusLabel}</span>
+                </div>
+
+                {status.qrCodeDataUrl ? (
+                  <img alt="WhatsApp QR code" className="wa-qr-image" src={status.qrCodeDataUrl} />
+                ) : (
+                  <div className="wa-qr-placeholder">
+                    <span className="wa-qr-placeholder-icon" aria-hidden="true">
+                      #
+                    </span>
+                    <strong>QR code will appear here</strong>
+                    <p>Generate or refresh the QR session to start linking a phone.</p>
+                  </div>
+                )}
+
+                <div className="wa-status-strip">
+                  <span className={`wa-status-dot ${status.connectionStatus.toLowerCase()}`} aria-hidden="true" />
+                  <span>{status.phoneNumber || "No phone linked yet"}</span>
+                  {status.connectedAt ? <span>Connected at {status.connectedAt}</span> : null}
+                </div>
+              </div>
+
+              <div className="wa-instruction-panel">
+                <strong>How to connect</strong>
+                <ol className="wa-instruction-list">
+                  <li>Open WhatsApp on your phone.</li>
+                  <li>Tap Linked Devices.</li>
+                  <li>Scan the QR code.</li>
+                  <li>Wait for connection confirmation.</li>
+                </ol>
+
+                <div className="wa-runtime-meta">
+                  <div>
+                    <span>Session owner</span>
+                    <strong>{status.connectedByAgentName || "No active session"}</strong>
+                  </div>
+                  <div>
+                    <span>Profile name</span>
+                    <strong>{status.displayName || "Not connected"}</strong>
+                  </div>
+                </div>
+
+                <button
+                  className="button button-secondary"
+                  disabled={!canRefreshQr}
+                  onClick={handleRefreshQr}
+                  type="button"
+                >
+                  {isPending ? "Preparing..." : status.connectionStatus === "DISCONNECTED" ? "Generate QR" : "Refresh QR"}
+                </button>
+
+                <div className="table-subtle">
+                  {isLinkingInProgress
+                    ? "Linking is already in progress. Refresh stays locked so the current QR handoff can finish."
+                    : "Refreshing generates a new QR code and replaces any previous code still on screen."}
+                </div>
+
+                <button className="button button-secondary" disabled={isPending} onClick={handleFreshStart} type="button">
+                  {isPending ? "Preparing..." : "Start fresh session"}
+                </button>
+
+                <div className="table-subtle">
+                  Use this after the phone logged out, the linked-device session broke, or the QR flow needs a clean restart.
+                </div>
+
+                <button
+                  className="button button-secondary"
+                  disabled={!canManageConnection || isDisconnecting}
+                  onClick={handleRemoveConnection}
+                  type="button"
+                >
+                  {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+                </button>
+
+                <div className="table-subtle">
+                  {canManageConnection
+                    ? "Use this if the current linked number is stuck or failed. A confirmation modal opens before Connexa disconnects it."
+                    : "Disconnect will appear once this WhatsApp channel has a linked session or saved phone details."}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
 
         <HelpNotice title={onboardingMode === "guided" ? "What happens next" : "Recommended path"}>
-          {onboardingMode === "guided"
-            ? "Once the phone is linked, Connexa can start importing chats and your manager inbox will be ready to use. If the phone is not available now, you can skip this step and finish it later from settings."
-            : "WhatsApp Web is best when your team needs the fastest onboarding path. It is ideal for getting started, while the official API remains the better long-term option for scale and platform stability."}
+          {onboardingMode === "guided" ? (
+            <span className="wa-onboarding-next-copy">
+              After the phone is linked, Connexa can import chats and prepare your manager inbox. If the phone is not
+              available now, skip this step and finish it later from settings.
+            </span>
+          ) : (
+            "WhatsApp Web is best when your team needs the fastest onboarding path. It is ideal for getting started, while the official API remains the better long-term option for scale and platform stability."
+          )}
         </HelpNotice>
 
         {health?.isLiveOnlyMode ? (
@@ -609,6 +820,14 @@ function getFriendlySetupError(message: string) {
 
   if (isTransientSetupErrorMessage(normalized)) {
     return "WhatsApp is still finalizing the browser session. Connexa will keep trying automatically.";
+  }
+
+  if (
+    normalized.includes("Sender service is unreachable") ||
+    normalized.includes("fetch failed") ||
+    normalized.includes("ECONNREFUSED")
+  ) {
+    return "Connexa could not reach the WhatsApp sender service. If this is running in Docker, use the sender container hostname in SENDER_SERVICE_URL, for example http://sender:3101, not 127.0.0.1.";
   }
 
   return normalized;

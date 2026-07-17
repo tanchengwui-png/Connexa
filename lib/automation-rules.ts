@@ -1,9 +1,5 @@
-import {
-  AutomationJobStatus,
-  AutomationMatchType,
-  AutomationTriggerType
-} from "@prisma/client";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { AutomationJobStatus, AutomationMatchType, AutomationTriggerType } from "@/lib/db-types";
 import {
   decodeRuleMatcher,
   formatRuleMatcherValue,
@@ -89,14 +85,18 @@ export async function getAutomationRulesData() {
     throw new Error("No workspace found. Run the database seed first.");
   }
 
+  type WorkflowRecord = (typeof workflows)[number];
+  type AutomationRuleRecord = (typeof workspace.automationRules)[number];
+  type AutomationJobRecord = (typeof jobs)[number];
+  type WorkspaceMediaAsset = NonNullable<Awaited<ReturnType<typeof db.workspaceMediaAsset.findMany>>>[number];
   const activeWorkflowIds = getStoredActiveWorkflowIds(
     settings?.activeWorkflowId ?? null,
-    workflows.map((workflow) => workflow.id)
+    workflows.map((workflow: WorkflowRecord) => workflow.id)
   );
 
   const mediaAssetIds = Array.from(
     new Set(
-      workspace.automationRules.flatMap((rule) => [
+      workspace.automationRules.flatMap((rule: AutomationRuleRecord) => [
         ...parseMediaAssetIds(rule.replyMediaAssetIdsJson, rule.replyMediaAssetId),
         ...parseMediaAssetIds(rule.followUpMediaAssetIdsJson, rule.followUpMediaAssetId)
       ])
@@ -112,7 +112,7 @@ export async function getAutomationRulesData() {
                 id: { in: mediaAssetIds }
               }
             })
-          ).map((asset) => [asset.id, asset] as const)
+          ).map((asset: WorkspaceMediaAsset) => [asset.id, asset] as const)
         )
       : new Map();
 
@@ -120,9 +120,11 @@ export async function getAutomationRulesData() {
     workspaceId,
     summary: {
       total: workspace.automationRules.length,
-      enabled: workspace.automationRules.filter((rule) => rule.enabled).length,
-      keywordRules: workspace.automationRules.filter((rule) => rule.triggerType === AutomationTriggerType.KEYWORD_MATCH).length,
-      queuedJobs: jobs.filter((job) => job.status === AutomationJobStatus.PENDING).length
+      enabled: workspace.automationRules.filter((rule: AutomationRuleRecord) => rule.enabled).length,
+      keywordRules: workspace.automationRules.filter(
+        (rule: AutomationRuleRecord) => rule.triggerType === AutomationTriggerType.KEYWORD_MATCH
+      ).length,
+      queuedJobs: jobs.filter((job: AutomationJobRecord) => job.status === AutomationJobStatus.PENDING).length
     },
     settings: {
       timezone: settings?.timezone ?? "Asia/Kuala_Lumpur",
@@ -163,14 +165,14 @@ export async function getAutomationRulesData() {
         settings?.propertyFlowCompleteReply ??
         "Thanks. I’ve captured your property requirements and the team will follow up shortly."
     },
-    rules: workspace.automationRules.map((rule) => {
+    rules: workspace.automationRules.map((rule: AutomationRuleRecord) => {
       const decodedMatcher = decodeRuleMatcher(rule.matchType, rule.keyword);
 
       return {
         id: rule.id,
         name: rule.name,
         triggerType: rule.triggerType,
-        triggerLabel: triggerLabels[rule.triggerType],
+        triggerLabel: triggerLabels[rule.triggerType as AutomationTriggerType],
         matchType: rule.matchType,
         matchOperator: decodedMatcher.operator,
         matchLabel: getRuleOperatorLabel(decodedMatcher.operator),
@@ -178,21 +180,21 @@ export async function getAutomationRulesData() {
         replyBody: rule.replyBody,
         replyMediaAssetIds: parseMediaAssetIds(rule.replyMediaAssetIdsJson, rule.replyMediaAssetId),
         replyMediaAssets: parseMediaAssetIds(rule.replyMediaAssetIdsJson, rule.replyMediaAssetId)
-          .map((assetId) => mediaAssetMap.get(assetId))
-          .filter(Boolean)
-          .map((asset) => ({
-            id: asset!.id,
-            title: asset!.title,
-            kind: asset!.kind,
-            mimeType: asset!.mimeType,
-            url: toClientMediaUrl(asset!.publicUrl)
+          .map((assetId: string) => mediaAssetMap.get(assetId))
+          .filter((asset): asset is WorkspaceMediaAsset => Boolean(asset))
+          .map((asset: WorkspaceMediaAsset) => ({
+            id: asset.id,
+            title: asset.title,
+            kind: asset.kind,
+            mimeType: asset.mimeType,
+            url: toClientMediaUrl(asset.publicUrl)
           })),
         replyMediaAssetId: rule.replyMediaAssetId,
         replyMediaAssetTitle: rule.replyMediaAsset?.title ?? null,
         replyMediaAssetKind: rule.replyMediaAsset?.kind ?? null,
         replyMediaAssetUrl: rule.replyMediaAsset ? toClientMediaUrl(rule.replyMediaAsset.publicUrl) : null,
         workflowId: rule.workflowId,
-        workflowName: workflows.find((workflow) => workflow.id === rule.workflowId)?.name ?? null,
+        workflowName: workflows.find((workflow: WorkflowRecord) => workflow.id === rule.workflowId)?.name ?? null,
         addTags: parseStringArray(rule.addTags),
         priority: rule.priority,
         cooldownMinutes: rule.cooldownMinutes,
@@ -202,14 +204,14 @@ export async function getAutomationRulesData() {
         followUpReplyBody: rule.followUpReplyBody,
         followUpMediaAssetIds: parseMediaAssetIds(rule.followUpMediaAssetIdsJson, rule.followUpMediaAssetId),
         followUpMediaAssets: parseMediaAssetIds(rule.followUpMediaAssetIdsJson, rule.followUpMediaAssetId)
-          .map((assetId) => mediaAssetMap.get(assetId))
-          .filter(Boolean)
-          .map((asset) => ({
-            id: asset!.id,
-            title: asset!.title,
-            kind: asset!.kind,
-            mimeType: asset!.mimeType,
-            url: toClientMediaUrl(asset!.publicUrl)
+          .map((assetId: string) => mediaAssetMap.get(assetId))
+          .filter((asset): asset is WorkspaceMediaAsset => Boolean(asset))
+          .map((asset: WorkspaceMediaAsset) => ({
+            id: asset.id,
+            title: asset.title,
+            kind: asset.kind,
+            mimeType: asset.mimeType,
+            url: toClientMediaUrl(asset.publicUrl)
           })),
         followUpMediaAssetId: rule.followUpMediaAssetId,
         followUpMediaAssetTitle: rule.followUpMediaAsset?.title ?? null,
@@ -218,7 +220,7 @@ export async function getAutomationRulesData() {
         enabled: rule.enabled
       };
     }),
-    jobs: jobs.map((job) => ({
+    jobs: jobs.map((job: AutomationJobRecord) => ({
       id: job.id,
       status: job.status,
       runAtIso: job.runAt.toISOString(),
@@ -229,12 +231,12 @@ export async function getAutomationRulesData() {
       lastError: job.lastError,
       bodyPreview: formatAutomationJobPreview(parseJobPayload(job.payloadJson))
     })),
-    agents: agents.map((agent) => ({
+    agents: agents.map((agent: (typeof agents)[number]) => ({
       id: agent.id,
       name: agent.name,
       role: agent.role
     })),
-    workflows: workflows.map((workflow) => ({
+    workflows: workflows.map((workflow: WorkflowRecord) => ({
       id: workflow.id,
       name: workflow.name,
       definitionJson: workflow.definitionJson,
@@ -642,11 +644,13 @@ function getStoredActiveWorkflowIds(value: string | null | undefined, validWorkf
   }
 
   const validWorkflowIdSet = new Set(validWorkflowIds);
-  return uniqueWorkflowIds.filter((workflowId) => validWorkflowIdSet.has(workflowId));
+  return uniqueWorkflowIds.filter((workflowId: string) => validWorkflowIdSet.has(workflowId));
 }
 
 function serializeStoredActiveWorkflowIds(workflowIds: string[]) {
-  const normalized = Array.from(new Set(workflowIds.map((workflowId) => workflowId.trim()).filter(Boolean)));
+  const normalized = Array.from(
+    new Set(workflowIds.map((workflowId: string) => workflowId.trim()).filter(Boolean))
+  );
   if (!normalized.length) {
     return null;
   }
@@ -660,7 +664,7 @@ async function resolveActiveWorkflowIds(
   fallbackWorkflowId?: string | null
 ) {
   const workflows = await listAutomationWorkflows(workspaceId);
-  const validWorkflowIds = workflows.map((workflow) => workflow.id);
+  const validWorkflowIds = workflows.map((workflow: (typeof workflows)[number]) => workflow.id);
   const requestedWorkflowIds =
     inputWorkflowIds && inputWorkflowIds.length
       ? inputWorkflowIds
@@ -737,13 +741,13 @@ async function resolveMediaAssetIds(workspaceId: string, mediaAssetIds?: string[
     throw new Error("One or more selected media assets were not found.");
   }
 
-  const assetIds = new Set(assets.map((asset) => asset.id));
-  return normalizedIds.filter((assetId) => assetIds.has(assetId));
+  const assetIds = new Set(assets.map((asset: (typeof assets)[number]) => asset.id));
+  return normalizedIds.filter((assetId: string) => assetIds.has(assetId));
 }
 
 function sanitizeMediaAssetIds(mediaAssetIds?: string[] | null) {
   return Array.from(
-    new Set((mediaAssetIds ?? []).map((assetId) => assetId.trim()).filter(Boolean))
+    new Set((mediaAssetIds ?? []).map((assetId: string) => assetId.trim()).filter(Boolean))
   );
 }
 
@@ -760,7 +764,10 @@ function parseMediaAssetIds(value: string | null | undefined, fallbackId?: strin
       return fallback;
     }
 
-    const normalized = parsed.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean);
+    const normalized = parsed
+      .filter((item): item is string => typeof item === "string")
+      .map((item: string) => item.trim())
+      .filter(Boolean);
     return normalized.length ? Array.from(new Set(normalized)) : fallback;
   } catch {
     return fallback;
@@ -771,11 +778,11 @@ function normalizeWorkflowReplyMediaItems(mediaItems: unknown, fallbackMediaAsse
   if (Array.isArray(mediaItems)) {
     return mediaItems
       .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
-      .map((item) => ({
+      .map((item: Record<string, unknown>) => ({
         mediaAssetId: typeof item.mediaAssetId === "string" ? item.mediaAssetId.trim() : "",
         message: typeof item.message === "string" ? item.message.trim() : ""
       }))
-      .filter((item) => item.mediaAssetId);
+      .filter((item: { mediaAssetId: string; message: string }) => item.mediaAssetId);
   }
 
   return sanitizeMediaAssetIds(
@@ -1380,12 +1387,12 @@ export async function deleteAutomationWorkflow(id: string) {
     }
   });
   if (linkedRules.length > 0) {
-    const ruleNames = linkedRules
-      .map((rule) => rule.name.trim() || "Unnamed rule");
+    const ruleNames: string[] = linkedRules
+      .map((rule: (typeof linkedRules)[number]) => rule.name.trim() || "Unnamed rule");
     const message =
       ruleNames.length === 1
         ? `Cannot delete workflow. It is used by rule "${ruleNames[0]}".`
-        : `Cannot delete workflow. It is used by rules: ${ruleNames.map((name) => `"${name}"`).join(", ")}.`;
+        : `Cannot delete workflow. It is used by rules: ${ruleNames.map((name: string) => `"${name}"`).join(", ")}.`;
     throw new Error(message);
   }
 
@@ -1418,8 +1425,8 @@ export async function deleteAutomationWorkflow(id: string) {
   });
   const nextActiveWorkflowIds = getStoredActiveWorkflowIds(
     settings?.activeWorkflowId ?? null,
-    remaining.map((item) => item.id)
-  ).filter((workflowId) => workflowId !== workflow.id);
+    remaining.map((item: (typeof remaining)[number]) => item.id)
+  ).filter((workflowId: string) => workflowId !== workflow.id);
   if (serializeStoredActiveWorkflowIds(nextActiveWorkflowIds) !== (settings?.activeWorkflowId ?? null)) {
     await db.workspaceAutomationSettings.update({
       where: { workspaceId },
@@ -1561,7 +1568,7 @@ async function normalizeWorkflowDefinitionJson(workspaceId: string, value?: stri
               id: true
             }
           })
-        ).map((asset) => asset.id)
+        ).map((asset: { id: string }) => asset.id)
       );
 
       const missingMediaAssetId = Array.from(replyStepMediaIds).find((mediaAssetId) => !existingMediaAssetIds.has(mediaAssetId));
@@ -1584,7 +1591,7 @@ async function normalizeWorkflowDefinitionJson(workspaceId: string, value?: stri
               id: true
             }
           })
-        ).map((agent) => agent.id)
+        ).map((agent: { id: string }) => agent.id)
       );
 
       const missingAgentId = Array.from(workflowAgentIds).find((agentId) => !existingAgentIds.has(agentId));

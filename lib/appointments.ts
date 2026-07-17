@@ -1,6 +1,6 @@
-import { AppointmentStatus, AppointmentType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { AppointmentStatus, AppointmentType } from "@/lib/db-types";
 
 type CreateAppointmentInput = {
   conversationId: string;

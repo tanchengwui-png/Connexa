@@ -1,7 +1,6 @@
 type ConnectionMethodCardProps = {
   badge: string;
   description: string;
-  benefits: readonly string[];
   disabled?: boolean;
   isSelected: boolean;
   onSelect: () => void;
@@ -12,7 +11,6 @@ type ConnectionMethodCardProps = {
 export function ConnectionMethodCard({
   badge,
   description,
-  benefits,
   disabled = false,
   isSelected,
   onSelect,
@@ -39,17 +37,6 @@ export function ConnectionMethodCard({
       </div>
 
       <p className="wa-method-description">{description}</p>
-
-      <div className="wa-method-benefits">
-        {benefits.map((item) => (
-          <div className="wa-method-benefit" key={item}>
-            <span className="wa-method-benefit-icon" aria-hidden="true">
-              +
-            </span>
-            <span>{item}</span>
-          </div>
-        ))}
-      </div>
     </button>
   );
 }

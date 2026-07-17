@@ -4,9 +4,8 @@ import {
   LeadNextActionType,
   LeadPriority,
   LeadSource,
-  LeadStage,
-  type Prisma
-} from "@prisma/client";
+  LeadStage
+} from "@/lib/db-types";
 import { prisma } from "@/lib/prisma";
 import { MALAYSIA_TIME_ZONE } from "@/lib/malaysia-time";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
@@ -16,12 +15,7 @@ import {
   stringifyLeadCustomData
 } from "@/lib/lead-custom-fields";
 
-type LeadWithRelations = Prisma.LeadGetPayload<{
-  include: {
-    owner: true;
-    product: true;
-  };
-}>;
+type TransactionClient = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 type LeadRecordInput = {
   actorId?: string | null;
@@ -79,6 +73,35 @@ export async function getLeadRecord(leadId: string) {
     }
   });
 }
+
+type LeadWithRelations = NonNullable<Awaited<ReturnType<typeof getLeadRecord>>>;
+type LeadSummaryInput = {
+  id: string;
+  name: string;
+  phone: string;
+  stage: LeadStage;
+  pipelineId: string | null;
+  pipelineStageKey: string | null;
+  priority: LeadPriority;
+  ownerId: string | null;
+  owner: { name: string } | null;
+  source: LeadSource;
+  sourceDetail: string | null;
+  value: number | null;
+  currency: string | null;
+  note: string | null;
+  nextActionAt: Date | null;
+  nextActionType: LeadNextActionType | null;
+  nextActionNote: string | null;
+  lastActivityAt: Date;
+  lastMessage: string | null;
+  product: { name: string } | null;
+  customData: string | null;
+  project: string | null;
+  preferredArea: string | null;
+  budget: number | null;
+  financingStatus: string | null;
+};
 
 export async function updateLeadRecord(leadId: string, input: LeadRecordInput) {
   const workspaceId = await requireCurrentWorkspaceId();
@@ -152,7 +175,7 @@ export async function updateLeadRecord(leadId: string, input: LeadRecordInput) {
     actorId: input.actorId ?? null
   });
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: TransactionClient) => {
     const updatedLead = await tx.lead.update({
       where: {
         id: lead.id
@@ -225,7 +248,7 @@ export async function getLeadsWorkspaceData() {
   }
 
   return {
-    agents: workspace.agents.map((agent) => ({
+    agents: workspace.agents.map((agent: (typeof workspace.agents)[number]) => ({
       id: agent.id,
       name: agent.name,
       role: agent.role
@@ -268,7 +291,7 @@ export async function createPropertyLeadDraftForConversation(conversationId: str
     return existingLead;
   }
 
-  return prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx: TransactionClient) => {
     const lead = await tx.lead.create({
       data: {
         workspaceId,
@@ -415,15 +438,16 @@ function mapLeadStageToPipelineKey(stage: LeadStage) {
     SITE_VISIT_BOOKED: "site_visit_booked"
   } as const;
 
-  return mapping[stage];
+  return mapping[stage as LeadStage];
 }
 
-function formatLeadSummary(lead: LeadWithRelations) {
+function formatLeadSummary(lead: LeadSummaryInput) {
   const customData = parseLeadCustomData(lead.customData);
   const project = getLeadCustomString(customData, "project") ?? lead.project ?? "Lead opportunity";
   const preferredArea = getLeadCustomString(customData, "preferredArea") ?? lead.preferredArea;
   const budget = getLeadCustomString(customData, "budget") ?? (lead.budget === null ? null : `${lead.budget}`);
   const financingStatus = getLeadCustomString(customData, "financingStatus") ?? lead.financingStatus;
+  const currency = normalizeCurrency(lead.currency);
 
   return {
     id: lead.id,
@@ -441,7 +465,7 @@ function formatLeadSummary(lead: LeadWithRelations) {
     source: lead.source,
     sourceDetail: lead.sourceDetail ?? formatSourceLabel(lead.source),
     value: lead.value,
-    currency: lead.currency,
+    currency,
     note: lead.note,
     nextActionAtIso: lead.nextActionAt?.toISOString() ?? null,
     nextActionType: lead.nextActionType,

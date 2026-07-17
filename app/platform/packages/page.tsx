@@ -15,15 +15,17 @@ export default async function PlatformPackagesPage() {
         items={getPlatformAdminNavItems()}
         title="Package visibility should be controlled from platform admin."
       >
-        <div className="platform-admin-toolbar">
-          <div className="settings-dark-status-card">
-            <span>Current section</span>
-            <strong>Packages</strong>
-            <p>Visibility, ordering, and package-level feature caps for messaging, contacts, automations, and campaigns are managed from this screen.</p>
+        <div className="platform-page-stack">
+          <div className="platform-admin-toolbar">
+            <div className="settings-dark-status-card platform-page-summary-card">
+              <span>Current section</span>
+              <strong>Packages</strong>
+              <p>Visibility, ordering, and package-level feature caps for messaging, contacts, automations, and campaigns are managed from this screen.</p>
+            </div>
           </div>
-        </div>
 
-        <PlatformPackagesForm initialPackages={[]} />
+          <PlatformPackagesForm initialPackages={[]} />
+        </div>
       </PlatformAdminShell>
     </main>
   );

@@ -100,7 +100,7 @@ export function AutomationEntryQrPanel({
           <label className="lead-record-field lead-record-field-wide">
             <span>Target rule</span>
             <select
-              className="lead-record-input"
+              className="lead-record-input app-select"
               onChange={(event) => {
                 const nextRuleId = event.target.value;
                 setSelectedRuleId(nextRuleId);

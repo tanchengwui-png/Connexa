@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import path from "node:path";
 import { hashPassword, verifyPassword } from "@/lib/auth/password";
 import { createSession } from "@/lib/auth/session";
 import { assertWorkspaceHasAcceptanceCapacity, assertWorkspaceHasInviteCapacity } from "@/lib/team-capacity";
@@ -68,6 +69,7 @@ export async function createInvite(input: {
   const inviteUrl = `${getBaseUrl()}/invite/${token}`;
   const emailConfig = await getResolvedPlatformEmailConfig();
   const supportEmail = emailConfig.supportEmail || emailConfig.smtpFrom || "Connexa <no-reply@connexa.local>";
+  const logoPath = path.join(process.cwd(), "public", "recurvos_connexa_transparent.png");
 
   await sendEmail({
     to: email,
@@ -90,6 +92,7 @@ export async function createInvite(input: {
       eyebrow: "Team invitation",
       title: "You have been invited",
       intro: `${input.inviterName} invited you to join ${input.workspaceName} on Connexa.`,
+      logoSrc: "cid:connexa-logo",
       footerNote: "This is an automated workspace invitation email.",
       bodyHtml: `
         <p style="margin:0 0 16px">
@@ -115,7 +118,14 @@ export async function createInvite(input: {
         </p>
         <p style="margin:0;color:#5f7699;font-size:14px">This invite expires in 7 days.</p>
       `
-    })
+    }),
+    attachments: [
+      {
+        filename: "recurvos_connexa_transparent.png",
+        path: logoPath,
+        cid: "connexa-logo"
+      }
+    ]
   });
 }
 

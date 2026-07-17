@@ -1,6 +1,7 @@
 import { AvailabilitySettingsCard } from "@/components/availability-settings-card";
 import { CalendarAppointmentsPanel } from "@/components/calendar-appointments-panel";
 import { DashboardShell } from "@/components/dashboard-shell";
+import { MorePageIntro } from "@/components/more-page-intro";
 import { getAgentAppointments } from "@/lib/appointments";
 import { requireCurrentAgent } from "@/lib/auth/current-user";
 import { getAgentAvailability } from "@/lib/availability";
@@ -11,7 +12,8 @@ export default async function CalendarPage() {
     getAgentAvailability(agent.id),
     getAgentAppointments(agent.id)
   ]);
-  const calendarAppointments = appointments.map((appointment) => ({
+  type AgentAppointment = (typeof appointments)[number];
+  const calendarAppointments = appointments.map((appointment: AgentAppointment) => ({
     id: appointment.id,
     title: appointment.title,
     type: formatAppointmentType(appointment.type),
@@ -29,33 +31,26 @@ export default async function CalendarPage() {
 
   return (
     <DashboardShell currentPath="/calendar">
-      <section className="settings-dark-hero">
-        <div className="settings-dark-copy">
-          <span className="badge connexa-public-badge">Team calendar</span>
-          <h1>Availability needs its own operational surface.</h1>
-          <p>
-            Keep weekly working hours, leave blocks, and temporary availability in one dedicated calendar page so
-            schedules stay visible before assignment decisions happen.
-          </p>
-        </div>
+      <div className="more-page-stack">
+        <MorePageIntro
+          badge="Calendar"
+          title="Availability, visits, and working windows in one place."
+          description="Keep weekly hours, one-off blocks, and customer appointments on the same operational page so managers and agents work from the same schedule."
+        />
 
-        <div className="settings-dark-status">
-          <div className="settings-dark-status-card">
-            <span>Your schedule</span>
-            <strong>{agent.name}</strong>
-            <p>Maintain your own working calendar here, while managers keep a read-only view from the Team page.</p>
-          </div>
-        </div>
-      </section>
+        <section className="calendar-page-primary">
+          <AvailabilitySettingsCard
+            agentName={agent.name}
+            appointments={calendarAppointments}
+            overrides={availability.overrides}
+            weeklyRules={availability.weeklyRules}
+          />
+        </section>
 
-      <AvailabilitySettingsCard
-        agentName={agent.name}
-        appointments={calendarAppointments}
-        overrides={availability.overrides}
-        weeklyRules={availability.weeklyRules}
-      />
-
-      <CalendarAppointmentsPanel appointments={calendarAppointments} />
+        <section className="calendar-page-secondary">
+          <CalendarAppointmentsPanel appointments={calendarAppointments} />
+        </section>
+      </div>
     </DashboardShell>
   );
 }

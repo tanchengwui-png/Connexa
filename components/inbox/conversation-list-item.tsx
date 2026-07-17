@@ -48,22 +48,29 @@ export function ConversationListItem({
               </strong>
             </div>
             <div className="inbox-row-meta-top">
+              <span className={`timeline-time${conversation.unreadCount > 0 ? " unread-time" : ""}`}>
+                {conversation.lastMessageAt}
+              </span>
               {conversation.unreadCount > 0 ? <span className="inbox-unread-pill">{conversation.unreadCount}</span> : null}
             </div>
           </div>
 
           <div className="inbox-list-preview">{conversation.lastMessagePreview}</div>
 
-          {conversation.snoozedUntil ? (
+          {conversation.isSnoozed && conversation.snoozedUntil ? (
             <div className="inbox-list-reminder">
-              <span className="inbox-list-reminder-label">Reminder</span>
+              <span className="inbox-list-reminder-label">{conversation.snoozeReason?.trim() || "Snoozed"}</span>
               <span>{conversation.snoozedUntil}</span>
             </div>
           ) : null}
 
           <div className="inbox-list-subline">
+            {conversation.channelLabel ? <span>{conversation.channelLabel}</span> : null}
             {conversation.isGroup ? null : <span>{conversation.phone}</span>}
             <span>{conversation.assigneeId ? conversation.assignee : "Unassigned"}</span>
+            {conversation.isPinned ? <span className="inbox-list-flag">Pinned</span> : null}
+            {conversation.isArchived ? <span className="inbox-list-flag">Archived</span> : null}
+            {conversation.isMuted ? <span className="inbox-list-flag">Muted</span> : null}
             {conversation.isHotLead ? <span className="inbox-list-flag">Hot lead</span> : null}
           </div>
         </div>

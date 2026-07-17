@@ -2,14 +2,16 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { disableInboxBrowserPushSubscription } from "@/lib/inbox-browser-notifications-client";
 
-export function LogoutButton() {
+export function LogoutButton({ className = "" }: { className?: string }) {
   const router = useRouter();
   const [pending, setPending] = useState(false);
 
   async function handleLogout() {
     setPending(true);
 
+    await disableInboxBrowserPushSubscription().catch(() => false);
     await fetch("/api/auth/logout", {
       method: "POST"
     });
@@ -19,7 +21,7 @@ export function LogoutButton() {
   }
 
   return (
-    <button className="button button-secondary" disabled={pending} onClick={handleLogout} type="button">
+    <button className={`button button-secondary ${className}`.trim()} disabled={pending} onClick={handleLogout} type="button">
       {pending ? "Signing out..." : "Log out"}
     </button>
   );

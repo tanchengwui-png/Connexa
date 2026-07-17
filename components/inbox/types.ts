@@ -1,13 +1,28 @@
 export type InboxConversation = {
   id: string;
+  channelId: string | null;
+  channelLabel: string | null;
   contactName: string;
   photoUrl: string | null;
   phone: string;
   isGroup: boolean;
   status: string;
+  isSnoozed: boolean;
   snoozedUntil: string | null;
   snoozedUntilIso: string | null;
+  snoozeReason: string | null;
+  snoozeStatus: string | null;
+  snoozedBy: {
+    id: string;
+    name: string;
+  } | null;
+  isMuted: boolean;
+  muteExpiration: string | null;
+  muteExpirationIso: string | null;
+  isArchived: boolean;
+  isPinned: boolean;
   unreadCount: number;
+  tags: string[];
   isHotLead: boolean;
   scheduledCount: number;
   nextScheduledAt: string | null;
@@ -24,7 +39,29 @@ export type InboxConversation = {
   lastMessageAtIso: string;
 };
 
-export type InboxFilterKey = "all" | "mine" | "assigned-others" | "unassigned" | "unread" | "hot";
+export const BUILT_IN_INBOX_FILTER_KEYS = [
+  "all",
+  "mine",
+  "assigned-others",
+  "unassigned",
+  "unread",
+  "hot",
+  "snoozed"
+] as const;
+
+export type InboxBuiltInFilterKey = (typeof BUILT_IN_INBOX_FILTER_KEYS)[number];
+export type InboxCustomFilterKey = `custom:${string}`;
+export type InboxFilterKey = InboxBuiltInFilterKey | InboxCustomFilterKey;
+export type InboxFilterCounts = Record<string, number>;
+export type InboxCustomFilter = {
+  key: InboxCustomFilterKey;
+  label: string;
+  tag: string;
+};
+
+export function isCustomInboxFilterKey(value: string): value is InboxCustomFilterKey {
+  return value.startsWith("custom:");
+}
 
 export type InboxQuickReply = {
   id: string;
@@ -40,6 +77,15 @@ export type InboxWhatsAppStatus = {
   isConfigured: boolean;
   mode: "live" | "mock" | "webjs";
   phoneNumberId: string | null;
+  channels: Array<{
+    id: string;
+    label: string;
+    phoneNumber: string | null;
+    runtimeStatus: string;
+    connectionMethod: "api" | "web";
+    incognitoMode: boolean;
+    supportsNewNumberConversation: boolean;
+  }>;
   updatedAt: string | null;
   runtimeStatus: string;
   isInboxReady: boolean;
@@ -56,13 +102,26 @@ export type InboxAgent = {
   name: string;
 };
 
+export type InboxContactTag = {
+  id: string;
+  name: string;
+  description: string | null;
+  source: "library" | "inferred";
+};
+
 export type InboxMediaAsset = {
   id: string;
   title: string;
+  originalName?: string;
   publicUrl: string;
-  kind: "IMAGE" | "AUDIO" | "VIDEO";
+  kind: "IMAGE" | "AUDIO" | "VIDEO" | "DOCUMENT";
   mimeType: string;
   sizeLabel: string;
+};
+
+export type InboxComposerAttachment = {
+  assetId: string;
+  sendAsVoice: boolean;
 };
 
 export type InboxMentionCandidate = {
@@ -84,6 +143,9 @@ export type InboxCurrentAgent = {
   id: string;
   name: string;
   role: "MANAGER" | "AGENT";
+  workspaceId: string;
+  inboxNotificationSoundsMuted: boolean;
+  inboxDesktopNotificationsPromptDismissedAt: string | null;
 };
 
 export type InboxSummary = {
@@ -124,6 +186,9 @@ export type InboxMessage = {
   outboundJobLastError: string | null;
   outboundJobStatus: string | null;
   providerMessageId: string | null;
+  deliveryStatus: "pending" | "sent" | "delivered" | "read";
+  ack: number | null;
+  ackUpdatedAt: string | null;
   replyToMessageId: string | null;
   replyToMessage: {
     id: string;
@@ -144,6 +209,8 @@ export type InboxMessage = {
 
 export type InboxSelectedConversation = {
   id: string;
+  channelId: string | null;
+  channelLabel: string | null;
   contactName: string;
   photoUrl: string | null;
   lead: {
@@ -192,8 +259,20 @@ export type InboxSelectedConversation = {
   phone: string;
   isGroup: boolean;
   status: string;
+  isSnoozed: boolean;
   snoozedUntil: string | null;
   snoozedUntilIso: string | null;
+  snoozeReason: string | null;
+  snoozeStatus: string | null;
+  snoozedBy: {
+    id: string;
+    name: string;
+  } | null;
+  isMuted: boolean;
+  muteExpiration: string | null;
+  muteExpirationIso: string | null;
+  isArchived: boolean;
+  isPinned: boolean;
   scheduledCount: number;
   nextScheduledAt: string | null;
   nextScheduledAtIso: string | null;

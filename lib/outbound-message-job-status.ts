@@ -4,7 +4,7 @@ declare global {
   var outboundMessageJobStatusesPromise: Promise<Set<string>> | undefined;
 }
 
-async function loadOutboundMessageJobStatuses() {
+async function loadOutboundMessageJobStatuses(): Promise<Set<string>> {
   const rows = await prisma.$queryRaw<Array<{ enumlabel: string }>>`
     SELECT e.enumlabel
     FROM pg_enum e
@@ -13,7 +13,7 @@ async function loadOutboundMessageJobStatuses() {
     ORDER BY e.enumsortorder
   `;
 
-  return new Set(rows.map((row) => row.enumlabel));
+  return new Set<string>(rows.map((row: { enumlabel: string }) => row.enumlabel));
 }
 
 export async function getSupportedOutboundMessageJobStatuses() {

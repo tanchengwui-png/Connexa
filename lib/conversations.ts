@@ -1,8 +1,22 @@
-import { ConversationAuditEventType } from "@prisma/client";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 import { applyHumanTakeoverPause } from "@/lib/automation-engine";
 import { expireStaleConversationWorkflowIfNeeded } from "@/lib/automation-workflow-timeouts";
-import { AppointmentStatus, ConversationStatus, LeadActivityType, LeadPriority, LeadStage, MessageDirection } from "@/lib/db-types";
+import {
+  emitConversationSnoozeEvent,
+  getSnoozeTransitionAction,
+  isConversationSnoozed
+} from "@/lib/conversation-snooze";
+import { emitChatStateToInbox } from "@/lib/inbox-realtime";
+import {
+  AppointmentStatus,
+  ConversationAuditEventType,
+  ConversationSnoozeStatus,
+  ConversationStatus,
+  LeadActivityType,
+  LeadPriority,
+  LeadStage,
+  MessageDirection
+} from "@/lib/db-types";
 import {
   createConversationNoteRecord,
   createOutboundMessageRecord,
@@ -20,7 +34,11 @@ import {
 import { findPropertyLeadConversation, upsertPropertyLeadForConversationRecord } from "@/lib/db-leads";
 import { getLeadCustomString, parseLeadCustomData } from "@/lib/lead-custom-fields";
 import { prisma } from "@/lib/prisma";
-import { deleteWhatsAppMessageForEveryone } from "@/lib/whatsapp-runtime";
+import { deleteWhatsAppMessageForEveryone, setWhatsAppChatMute } from "@/lib/whatsapp-runtime";
+import { getWhatsAppChannelStatusById } from "@/lib/whatsapp-channel";
+import { resolveConversationChannelId } from "@/lib/whatsapp-channel-routing";
+
+type TransactionClient = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 export async function listConversations() {
   const workspaceId = await requireCurrentWorkspaceId();
@@ -41,12 +59,29 @@ export async function listConversations() {
 
   return conversations.map((conversation) => ({
     id: conversation.id,
+    channelId: conversation.channelId,
+    channelLabel: conversation.channelLabel,
     contactName: conversation.contactName,
     photoUrl: conversation.photoUrl,
     phone: conversation.phone,
     isGroup: conversation.isGroup,
+    tags: splitTags(conversation.tags),
     status: conversation.status,
     snoozedUntil: conversation.snoozedUntil,
+    snoozeReason: conversation.snoozeReason,
+    snoozeStatus: conversation.snoozeStatus,
+    snoozedBy:
+      conversation.snoozedById && conversation.snoozedByName
+        ? {
+            id: conversation.snoozedById,
+            name: conversation.snoozedByName
+          }
+        : null,
+    isMuted: conversation.isMuted,
+    muteExpiration: conversation.muteExpiration,
+    isArchived: conversation.isArchived,
+    isPinned: conversation.isPinned,
+    isSnoozed: isConversationSnoozed(conversation),
     unreadCount: conversation.unreadCount,
     assignee: conversation.assigneeId
       ? {
@@ -57,6 +92,7 @@ export async function listConversations() {
     teammates: teammatesByConversationId.get(conversation.id) ?? [],
     isHotLead: conversation.isHotLead,
     lastMessagePreview: conversation.lastMessagePreview,
+    lastMessageDirection: conversation.lastMessageDirection,
     lastMessageAt: conversation.lastMessageAt
   }));
 }
@@ -140,19 +176,19 @@ export async function getConversationDetail(conversationId: string) {
   }
 
   const teammates = teammateRows
-    .filter((teammate) => teammate.conversationId === conversation.id)
-    .map((teammate) => ({
+    .filter((teammate: (typeof teammateRows)[number]) => teammate.conversationId === conversation.id)
+    .map((teammate: (typeof teammateRows)[number]) => ({
       id: teammate.agentId,
       name: teammate.agentName
     }));
 
   const messageProviderIds = messages
-    .map((message) => message.providerMessageId?.trim() ?? "")
+    .map((message: (typeof messages)[number]) => message.providerMessageId?.trim() ?? "")
     .filter(Boolean);
   const messageProviderLookupIds = Array.from(
     new Set(
       messageProviderIds
-        .flatMap((providerMessageId) => [providerMessageId, getWhatsAppMessageShortId(providerMessageId)])
+        .flatMap((providerMessageId: string) => [providerMessageId, getWhatsAppMessageShortId(providerMessageId)])
         .filter(Boolean)
     )
   );
@@ -243,6 +279,8 @@ export async function getConversationDetail(conversationId: string) {
 
   return {
     id: conversation.id,
+    channelId: conversation.channelId,
+    channelLabel: conversation.channelLabel,
     contactName: conversation.contactName,
     photoUrl: conversation.photoUrl,
     lead: lead
@@ -266,6 +304,20 @@ export async function getConversationDetail(conversationId: string) {
     isGroup: conversation.isGroup,
     status: conversation.status,
     snoozedUntil: conversation.snoozedUntil,
+    snoozeReason: conversation.snoozeReason,
+    snoozeStatus: conversation.snoozeStatus,
+    snoozedBy:
+      conversation.snoozedById && conversation.snoozedByName
+        ? {
+            id: conversation.snoozedById,
+            name: conversation.snoozedByName
+          }
+        : null,
+    isMuted: conversation.isMuted,
+    muteExpiration: conversation.muteExpiration,
+    isArchived: conversation.isArchived,
+    isPinned: conversation.isPinned,
+    isSnoozed: isConversationSnoozed(conversation),
     assignee: conversation.assigneeId
       ? {
           id: conversation.assigneeId,
@@ -274,13 +326,13 @@ export async function getConversationDetail(conversationId: string) {
       : null,
     teammates,
     tags: splitTags(conversation.tags),
-    notes: notes.map((note) => ({
+    notes: notes.map((note: (typeof notes)[number]) => ({
       id: note.id,
       body: note.body,
       author: note.author,
       createdAt: note.createdAt
     })),
-    auditEvents: auditEvents.map((event) => ({
+    auditEvents: auditEvents.map((event: (typeof auditEvents)[number]) => ({
       id: event.id,
       type: event.type,
       actor: event.actor.name,
@@ -297,7 +349,7 @@ export async function getConversationDetail(conversationId: string) {
           lastMatchedRuleName: matchedRule?.name ?? null
         }
       : null,
-    messages: messages.map((message) => ({
+    messages: messages.map((message: (typeof messages)[number]) => ({
       id: message.id,
       attachmentMimeType: message.attachmentMimeType,
       attachmentName: message.attachmentName,
@@ -311,6 +363,9 @@ export async function getConversationDetail(conversationId: string) {
       outboundJobStatus: message.outboundJobStatus,
       providerMessageId: message.providerMessageId,
       rawPayload: message.rawPayload,
+      deliveryStatus: message.deliveryStatus,
+      ack: message.ack,
+      ackUpdatedAt: message.ackUpdatedAt,
       whatsAppEnvelopeMentionedIdsJson: message.whatsAppEnvelopeMentionedIdsJson,
       whatsAppEnvelopeGroupMentionsJson: message.whatsAppEnvelopeGroupMentionsJson,
       whatsAppEnvelopeRawJson: message.whatsAppEnvelopeRawJson,
@@ -391,6 +446,7 @@ export async function updateConversation(
     assigneeId?: string | null;
     teammateIds?: string[];
     snoozedUntil?: Date | null;
+    snoozeReason?: string | null;
     unreadCount?: number;
   }
 ) {
@@ -402,10 +458,42 @@ export async function updateConversation(
     throw new Error("Conversation not found.");
   }
 
+  const nextSnoozedUntil = updates.snoozedUntil === undefined ? conversation.snoozedUntil : updates.snoozedUntil;
+  const nextSnoozeReason =
+    updates.snoozedUntil === undefined
+      ? conversation.snoozeReason
+      : updates.snoozedUntil
+        ? updates.snoozeReason?.trim() || null
+        : null;
+  const nextSnoozeStatus =
+    updates.snoozedUntil === undefined
+      ? conversation.snoozeStatus
+      : updates.snoozedUntil
+        ? ConversationSnoozeStatus.ACTIVE
+        : ConversationSnoozeStatus.MANUAL;
+  const snoozeTransitionAction = getSnoozeTransitionAction({
+    current: {
+      workspaceId,
+      channelId: conversation.channelId,
+      conversationId: conversation.id,
+      snoozedUntil: conversation.snoozedUntil,
+      snoozeReason: conversation.snoozeReason,
+      snoozeStatus: conversation.snoozeStatus
+    },
+    next: {
+      snoozedUntil: nextSnoozedUntil,
+      snoozeReason: nextSnoozeReason,
+      snoozeStatus: nextSnoozeStatus
+    }
+  });
+
   const updatedConversation = await updateConversationRecord(conversation.id, {
     status: updates.status,
     assigneeId: updates.assigneeId,
     snoozedUntil: updates.snoozedUntil,
+    snoozedById: updates.snoozedUntil ? agent.id : null,
+    snoozeReason: updates.snoozedUntil === undefined ? undefined : nextSnoozeReason,
+    snoozeStatus: updates.snoozedUntil === undefined ? undefined : nextSnoozeStatus,
     unreadCount: updates.unreadCount
   });
 
@@ -433,6 +521,125 @@ export async function updateConversation(
       }
     });
   }
+
+  if (updates.snoozedUntil !== undefined && snoozeTransitionAction) {
+    await emitConversationSnoozeEvent({
+      action: snoozeTransitionAction,
+      channelId: conversation.channelId,
+      conversationId: conversation.id,
+      snoozeReason: nextSnoozeReason,
+      snoozeStatus: nextSnoozeStatus,
+      snoozedUntil: nextSnoozedUntil,
+      trigger: "manual",
+      workspaceId
+    });
+  }
+
+  if (
+    updates.unreadCount !== undefined &&
+    updates.unreadCount !== conversation.unreadCount &&
+    updatedConversation &&
+    typeof updatedConversation === "object" &&
+    "unreadCount" in updatedConversation
+  ) {
+    await emitChatStateToInbox({
+      workspaceId,
+      channelId:
+        updatedConversation && typeof updatedConversation === "object" && "channelId" in updatedConversation
+          ? (updatedConversation.channelId as string | null)
+          : conversation.channelId,
+      conversationId: conversation.id,
+      isMuted:
+        updatedConversation && typeof updatedConversation === "object" && "isMuted" in updatedConversation
+          ? Boolean(updatedConversation.isMuted)
+          : conversation.isMuted,
+      muteExpiration:
+        updatedConversation &&
+        typeof updatedConversation === "object" &&
+        "muteExpiration" in updatedConversation &&
+        updatedConversation.muteExpiration instanceof Date
+          ? updatedConversation.muteExpiration.toISOString()
+          : conversation.muteExpiration?.toISOString() ?? null,
+      isArchived:
+        updatedConversation && typeof updatedConversation === "object" && "isArchived" in updatedConversation
+          ? Boolean(updatedConversation.isArchived)
+          : conversation.isArchived,
+      isPinned:
+        updatedConversation && typeof updatedConversation === "object" && "isPinned" in updatedConversation
+          ? Boolean(updatedConversation.isPinned)
+          : conversation.isPinned,
+      unreadCount:
+        updatedConversation && typeof updatedConversation === "object" && "unreadCount" in updatedConversation
+          ? Number(updatedConversation.unreadCount ?? 0)
+          : updates.unreadCount,
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  return updatedConversation;
+}
+
+export async function updateConversationMute(
+  conversationId: string,
+  muteDuration: "8h" | "1w" | "always" | null
+) {
+  const agent = await requireCurrentAgent();
+  const workspaceId = agent.workspaceId;
+  const conversation = await findConversationForWorkspace(conversationId, workspaceId);
+
+  if (!conversation) {
+    throw new Error("Conversation not found.");
+  }
+
+  const channelId = await resolveConversationChannelId({
+    workspaceId,
+    conversationId: conversation.id,
+    fallbackChannelId: conversation.channelId ?? null
+  });
+  if (!channelId) {
+    throw new Error("Mute is only available for WhatsApp Personal conversations.");
+  }
+
+  const channel = await getWhatsAppChannelStatusById(channelId);
+  if (!channel || channel.workspaceId !== workspaceId || channel.connectionMethod !== "web") {
+    throw new Error("Mute is only available for WhatsApp Personal conversations.");
+  }
+
+  const muteUntil =
+    muteDuration === "8h"
+      ? new Date(Date.now() + 8 * 60 * 60 * 1000)
+      : muteDuration === "1w"
+        ? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+        : null;
+
+  const runtimeResult = await setWhatsAppChatMute({
+    workspaceId,
+    channelId,
+    conversationId,
+    mute: muteDuration !== null,
+    muteUntil
+  });
+
+  const updatedConversation = await updateConversationRecord(conversation.id, {
+    isMuted: runtimeResult.isMuted,
+    muteExpiration: runtimeResult.muteExpiration,
+    unreadCount: conversation.unreadCount
+  });
+
+  await emitChatStateToInbox({
+    workspaceId,
+    channelId,
+    conversationId: conversation.id,
+    isMuted: runtimeResult.isMuted,
+    muteExpiration: runtimeResult.muteExpiration?.toISOString() ?? null,
+    isArchived: conversation.isArchived,
+    isPinned: conversation.isPinned,
+    unreadCount:
+      updatedConversation && typeof updatedConversation === "object" && "unreadCount" in updatedConversation
+        ? Number(updatedConversation.unreadCount ?? conversation.unreadCount)
+        : conversation.unreadCount,
+    timestamp: new Date().toISOString()
+  });
 
   return updatedConversation;
 }
@@ -654,7 +861,8 @@ export async function deleteConversationMessage(conversationId: string, messageI
       messageId: message.id
     },
     select: {
-      id: true
+      id: true,
+      channelId: true
     }
   });
 
@@ -664,10 +872,11 @@ export async function deleteConversationMessage(conversationId: string, messageI
 
   await deleteWhatsAppMessageForEveryone({
     workspaceId,
+    channelId: outboundJob.channelId ?? conversation.channelId ?? null,
     providerMessageId: message.providerMessageId
   });
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: TransactionClient) => {
     await tx.message.update({
       where: {
         id: message.id

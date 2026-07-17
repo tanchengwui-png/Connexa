@@ -2,11 +2,13 @@
 
 import type { Dispatch, SetStateAction } from "react";
 import { useState } from "react";
+import { ContactLabelsManager } from "@/components/inbox/contact-labels-manager";
 import { ChevronLeftIcon, LightningIcon, NoteIcon } from "@/components/inbox/icons";
 import { MetadataChip } from "@/components/inbox/metadata-chip";
 import { MetadataRow } from "@/components/inbox/metadata-row";
 import { SidebarCard } from "@/components/inbox/sidebar-card";
 import { SidebarField } from "@/components/inbox/sidebar-field";
+import { Button } from "@/components/ui/button";
 import { formatFinancingTag } from "@/lib/financing-tags";
 import {
   createMalaysiaDate,
@@ -14,12 +16,19 @@ import {
   getMalaysiaDateTimeParts,
   parseMalaysiaDateTimeLocalInput
 } from "@/lib/malaysia-time";
-import type { InboxQuickReply, InboxSelectedConversation } from "@/components/inbox/types";
+import type { InboxContactTag, InboxQuickReply, InboxSelectedConversation } from "@/components/inbox/types";
 import { useToast } from "@/components/toast-provider";
 
 type DetailTab = "notes" | "profile" | "recent";
 
 type DetailPanelProps = {
+  availableContactTags: InboxContactTag[];
+  onAddTag: (tagName: string) => Promise<{ error?: string; ok: boolean }>;
+  onCreateTag: (input: { description: string | null; name: string }) => Promise<{
+    error?: string;
+    ok: boolean;
+    tag?: InboxContactTag;
+  }>;
   onCreateLeadRecord: () => Promise<void>;
   onHideDetails: () => void;
   onRefreshConversation: () => void;
@@ -30,6 +39,9 @@ type DetailPanelProps = {
 };
 
 export function InboxDetailPanel({
+  availableContactTags,
+  onAddTag,
+  onCreateTag,
   onCreateLeadRecord,
   onHideDetails,
   onRefreshConversation,
@@ -100,10 +112,8 @@ export function InboxDetailPanel({
         <div className="inbox-detail-overview">
           <div className="inbox-detail-overview-head">
             <div className="inbox-detail-overview-copy">
-              <strong>Contact info</strong>
-              <span className="inbox-detail-overview-name" title={selectedConversation.contactName}>
-                {selectedConversation.contactName}
-              </span>
+              <strong>Contact Details</strong>
+              <span className="inbox-detail-overview-name">Conversation profile and activity</span>
             </div>
             <button
               aria-label="Hide details"
@@ -114,6 +124,51 @@ export function InboxDetailPanel({
               <ChevronLeftIcon />
             </button>
           </div>
+        </div>
+
+        <div className="inbox-contact-profile-card">
+          <div className="inbox-contact-profile-avatar">
+            {selectedConversation.photoUrl ? (
+              <img
+                alt=""
+                className="chatbox-avatar-image"
+                src={`/api/conversations/${selectedConversation.id}/avatar`}
+              />
+            ) : (
+              getInitials(selectedConversation.contactName)
+            )}
+          </div>
+          <strong className="inbox-contact-profile-name">{selectedConversation.contactName}</strong>
+          <span className="inbox-contact-profile-subline">
+            {selectedConversation.isGroup ? "Group conversation" : selectedConversation.phone}
+          </span>
+        </div>
+
+        <div className="inbox-contact-quick-actions">
+          <a className="inbox-contact-quick-action" href={`/message-logs?conversationId=${selectedConversation.id}`}>
+            <span>Logs</span>
+          </a>
+          {selectedConversation.scheduledCount ? (
+            <a className="inbox-contact-quick-action" href={`/scheduled-messages?conversationId=${selectedConversation.id}`}>
+              <span>Scheduled</span>
+            </a>
+          ) : (
+            <button className="inbox-contact-quick-action" onClick={() => setActiveTab("recent")} type="button">
+              <span>Recent</span>
+            </button>
+          )}
+          {selectedConversation.lead ? (
+            <a className="inbox-contact-quick-action" href={`/leads/${selectedConversation.lead.id}`}>
+              <span>Lead</span>
+            </a>
+          ) : (
+            <button className="inbox-contact-quick-action" onClick={() => void onCreateLeadRecord()} type="button">
+              <span>Create Lead</span>
+            </button>
+          )}
+          <button className="inbox-contact-quick-action" onClick={() => setActiveTab("notes")} type="button">
+            <span>Notes</span>
+          </button>
         </div>
 
         <div className="inbox-detail-tabs" role="tablist" aria-label="Contact info tabs">
@@ -148,17 +203,13 @@ export function InboxDetailPanel({
             </SidebarCard>
 
             <SidebarCard eyebrow="Tags" title="Contact labels">
-              <div className="inbox-detail-chip-row">
-                {selectedConversation.tags.length ? (
-                  selectedConversation.tags.map((tag) => (
-                    <MetadataChip key={tag} onRemove={() => onRemoveTag(tag)}>
-                      {tag}
-                    </MetadataChip>
-                  ))
-                ) : (
-                  <span className="inbox-detail-placeholder">No tags applied yet.</span>
-                )}
-              </div>
+              <ContactLabelsManager
+                availableTags={availableContactTags}
+                onAddTag={onAddTag}
+                onCreateTag={onCreateTag}
+                onRemoveTag={onRemoveTag}
+                selectedTags={selectedConversation.tags}
+              />
             </SidebarCard>
 
             {workspaceIndustryType === "PROPERTY" ? (
@@ -267,6 +318,14 @@ export function InboxDetailPanel({
   );
 }
 
+function getInitials(value: string) {
+  return value
+    .split(" ")
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? "")
+    .join("");
+}
+
 function getProfileIdentityField(selectedConversation: NonNullable<DetailPanelProps["selectedConversation"]>) {
   if (selectedConversation.isGroup) {
     return {
@@ -291,15 +350,16 @@ function TabButton({
   onClick: () => void;
 }) {
   return (
-    <button
+    <Button
       aria-selected={active}
       className={`inbox-detail-tab${active ? " active" : ""}`}
       onClick={onClick}
       role="tab"
-      type="button"
+      selected={active}
+      variant="toggle"
     >
       {label}
-    </button>
+    </Button>
   );
 }
 

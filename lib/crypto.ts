@@ -42,3 +42,32 @@ export function decryptSecret(payload: string) {
 
   return decrypted.toString("utf8");
 }
+
+export function hashSecret(value: string) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+export function maskSecret(value: string | null | undefined, visibleChars = 4) {
+  const normalized = `${value ?? ""}`;
+  if (!normalized) {
+    return "";
+  }
+
+  if (normalized.length <= visibleChars) {
+    return "*".repeat(normalized.length);
+  }
+
+  return `${"*".repeat(Math.max(8, normalized.length - visibleChars))}${normalized.slice(-visibleChars)}`;
+}
+
+export function sanitizeSensitiveText(value: string | null | undefined) {
+  const normalized = `${value ?? ""}`;
+  if (!normalized) {
+    return "";
+  }
+
+  return normalized
+    .replace(/Bearer\s+[A-Za-z0-9._~-]+/gi, "Bearer [REDACTED]")
+    .replace(/([?&](?:access_?token|token|authorization)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/("?(?:access_?token|app_?secret|authorization)"?\s*[:=]\s*"?)([^",\s}]+)/gi, "$1[REDACTED]");
+}

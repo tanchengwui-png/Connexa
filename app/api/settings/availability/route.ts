@@ -11,6 +11,7 @@ export async function POST(request: NextRequest) {
       weeklyRules?: Array<{
         dayOfWeek?: number;
         enabled?: boolean;
+        allDay?: boolean;
         startTime?: string;
         endTime?: string;
       }>;
@@ -26,6 +27,7 @@ export async function POST(request: NextRequest) {
       weeklyRules: (body.weeklyRules ?? []).map((rule) => ({
         dayOfWeek: Number(rule.dayOfWeek ?? -1),
         enabled: Boolean(rule.enabled),
+        allDay: Boolean(rule.allDay),
         startTime: String(rule.startTime ?? ""),
         endTime: String(rule.endTime ?? "")
       })),

@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.typecheck.json",
+  "include": [
+    "app/account-settings/page.tsx",
+    "app/api/account/change-password/route.ts",
+    "app/api/platform/security/users/[id]/route.ts",
+    "app/api/platform/security/users/[id]/logs/route.ts",
+    "app/api/platform/security/users/[id]/reset-password/route.ts",
+    "app/platform/security/page.tsx",
+    "components/account-security-card.tsx",
+    "components/platform-user-security-manager.tsx",
+    "lib/auth/change-password.ts",
+    "lib/auth/password-reset.ts",
+    "lib/auth/password-reset-infra.ts",
+    "lib/platform-security.ts",
+    "lib/platform-security-route-handlers.ts",
+    "lib/user-security-audit.ts",
+    "tests/password-reset.test.ts",
+    "tests/platform-security.test.tsx",
+    "tests/change-password.test.ts",
+    "types/**/*.d.ts"
+  ]
+}

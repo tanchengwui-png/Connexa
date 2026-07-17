@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { LeadNextActionType, LeadPriority, LeadSource, LeadStage } from "@prisma/client";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
+import { LeadNextActionType, LeadPriority, LeadSource, LeadStage } from "@/lib/db-types";
 import { updateLeadRecord } from "@/lib/leads";
 
 type RouteContext = {

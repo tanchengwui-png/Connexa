@@ -1,6 +1,11 @@
 "use client";
 
 import { FormEvent, useRef, useState } from "react";
+import {
+  convertSessionTimeoutToMinutes,
+  splitSessionTimeoutForDisplay,
+  type SessionTimeoutUnit
+} from "@/lib/session-timeout";
 
 type PlatformSmtpSettingsFormProps = {
   initialValues: {
@@ -19,6 +24,10 @@ type PlatformSmtpSettingsFormProps = {
     billplzSandbox: boolean;
     automationWorkflowIdleHours: number;
     automationWorkflowExpireHours: number;
+    freeTrialDurationDays: number;
+    expiredAccountCleanupDays: number;
+    sessionTimeoutMinutes: number;
+    rememberMeTimeoutMinutes: number;
     billplzConfigured: boolean;
     billplzApiKeyConfigured: boolean;
     billplzXSignatureKeyConfigured: boolean;
@@ -27,12 +36,18 @@ type PlatformSmtpSettingsFormProps = {
 };
 
 export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: PlatformSmtpSettingsFormProps) {
+  const initialSessionTimeout = splitSessionTimeoutForDisplay(initialValues.sessionTimeoutMinutes);
+  const initialRememberTimeout = splitSessionTimeoutForDisplay(initialValues.rememberMeTimeoutMinutes);
   const formRef = useRef<HTMLFormElement>(null);
   const [pending, setPending] = useState(false);
   const [testPending, setTestPending] = useState(false);
   const [billplzTestPending, setBillplzTestPending] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [sessionTimeoutValue, setSessionTimeoutValue] = useState(String(initialSessionTimeout.value));
+  const [sessionTimeoutUnit, setSessionTimeoutUnit] = useState<SessionTimeoutUnit>(initialSessionTimeout.unit);
+  const [rememberTimeoutValue, setRememberTimeoutValue] = useState(String(initialRememberTimeout.value));
+  const [rememberTimeoutUnit, setRememberTimeoutUnit] = useState<SessionTimeoutUnit>(initialRememberTimeout.unit);
   const smtpReady =
     Boolean(initialValues.smtpHost) &&
     Boolean(initialValues.smtpUser) &&
@@ -72,7 +87,17 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
         billplzCollectionId: String(formData.get("billplzCollectionId") ?? ""),
         billplzSandbox: formData.get("billplzSandbox") === "on",
         automationWorkflowIdleHours: Number(formData.get("automationWorkflowIdleHours") ?? 24),
-        automationWorkflowExpireHours: Number(formData.get("automationWorkflowExpireHours") ?? 72)
+        automationWorkflowExpireHours: Number(formData.get("automationWorkflowExpireHours") ?? 72),
+        freeTrialDurationDays: Number(formData.get("freeTrialDurationDays") ?? 14),
+        expiredAccountCleanupDays: Number(formData.get("expiredAccountCleanupDays") ?? 60),
+        sessionTimeoutMinutes: convertSessionTimeoutToMinutes(
+          Number(sessionTimeoutValue || 0),
+          sessionTimeoutUnit
+        ),
+        rememberMeTimeoutMinutes: convertSessionTimeoutToMinutes(
+          Number(rememberTimeoutValue || 0),
+          rememberTimeoutUnit
+        )
       })
     });
 
@@ -178,38 +203,60 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
       </div>
 
       <form className="availability-settings-form platform-settings-workspace" onSubmit={handleSubmit} ref={formRef}>
-        <div className="platform-settings-status-strip">
-          <article className="platform-settings-status-pill">
-            <span>SMTP</span>
-            <strong>{smtpReady ? "Ready" : "Incomplete"}</strong>
+        <div className="platform-settings-status-shell">
+          <div className="platform-settings-status-copy">
+            <span className="platform-settings-header-eyebrow">
+              {overallReady ? "Platform ready" : "Platform needs attention"}
+            </span>
+            <strong>Platform settings</strong>
             <p>
-              {smtpReady
-                ? "Email delivery is configured."
-                : "Add host, sender, support email, and password."}
+              Keep delivery, checkout, and workflow inactivity policy in one place so configuration status and the
+              editable controls stay together.
             </p>
-          </article>
+          </div>
 
-          <article className="platform-settings-status-pill">
-            <span>Billplz</span>
-            <strong>{billplzReady ? "Ready" : "Incomplete"}</strong>
-            <p>
-              {billplzReady
-                ? "Checkout can create and validate bills."
-                : "Add API key, X signature key, and collection ID."}
-            </p>
-          </article>
+          <div className="platform-settings-status-strip">
+            <article className="platform-settings-status-pill">
+              <span>SMTP</span>
+              <strong>{smtpReady ? "Ready" : "Incomplete"}</strong>
+              <p>
+                {smtpReady
+                  ? "Email delivery is configured."
+                  : "Add host, sender, support email, and password."}
+              </p>
+            </article>
 
-          <article className="platform-settings-status-pill">
-            <span>Workflow timeout</span>
-            <strong>
-              {initialValues.automationWorkflowIdleHours}h idle · {initialValues.automationWorkflowExpireHours}h expire
-            </strong>
-            <p>Global fallback when a waiting step has no specific timeout.</p>
-          </article>
+            <article className="platform-settings-status-pill">
+              <span>Billplz</span>
+              <strong>{billplzReady ? "Ready" : "Incomplete"}</strong>
+              <p>
+                {billplzReady
+                  ? "Checkout can create and validate bills."
+                  : "Add API key, X signature key, and collection ID."}
+              </p>
+            </article>
+
+            <article className="platform-settings-status-pill">
+              <span>Workflow timeout</span>
+              <strong>
+                {initialValues.automationWorkflowIdleHours}h idle · {initialValues.automationWorkflowExpireHours}h expire
+              </strong>
+              <p>Global fallback when a waiting step has no specific timeout.</p>
+            </article>
+
+            <article className="platform-settings-status-pill">
+              <span>Session policy</span>
+              <strong>
+                {formatSessionTimeoutSummary(initialSessionTimeout)} idle ·{" "}
+                {formatSessionTimeoutSummary(initialRememberTimeout)} remember me
+              </strong>
+              <p>Idle sessions renew from activity. Remember me stays fixed until its original expiry.</p>
+            </article>
+          </div>
         </div>
 
-        <div className="platform-settings-columns full-width">
-          <section className="availability-settings-section">
+        <div className="platform-settings-columns full-width platform-settings-primary-grid">
+          <section className="availability-settings-section platform-settings-section-card">
             <div className="availability-settings-section-head">
               <strong>SMTP server and sender</strong>
               <p className="table-subtle">
@@ -275,7 +322,7 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
             </div>
           </section>
 
-          <section className="availability-settings-section">
+          <section className="availability-settings-section platform-settings-section-card">
             <div className="availability-settings-section-head">
               <strong>Branding and Billplz checkout</strong>
               <p className="table-subtle">
@@ -356,7 +403,109 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
             </p>
           </section>
 
-          <section className="availability-settings-section">
+          <section className="availability-settings-section platform-settings-section-card">
+            <div className="availability-settings-section-head">
+              <strong>Login session timeout</strong>
+              <p className="table-subtle">
+                Applies to workspace and platform admin logins. Idle timeout renews from activity. Remember me timeout stays fixed from the original login.
+              </p>
+            </div>
+
+            <div className="platform-settings-field-grid compact">
+              <label className="control-block">
+                <span className="control-label">Idle session timeout</span>
+                <input
+                  className="control-input"
+                  min="1"
+                  onChange={(event) => setSessionTimeoutValue(event.target.value)}
+                  type="number"
+                  value={sessionTimeoutValue}
+                />
+              </label>
+
+              <label className="control-block">
+                <span className="control-label">Unit</span>
+                <select
+                  className="control-input app-select"
+                  onChange={(event) => setSessionTimeoutUnit(event.target.value as SessionTimeoutUnit)}
+                  value={sessionTimeoutUnit}
+                >
+                  <option value="minutes">Minutes</option>
+                  <option value="hours">Hours</option>
+                  <option value="days">Days</option>
+                </select>
+              </label>
+
+              <label className="control-block">
+                <span className="control-label">Remember me timeout</span>
+                <input
+                  className="control-input"
+                  min="1"
+                  onChange={(event) => setRememberTimeoutValue(event.target.value)}
+                  type="number"
+                  value={rememberTimeoutValue}
+                />
+              </label>
+
+              <label className="control-block">
+                <span className="control-label">Unit</span>
+                <select
+                  className="control-input app-select"
+                  onChange={(event) => setRememberTimeoutUnit(event.target.value as SessionTimeoutUnit)}
+                  value={rememberTimeoutUnit}
+                >
+                  <option value="minutes">Minutes</option>
+                  <option value="hours">Hours</option>
+                  <option value="days">Days</option>
+                </select>
+              </label>
+
+              <div className="platform-settings-timeout-hint">
+                <strong>Session behavior</strong>
+                <p>
+                  Idle session timeout: users are logged out after this period of inactivity.
+                </p>
+                <p>
+                  Remember me timeout: remembered devices can restore login until this period expires.
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section className="availability-settings-section platform-settings-section-card">
+            <div className="availability-settings-section-head">
+              <strong>Subscription lifecycle</strong>
+              <p className="table-subtle">
+                New trials use the current duration. Existing subscriptions keep their original dates.
+              </p>
+            </div>
+
+            <div className="platform-settings-field-grid compact">
+              <label className="control-block">
+                <span className="control-label">Free Trial Duration (Days)</span>
+                <input
+                  className="control-input"
+                  defaultValue={String(initialValues.freeTrialDurationDays)}
+                  min="1"
+                  name="freeTrialDurationDays"
+                  type="number"
+                />
+              </label>
+
+              <label className="control-block">
+                <span className="control-label">Auto Cleanup Expired Accounts After (Days)</span>
+                <input
+                  className="control-input"
+                  defaultValue={String(initialValues.expiredAccountCleanupDays)}
+                  min="1"
+                  name="expiredAccountCleanupDays"
+                  type="number"
+                />
+              </label>
+            </div>
+          </section>
+
+          <section className="availability-settings-section platform-settings-section-card">
             <div className="availability-settings-section-head">
               <strong>Automation workflow inactivity</strong>
               <p className="table-subtle">
@@ -425,4 +574,9 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
       </form>
     </section>
   );
+}
+
+function formatSessionTimeoutSummary(value: { value: number; unit: SessionTimeoutUnit }) {
+  const suffix = value.unit === "days" ? "d" : value.unit === "hours" ? "h" : "m";
+  return `${value.value}${suffix}`;
 }

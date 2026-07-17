@@ -13,6 +13,7 @@ model Workspace {
   slug      String   @unique
   industryType IndustryType @default(PROPERTY)
   plan      String   @default("trial")
+  mediaLibraryUsedBytes BigInt @default(0)
   trialEndsAt DateTime?
   onboardingCompletedAt DateTime?
   createdAt DateTime @default(now())
@@ -32,7 +33,7 @@ model Workspace {
   conversationAuditEvents ConversationAuditEvent[]
   sessions  Session[]
   invites   Invite[]
-  whatsAppChannel WhatsAppChannel?
+  whatsAppChannels WhatsAppChannel[]
   appointments Appointment[]
   outboundMessageJobs OutboundMessageJob[]
   automationSettings WorkspaceAutomationSettings?
@@ -44,8 +45,17 @@ model Workspace {
   mediaAssets WorkspaceMediaAsset[]
   whatsAppMessageEnvelopes WhatsAppMessageEnvelope[]
   whatsAppRuntimeEvents WhatsAppRuntimeEvent[]
+  messageUsageLogs MessageUsageLog[]
   packageSubscriptions WorkspacePackageSubscription[]
   paymentTransactions PaymentTransaction[]
+  pendingPackageUpgrades PendingWorkspacePackageUpgrade[]
+  billingProfile WorkspaceBillingProfile?
+  invoices Invoice[]
+  billingHistories BillingHistory[]
+  emailLogs EmailLog[]
+  contactImports ContactImport[]
+  inboxNewConversationRequests InboxNewConversationRequest[]
+  rememberSessions RememberSession[]
 }
 
 model Account {
@@ -57,6 +67,7 @@ model Account {
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
   agents          Agent[]
+  browserPushSubscriptions BrowserPushSubscription[]
 }
 
 model Agent {
@@ -66,6 +77,8 @@ model Agent {
   name        String
   email       String
   phone       String?
+  inboxNotificationSoundsMuted Boolean @default(false)
+  inboxDesktopNotificationsPromptDismissedAt DateTime?
   passwordHash String?
   emailVerifiedAt DateTime?
   lastLoginAt DateTime?
@@ -76,10 +89,12 @@ model Agent {
   updatedAt   DateTime    @updatedAt
   account     Account?    @relation(fields: [accountId], references: [id], onDelete: SetNull)
   workspace   Workspace   @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requestedPackageUpgrades PendingWorkspacePackageUpgrade[]
   leads       Lead[]      @relation("LeadOwner")
   createdLeadActivities LeadActivity[] @relation("LeadActivityCreator")
   ownedContacts Contact[] @relation("ContactOwner")
   assignedConversations Conversation[] @relation("ConversationAssignee")
+  snoozedConversations Conversation[] @relation("ConversationSnoozedBy")
   contactTeammates ContactTeammate[]
   conversationTeammates ConversationTeammate[]
   conversationAuditEvents ConversationAuditEvent[] @relation("ConversationAuditActor")
@@ -88,20 +103,46 @@ model Agent {
   sentMessages Message[] @relation("MessageSender")
   notes       Note[]
   sessions    Session[]
+  rememberSessions RememberSession[]
   emailVerificationTokens EmailVerificationToken[]
   sentInvites Invite[] @relation("InviteSender")
   availabilityRules AgentAvailabilityRule[]
   availabilityOverrides AgentAvailabilityOverride[]
   appointments Appointment[] @relation("AppointmentOwner")
-  managedWhatsAppChannel WhatsAppChannel? @relation("WhatsAppChannelConnector")
+  managedWhatsAppChannels WhatsAppChannel[] @relation("WhatsAppChannelConnector")
   uploadedMediaAssets WorkspaceMediaAsset[]
   createdCampaignDrafts CampaignDraft[] @relation("CampaignDraftCreator")
   createdCampaignRuns CampaignRun[] @relation("CampaignRunCreator")
   workflowAssignmentCursors AutomationWorkflowAssignmentCursor[] @relation("WorkflowAssignmentCursorAgent")
+  contactImports ContactImport[] @relation("ContactImportUploader")
+  inboxNewConversationRequests InboxNewConversationRequest[]
+  browserPushSubscriptions BrowserPushSubscription[] @relation("BrowserPushSubscriptionAgent")
+  userSecurityAuditLogs UserSecurityAuditLog[]
 
   @@index([accountId])
   @@index([workspaceId])
   @@unique([workspaceId, email])
+}
+
+model BrowserPushSubscription {
+  id                  String   @id @default(cuid())
+  accountId           String?
+  agentId             String
+  endpoint            String   @unique
+  p256dhKey           String
+  authKey             String
+  userAgent           String?
+  enabled             Boolean  @default(true)
+  lastSuccessfulSendAt DateTime?
+  lastFailureAt       DateTime?
+  lastFailureCode     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  account             Account? @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  agent               Agent    @relation("BrowserPushSubscriptionAgent", fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([accountId, enabled])
+  @@index([agentId, enabled])
 }
 
 model AgentAvailabilityRule {
@@ -109,6 +150,7 @@ model AgentAvailabilityRule {
   agentId    String
   dayOfWeek Int
   enabled   Boolean  @default(false)
+  allDay    Boolean  @default(false)
   startTime String
   endTime   String
   createdAt DateTime @default(now())
@@ -149,6 +191,21 @@ model Session {
   @@index([workspaceId, expiresAt])
 }
 
+model RememberSession {
+  id          String   @id @default(cuid())
+  agentId      String
+  workspaceId String
+  tokenHash   String   @unique
+  expiresAt   DateTime
+  lastUsedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+  agent       Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([agentId, expiresAt])
+  @@index([workspaceId, expiresAt])
+}
+
 model PlatformAdmin {
   id           String            @id @default(cuid())
   name         String
@@ -158,9 +215,23 @@ model PlatformAdmin {
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
   sessions     PlatformSession[]
+  rememberSessions PlatformRememberSession[]
+  userSecurityAuditLogs UserSecurityAuditLog[]
 }
 
 model PlatformSession {
+  id         String        @id @default(cuid())
+  adminId    String
+  tokenHash  String        @unique
+  expiresAt  DateTime
+  lastUsedAt DateTime      @default(now())
+  createdAt  DateTime      @default(now())
+  admin      PlatformAdmin @relation(fields: [adminId], references: [id], onDelete: Cascade)
+
+  @@index([adminId, expiresAt])
+}
+
+model PlatformRememberSession {
   id         String        @id @default(cuid())
   adminId    String
   tokenHash  String        @unique
@@ -187,8 +258,18 @@ model PlatformConfig {
   billplzXSignatureKey String?
   billplzCollectionId String?
   billplzSandbox    Boolean  @default(false)
+  metaAppId         String?
+  metaAppSecret     String?
+  metaConfigId      String?
+  metaGraphVersion  String?
+  metaRedirectUri   String?
+  metaWebhookVerifyToken String?
   automationWorkflowIdleHours   Int      @default(24)
   automationWorkflowExpireHours Int      @default(72)
+  freeTrialDurationDays          Int      @default(14)
+  expiredAccountCleanupDays      Int      @default(60)
+  sessionTimeoutMinutes          Int      @default(60)
+  rememberMeTimeoutMinutes       Int      @default(43200)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   packageConfigs    PlatformPackageConfig[]
@@ -201,6 +282,8 @@ model PlatformPackageConfig {
   isVisible           Boolean        @default(true)
   displayOrder        Int            @default(0)
   priceAmount         Decimal?       @db.Decimal(10, 2)
+  yearlyDiscountPercentage Decimal   @default(0) @db.Decimal(5, 2)
+  mediaLibraryStorageLimitBytes BigInt?
   maxOutboundMessages Int?
   maxActiveContacts   Int?
   maxActiveAutomations Int?
@@ -236,50 +319,230 @@ model WorkspacePackageSubscription {
   currency        String?
   billingPeriod   BillingPeriod?
   startedAt       DateTime
+  trialStartedAt  DateTime?
+  trialEndsAt     DateTime?
   endedAt         DateTime?
   nextBillingAt   DateTime?
   paidAt          DateTime?
   cancelledAt     DateTime?
+  autoRenew       Boolean            @default(true)
   createdAt       DateTime           @default(now())
   updatedAt       DateTime           @updatedAt
 
   workspace       Workspace          @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   package         Package            @relation(fields: [packageId], references: [id])
   transactions    PaymentTransaction[]
+  invoices        Invoice[]
+  emailLogs       EmailLog[]
 
   @@index([workspaceId, status])
   @@index([workspaceId, startedAt])
   @@index([packageId])
 }
 
+model EmailLog {
+  id             String   @id @default(cuid())
+  workspaceId     String
+  subscriptionId  String?
+  eventKey        String   @unique
+  emailType       String
+  recipientEmail  String
+  sentAt          DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  workspace      Workspace                    @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  subscription   WorkspacePackageSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt])
+  @@index([subscriptionId])
+}
+
+model UserSecurityAuditLog {
+  id          String        @id @default(cuid())
+  agentId     String
+  adminId     String?
+  eventType   String
+  metadataJson String?
+  createdAt   DateTime      @default(now())
+  agent       Agent         @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  admin       PlatformAdmin? @relation(fields: [adminId], references: [id], onDelete: SetNull)
+
+  @@index([agentId, createdAt(sort: Desc)])
+  @@index([eventType, createdAt(sort: Desc)])
+}
+
+model WorkspaceBillingProfile {
+  id               String   @id @default(cuid())
+  workspaceId      String   @unique
+  billingName      String
+  billingEmail     String
+  contactNumber    String
+  billingAddress1  String   @default("")
+  billingAddress2  String?
+  billingCity      String   @default("")
+  billingState     String   @default("")
+  billingPostcode  String   @default("")
+  billingCountry   String   @default("Malaysia")
+  taxNumber        String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model Invoice {
+  id                   String        @id @default(cuid())
+  invoiceNo            String        @unique
+  orderNo              String        @unique
+  workspaceId          String
+  subscriptionId       String?
+  packageId            String?
+  customerName         String
+  customerEmail        String
+  customerInformation  String?
+  packageName          String
+  amount               Decimal       @db.Decimal(10, 2)
+  currency             String        @default("MYR")
+  status               InvoiceStatus @default(PAID)
+  transactionType      String
+  subscriptionStartDate DateTime
+  subscriptionEndDate  DateTime?
+  paymentDate          DateTime?
+  receiptNumber        String?       @unique
+  receiptIssuedAt      DateTime?
+  companyInformation   String?
+  taxInformation       String?
+  pdfPath              String?
+  issueDate            DateTime      @default(now())
+  dueDate              DateTime?
+  totalAmount          Decimal?      @db.Decimal(10, 2)
+  paidAmount           Decimal?      @db.Decimal(10, 2)
+  balanceAmount        Decimal?      @db.Decimal(10, 2)
+  invoicePdfPath       String?
+  receiptPdfPath       String?
+  paidAt               DateTime?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+
+  workspace     Workspace                     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  subscription  WorkspacePackageSubscription? @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+  histories     BillingHistory[]
+  paymentTransactions PaymentTransaction[]
+
+  @@index([workspaceId, createdAt])
+  @@index([subscriptionId])
+  @@index([receiptIssuedAt])
+}
+
+model BillingHistory {
+  id              String   @id @default(cuid())
+  workspaceId     String
+  invoiceId       String?
+  transactionType String
+  description     String
+  amount          Decimal  @db.Decimal(10, 2)
+  currency        String   @default("MYR")
+  trialStartDate  DateTime?
+  trialEndDate    DateTime?
+  createdAt       DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoice   Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, createdAt])
+  @@index([invoiceId])
+}
+
+model PendingWorkspacePackageUpgrade {
+  id                  String   @id @default(cuid())
+  workspaceId         String
+  requestedByAgentId  String
+  invoiceNumber       String   @unique
+  currentPlan         String
+  targetPlan          String
+  operationType       String?
+  billingPeriod       BillingPeriod?
+  provider            String?
+  providerReference   String?  @unique
+  providerCheckoutUrl String?
+  amount              Decimal? @db.Decimal(10, 2)
+  currency            String?
+  status              String   @default("ISSUED")
+  replacedById        String?
+  replacesId          String?
+  replacementReason   String?
+  paymentStartedAt    DateTime?
+  paidAt              DateTime?
+  receiptNumber       String?  @unique
+  receiptIssuedAt     DateTime?
+  cancelledAt         DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  workspace           Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  requestedByAgent    Agent     @relation(fields: [requestedByAgentId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, status])
+  @@index([requestedByAgentId, createdAt])
+}
+
 model PaymentTransaction {
   id                String                 @id @default(cuid())
   subscriptionId    String
   workspaceId       String
+  invoiceId         String?
+  transactionId     String?                @unique
   amount            Decimal                @db.Decimal(10, 2)
   currency          String                 @default("MYR")
   status            PaymentStatus
   provider          String?
   providerReference String?
+  paymentMethod     String?
+  receiptNumber     String?                @unique
+  receiptIssuedAt   DateTime?
+  failureReason     String?
+  gatewayResponseJson String?
   paidAt            DateTime?
   createdAt         DateTime               @default(now())
   updatedAt         DateTime               @updatedAt
 
   subscription      WorkspacePackageSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   workspace         Workspace              @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  invoice           Invoice?               @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
 
   @@index([subscriptionId, status])
   @@index([workspaceId, createdAt])
   @@index([provider, providerReference])
+  @@index([invoiceId])
+  @@index([status, paidAt])
+}
+
+model ReceiptNumberSequence {
+  year      Int      @id
+  lastValue Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model PendingWorkspaceCheckout {
   id                  String   @id @default(cuid())
   plan                String
+  billingPeriod       BillingPeriod?
   name                String
   email               String
   workspaceName       String
   passwordHash        String
+  billingName         String   @default("")
+  billingPhoneNumber  String   @default("")
+  billingAddressLine1 String   @default("")
+  billingAddressLine2 String?
+  billingCity         String   @default("")
+  billingState        String   @default("")
+  billingPostcode     String   @default("")
+  billingCountry      String   @default("Malaysia")
+  billingTaxId        String?
   remember            Boolean  @default(false)
   provider            String?
   providerReference   String?  @unique
@@ -305,6 +568,16 @@ model EmailVerificationToken {
   agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, expiresAt])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  email     String
+  tokenHash String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email, expiresAt])
 }
 
 model LoginChallengeUse {
@@ -375,12 +648,20 @@ model Contact {
 model Conversation {
   id                String   @id @default(cuid())
   workspaceId       String
+  channelId         String?
   contactId         String
   assigneeId        String?
+  snoozedById       String?
   whatsAppRemoteId  String?
   subject           String?
   status            ConversationStatus @default(OPEN)
   snoozedUntil      DateTime?
+  snoozeReason      String?
+  snoozeStatus      ConversationSnoozeStatus?
+  isMuted           Boolean  @default(false)
+  muteExpiration    DateTime?
+  isArchived        Boolean  @default(false)
+  isPinned          Boolean  @default(false)
   unreadCount       Int      @default(0)
   isHotLead         Boolean  @default(false)
   lastMessagePreview String?
@@ -388,8 +669,10 @@ model Conversation {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel           WhatsAppChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
   contact           Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
   assignee          Agent? @relation("ConversationAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  snoozedBy         Agent? @relation("ConversationSnoozedBy", fields: [snoozedById], references: [id], onDelete: SetNull)
   teammates         ConversationTeammate[]
   messages          Message[]
   notes             Note[]
@@ -403,8 +686,11 @@ model Conversation {
   whatsAppMessageEnvelopes WhatsAppMessageEnvelope[]
 
   @@index([workspaceId, status, lastMessageAt])
+  @@index([workspaceId, snoozeStatus, snoozedUntil, lastMessageAt])
+  @@index([channelId, status, lastMessageAt])
   @@index([contactId])
   @@index([assigneeId])
+  @@index([snoozedById])
   @@index([whatsAppRemoteId])
 }
 
@@ -417,6 +703,45 @@ model ContactTeammate {
 
   @@id([contactId, agentId])
   @@index([agentId])
+}
+
+model ContactImport {
+  id                String                         @id @default(cuid())
+  workspaceId       String                         @map("workspace_id")
+  uploadedById      String                         @map("uploaded_by")
+  originalFilename  String                         @map("original_filename")
+  storedFilename    String                         @map("stored_filename")
+  storagePath       String?                        @map("storage_path")
+  totalRows         Int                            @map("total_rows")
+  importedRows      Int                            @map("imported_rows")
+  skippedRows       Int                            @default(0) @map("skipped_rows")
+  failedRows        Int                            @map("failed_rows")
+  status            ContactImportStatus
+  duplicateBehavior ContactImportDuplicateBehavior @default(SKIP) @map("duplicate_behavior")
+  uploadedAt        DateTime                       @default(now()) @map("uploaded_at")
+  workspace         Workspace                      @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  uploadedBy        Agent                          @relation("ContactImportUploader", fields: [uploadedById], references: [id], onDelete: Cascade)
+  logs              ContactImportLog[]
+
+  @@index([workspaceId, uploadedAt])
+  @@index([uploadedById, uploadedAt])
+  @@map("contact_imports")
+}
+
+model ContactImportLog {
+  id           String               @id @default(cuid())
+  importId     String               @map("import_id")
+  rowNumber    Int                  @map("row_number")
+  name         String?
+  phone        String?
+  status       ContactImportLogStatus
+  errorMessage String?              @map("error_message")
+  createdAt    DateTime             @default(now()) @map("created_at")
+  contactImport ContactImport       @relation(fields: [importId], references: [id], onDelete: Cascade)
+
+  @@index([importId, rowNumber])
+  @@index([status, createdAt])
+  @@map("contact_import_logs")
 }
 
 model ConversationTeammate {
@@ -454,6 +779,7 @@ model Message {
   id             String   @id @default(cuid())
   conversationId String
   senderId       String?
+  mediaAssetId   String?
   providerMessageId String? @unique
   replyToMessageId String?
   direction      MessageDirection
@@ -462,6 +788,9 @@ model Message {
   attachmentUrl  String?
   attachmentMimeType String?
   rawPayload     String?
+  deliveryStatus String   @default("pending")
+  ack            Int?
+  ackUpdatedAt   DateTime?
   sentAt         DateTime @default(now())
   deliveredAt    DateTime?
   readAt         DateTime?
@@ -469,19 +798,25 @@ model Message {
   createdAt      DateTime @default(now())
   conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   sender         Agent? @relation("MessageSender", fields: [senderId], references: [id], onDelete: SetNull)
+  mediaAsset     WorkspaceMediaAsset? @relation("MessageMediaAsset", fields: [mediaAssetId], references: [id], onDelete: SetNull)
   replyToMessage Message? @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
   replies        Message[] @relation("MessageReplies")
   outboundJob    OutboundMessageJob?
   whatsAppEnvelope WhatsAppMessageEnvelope?
 
   @@index([conversationId, sentAt])
+  @@index([mediaAssetId])
   @@index([replyToMessageId])
+  @@index([deliveryStatus])
+  @@index([ackUpdatedAt])
 }
 
 model WhatsAppMessageEnvelope {
   id                   String   @id @default(cuid())
   workspaceId          String
+  channelId            String?
   conversationId       String?
+  mediaAssetId         String?
   messageId            String?  @unique
   providerMessageId    String   @unique
   from                 String?
@@ -530,11 +865,15 @@ model WhatsAppMessageEnvelope {
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
   workspace            Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel              WhatsAppChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
   conversation         Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  mediaAsset           WorkspaceMediaAsset? @relation("WhatsAppEnvelopeMediaAsset", fields: [mediaAssetId], references: [id], onDelete: SetNull)
   message              Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, createdAt])
+  @@index([channelId, createdAt])
   @@index([conversationId, createdAt])
+  @@index([mediaAssetId])
   @@index([messageTimestamp])
   @@index([contactNumber])
   @@index([chatId])
@@ -543,8 +882,10 @@ model WhatsAppMessageEnvelope {
 model OutboundMessageJob {
   id                    String   @id @default(cuid())
   workspaceId           String
+  channelId             String?
   conversationId        String
   messageId             String   @unique
+  mediaAssetId          String?
   campaignRunId         String?
   campaignRunRecipientId String?
   status                OutboundMessageJobStatus @default(PENDING)
@@ -565,13 +906,17 @@ model OutboundMessageJob {
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel               WhatsAppChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
   conversation          Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   message               Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  mediaAsset            WorkspaceMediaAsset? @relation("OutboundMessageJobMediaAsset", fields: [mediaAssetId], references: [id], onDelete: SetNull)
   campaignRun           CampaignRun? @relation(fields: [campaignRunId], references: [id], onDelete: SetNull)
   campaignRunRecipient  CampaignRunRecipient? @relation(fields: [campaignRunRecipientId], references: [id], onDelete: SetNull)
 
   @@index([workspaceId, status, availableAt])
+  @@index([channelId, status, availableAt])
   @@index([conversationId, availableAt])
+  @@index([mediaAssetId, availableAt])
   @@index([campaignRunId, availableAt])
   @@index([campaignRunRecipientId, availableAt])
 }
@@ -641,6 +986,7 @@ model CampaignDraft {
 model CampaignRun {
   id                     String   @id @default(cuid())
   workspaceId            String
+  channelId              String?
   createdById            String?
   name                   String
   messageBody            String
@@ -652,11 +998,13 @@ model CampaignRun {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
   workspace              Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel                WhatsAppChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
   createdBy              Agent?    @relation("CampaignRunCreator", fields: [createdById], references: [id], onDelete: SetNull)
   recipients             CampaignRunRecipient[]
   outboundMessageJobs    OutboundMessageJob[]
 
   @@index([workspaceId, createdAt])
+  @@index([channelId, createdAt])
   @@index([createdById, createdAt])
 }
 
@@ -729,14 +1077,22 @@ model WorkspaceMediaAsset {
   mimeType     String
   kind         MediaAssetKind
   sizeBytes    Int
+  checksumSha256 String?
+  sourceModule MediaAssetSource @default(MEDIA_LIBRARY)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   uploadedByAgent Agent? @relation(fields: [uploadedByAgentId], references: [id], onDelete: SetNull)
   replyRules   AutomationRule[] @relation("AutomationRuleReplyMediaAsset")
   followUpRules AutomationRule[] @relation("AutomationRuleFollowUpMediaAsset")
+  messages     Message[] @relation("MessageMediaAsset")
+  outboundJobs OutboundMessageJob[] @relation("OutboundMessageJobMediaAsset")
+  whatsAppEnvelopes WhatsAppMessageEnvelope[] @relation("WhatsAppEnvelopeMediaAsset")
 
   @@index([workspaceId, kind, createdAt])
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, checksumSha256])
+  @@unique([workspaceId, storagePath])
   @@index([uploadedByAgentId])
 }
 
@@ -867,7 +1223,9 @@ model AutomationJob {
 
 model WhatsAppChannel {
   id                    String   @id @default(cuid())
-  workspaceId           String   @unique
+  workspaceId           String
+  provider              String?
+  channelType           String?
   phoneNumberId         String?  @unique
   businessAccountId     String?
   accessTokenCiphertext String?
@@ -876,22 +1234,82 @@ model WhatsAppChannel {
   accessTokenLastFour   String?
   appSecretLastFour     String?
   verifyTokenLastFour   String?
-  connectedByAgentId    String?  @unique
+  tokenExpiresAt        DateTime?
+  connectedByAgentId    String?
   sessionClientId       String?  @unique
   connectionStatus      String   @default("DISCONNECTED")
   displayName           String?
   phoneNumber           String?
+  incognitoMode         Boolean  @default(false)
   qrCodeDataUrl         String?
   qrCodeUpdatedAt       DateTime?
   lastError             String?
   connectedAt           DateTime?
+  disconnectedAt        DateTime?
   lastSeenAt            DateTime?
+  lastWebhookAt         DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
   connectedByAgent      Agent?    @relation("WhatsAppChannelConnector", fields: [connectedByAgentId], references: [id], onDelete: SetNull)
+  conversations         Conversation[]
+  outboundMessageJobs   OutboundMessageJob[]
+  campaignRuns          CampaignRun[]
+  whatsAppMessageEnvelopes WhatsAppMessageEnvelope[]
+  messageUsageLogs      MessageUsageLog[]
+  inboxNewConversationRequests InboxNewConversationRequest[]
 
+  @@index([workspaceId, createdAt])
+  @@index([workspaceId, connectionStatus, updatedAt])
   @@index([connectionStatus])
+}
+
+model InboxNewConversationRequest {
+  id                String   @id @default(cuid())
+  workspaceId       String
+  agentId           String
+  channelId         String
+  idempotencyKey    String
+  phone             String
+  displayName       String?
+  messageBody       String
+  status            String
+  providerMessageId String?
+  contactId         String?
+  conversationId    String?
+  messageId         String?
+  wasExistingContact Boolean?
+  wasExistingConversation Boolean?
+  errorCode         String?
+  errorMessage      String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  agent             Agent @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  channel           WhatsAppChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([workspaceId, createdAt])
+  @@index([channelId, createdAt])
+}
+
+model MessageUsageLog {
+  id           String   @id @default(cuid())
+  workspaceId  String   @map("workspace_id")
+  accountId    String?  @map("account_id")
+  provider     String
+  messageType  String   @map("message_type")
+  costEstimate Decimal  @default(0) @db.Decimal(12, 4) @map("cost_estimate")
+  timestamp    DateTime @default(now())
+  createdAt    DateTime @default(now()) @map("created_at")
+  workspace    Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  account      WhatsAppChannel? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId, timestamp])
+  @@index([accountId, timestamp])
+  @@index([provider, timestamp])
+  @@index([messageType, timestamp])
+  @@map("message_usage_logs")
 }
 
 model WhatsAppRuntimeEvent {
@@ -1138,10 +1556,36 @@ enum ContactStatus {
   ARCHIVED
 }
 
+enum ContactImportStatus {
+  PROCESSING
+  COMPLETED
+  PARTIAL
+  FAILED
+}
+
+enum ContactImportLogStatus {
+  IMPORTED
+  SKIPPED
+  FAILED
+}
+
+enum ContactImportDuplicateBehavior {
+  SKIP
+  UPDATE
+}
+
 enum ConversationStatus {
   OPEN
   PENDING
   CLOSED
+}
+
+enum ConversationSnoozeStatus {
+  ACTIVE
+  MANUAL
+  EXPIRED
+  INCOMING_MESSAGE
+  WORKFLOW
 }
 
 enum MessageDirection {
@@ -1169,6 +1613,17 @@ enum MediaAssetKind {
   IMAGE
   AUDIO
   VIDEO
+  DOCUMENT
+}
+
+enum MediaAssetSource {
+  MEDIA_LIBRARY
+  INBOX
+  QUICK_REPLY
+  CAMPAIGN
+  AUTOMATION_RULE
+  AUTOMATION_WORKFLOW
+  WHATSAPP_INBOUND
 }
 
 enum AutomationJobStatus {
@@ -1207,6 +1662,14 @@ enum SubscriptionStatus {
   PAST_DUE
   CANCELLED
   EXPIRED
+}
+
+enum InvoiceStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
 }
 
 enum PaymentStatus {

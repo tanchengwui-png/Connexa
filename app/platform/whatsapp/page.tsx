@@ -4,6 +4,8 @@ import { getPlatformAdminNavItems } from "@/lib/platform-admin-nav";
 import { requireCurrentPlatformAdmin } from "@/lib/platform-auth/current-user";
 import { getPlatformWhatsAppHealthOverview } from "@/lib/platform-whatsapp-health";
 
+export const dynamic = "force-dynamic";
+
 const DISPLAY_TIME_ZONE = "Asia/Kuala_Lumpur";
 type PlatformWhatsAppOverviewRow = Awaited<ReturnType<typeof getPlatformWhatsAppHealthOverview>>["rows"][number];
 
@@ -117,6 +119,98 @@ function getVerificationLabel(state: string) {
   return "Not verified yet";
 }
 
+function getPhoneStatusLabel(status: string) {
+  if (status === "READY") {
+    return "Ready";
+  }
+
+  if (status === "CONNECTED") {
+    return "Connected";
+  }
+
+  if (status === "SYNCING_HISTORY") {
+    return "Syncing history";
+  }
+
+  if (status === "QR_READY") {
+    return "Needs QR scan";
+  }
+
+  if (status === "AUTH_FAILED") {
+    return "Auth failed";
+  }
+
+  if (status === "INITIALIZING") {
+    return "Starting";
+  }
+
+  return status;
+}
+
+function getPhoneStatusTone(status: string) {
+  if (status === "READY" || status === "CONNECTED") {
+    return "status-ready";
+  }
+
+  if (status === "AUTHENTICATED") {
+    return "status-authenticated";
+  }
+
+  if (status === "SYNCING_HISTORY") {
+    return "status-syncing-history";
+  }
+
+  if (status === "AUTH_FAILED" || status === "ERROR") {
+    return "status-error";
+  }
+
+  if (status === "QR_READY") {
+    return "status-qr-ready";
+  }
+
+  if (status === "INITIALIZING") {
+    return "status-initializing";
+  }
+
+  if (status === "DISCONNECTED") {
+    return "status-disconnected";
+  }
+
+  return "status-unknown";
+}
+
+function getRuntimeStatusTone(status: string) {
+  if (status === "READY" || status === "CONNECTED") {
+    return "status-ready";
+  }
+
+  if (status === "AUTHENTICATED") {
+    return "status-authenticated";
+  }
+
+  if (status === "SYNCING_HISTORY") {
+    return "status-syncing-history";
+  }
+
+  if (status === "AUTH_FAILED" || status === "ERROR") {
+    return "status-error";
+  }
+
+  if (status === "QR_READY") {
+    return "status-qr-ready";
+  }
+
+  if (status === "INITIALIZING") {
+    return "status-initializing";
+  }
+
+  if (status === "DISCONNECTED") {
+    return "status-disconnected";
+  }
+
+  return "status-unknown";
+}
+
 export default async function PlatformWhatsAppPage() {
   const [admin, overview] = await Promise.all([
     requireCurrentPlatformAdmin(),
@@ -133,47 +227,47 @@ export default async function PlatformWhatsAppPage() {
         title="WhatsApp operations need one platform view before launch."
       >
         <div className="platform-admin-toolbar platform-ops-summary">
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Connected workspaces</span>
             <strong>{overview.summary.connectedWorkspaces}</strong>
             <p>{overview.summary.totalWorkspaces} total workspaces tracked.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Inbox ready</span>
             <strong>{overview.summary.readyWorkspaces}</strong>
             <p>Workspaces currently ready without relying on live-only fallback.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Live-only fallbacks</span>
             <strong>{overview.summary.liveOnlyWorkspaces}</strong>
             <p>Historical import deferred, but live messaging should still be usable.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Needs attention</span>
             <strong>{overview.summary.alertWorkspaces}</strong>
             <p>Workspaces with relink, sync, or worker attention signals.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Reconnects · 24h</span>
             <strong>{overview.summary.reconnects24h}</strong>
             <p>Automatic reconnect and stall-recovery actions recorded in the last 24 hours.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>QR refreshes · 24h</span>
             <strong>{overview.summary.qrEvents24h}</strong>
             <p>How often sessions required or regenerated a QR in the last 24 hours.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Auth failures · 24h</span>
             <strong>{overview.summary.authFailures24h}</strong>
             <p>Workspaces where WhatsApp reported session authentication failures in the last 24 hours.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Idle evictions · 24h</span>
             <strong>{overview.summary.idleEvictions24h}</strong>
             <p>Browsers cleanly unloaded after inactivity while keeping saved sessions on disk.</p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Sender RSS</span>
             <strong>{overview.senderMetrics?.process.rssMb ?? "n/a"} MB</strong>
             <p>
@@ -181,7 +275,7 @@ export default async function PlatformWhatsAppPage() {
               {overview.senderMetrics?.process.heapTotalMb ?? "n/a"} MB on the current sender node.
             </p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Warm runtimes</span>
             <strong>{overview.senderMetrics?.runtimes.activeWarm ?? 0}</strong>
             <p>
@@ -189,7 +283,7 @@ export default async function PlatformWhatsAppPage() {
               {overview.senderMetrics?.runtimes.supervisorPaused ?? 0}
             </p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Cold start ready</span>
             <strong>{formatDuration(overview.senderMetrics?.latencies.coldStartReadyAvgMs ?? null)}</strong>
             <p>
@@ -197,7 +291,7 @@ export default async function PlatformWhatsAppPage() {
               start to ready.
             </p>
           </div>
-          <div className="settings-dark-status-card">
+          <div className="settings-dark-status-card platform-ops-kpi-card">
             <span>Send latency</span>
             <strong>{formatDuration(overview.senderMetrics?.latencies.sendAvgMs ?? null)}</strong>
             <p>
@@ -218,11 +312,11 @@ export default async function PlatformWhatsAppPage() {
           </div>
 
           <div className="platform-ops-inline-metrics">
-            <div className="lead-row">
+            <div className="lead-row platform-ops-footprint-card">
               <strong>Imported conversations</strong>
               <div className="table-subtle">{overview.summary.totalImportedConversations}</div>
             </div>
-            <div className="lead-row">
+            <div className="lead-row platform-ops-footprint-card">
               <strong>Imported messages</strong>
               <div className="table-subtle">{overview.summary.totalImportedMessages}</div>
             </div>
@@ -257,7 +351,40 @@ export default async function PlatformWhatsAppPage() {
 
                 <div className="platform-ops-row-grid">
                   <div className="lead-row">
-                    <strong>Number</strong>
+                    <strong>Linked phones</strong>
+                    <div className="table-subtle">
+                      {row.channels.length ? (
+                        <ol className="platform-ops-phone-list">
+                          {row.channels.map((channel, index) => (
+                            <li className="platform-ops-phone-item" key={channel.id}>
+                              <div className="platform-ops-phone-item-head">
+                                <strong>{`${index + 1}) ${channel.label}`}</strong>
+                                <span className={`platform-ops-status-pill ${getPhoneStatusTone(channel.connectionStatus)}`}>
+                                  {getPhoneStatusLabel(channel.connectionStatus)}
+                                </span>
+                              </div>
+                              <div className="platform-ops-phone-item-meta">
+                                {channel.phoneNumber && channel.phoneNumber !== channel.label ? (
+                                  <span>{channel.phoneNumber}</span>
+                                ) : null}
+                                <span>{channel.connectionMethod === "api" ? "Cloud API" : "QR session"}</span>
+                                <span>{channel.connectedBy ?? "Unknown connector"}</span>
+                                <span>{formatDateTime(channel.connectedAt)}</span>
+                              </div>
+                            </li>
+                          ))}
+                        </ol>
+                      ) : (
+                        "No number linked"
+                      )}
+                    </div>
+                  </div>
+                  <div className="lead-row">
+                    <strong>Login email</strong>
+                    <div className="table-subtle">{row.loginEmail ?? "Not recorded"}</div>
+                  </div>
+                  <div className="lead-row">
+                    <strong>Primary number</strong>
                     <div className="table-subtle">{row.phoneNumber ?? "No number linked"}</div>
                   </div>
                   <div className="lead-row">
@@ -270,7 +397,7 @@ export default async function PlatformWhatsAppPage() {
                   </div>
                   <div className="lead-row">
                     <strong>Runtime</strong>
-                    <div className="table-subtle">{row.runtimeStatus}</div>
+                    <div className={`platform-ops-status-pill ${getRuntimeStatusTone(row.runtimeStatus)}`}>{row.runtimeStatus}</div>
                   </div>
                   <div className="lead-row">
                     <strong>Supervisor</strong>
@@ -353,7 +480,7 @@ export default async function PlatformWhatsAppPage() {
 
                 <div className="platform-ops-alerts">
                   {row.alerts.length ? (
-                    row.alerts.map((alert) => (
+                    row.alerts.map((alert: string) => (
                       <span className="platform-ops-alert" key={alert}>
                         {alert}
                       </span>
@@ -372,7 +499,7 @@ export default async function PlatformWhatsAppPage() {
                         <p>{row.supervisor.manualAttentionReason}</p>
                       </div>
                     ) : null}
-                    {row.runtimeMetrics.latestEvents.map((event) => (
+                    {row.runtimeMetrics.latestEvents.map((event: { eventType: string; message: string | null; createdAt: string }) => (
                       <div className="platform-ops-runtime-log-item" key={`${event.eventType}-${event.createdAt}`}>
                         <strong>{event.eventType}</strong>
                         <span>{formatDateTime(event.createdAt)}</span>

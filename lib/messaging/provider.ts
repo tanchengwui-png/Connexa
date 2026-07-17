@@ -1,12 +1,18 @@
 import { isWhatsAppMockModeEnabled } from "@/lib/whatsapp-channel";
-import { sendWhatsAppMessage } from "@/lib/whatsapp-runtime";
+import {
+  sendMessage as routeWhatsAppMessage,
+  sendTemplate as routeWhatsAppTemplate
+} from "@/services/whatsappRouter.js";
+import type { WhatsAppTemplateComponent } from "@/services/whatsappRouter.js";
 
 type OutboundMessagePayload = {
+  channelId?: string | null;
   agentId?: string;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
   attachmentPath?: string | null;
   attachmentUrl?: string | null;
+  sendAudioAsVoice?: boolean;
   mentions?: Array<{
     id: string;
     label: string;
@@ -21,6 +27,11 @@ type OutboundMessagePayload = {
   workspaceId: string;
   to: string;
   body: string;
+  template?: {
+    name: string;
+    languageCode?: string | null;
+    components?: WhatsAppTemplateComponent[] | null;
+  } | null;
 };
 
 export type OutboundMessageResult = {
@@ -34,7 +45,21 @@ export interface MessagingProvider {
 
 class WebJsWhatsAppProvider implements MessagingProvider {
   async sendOutboundMessage(payload: OutboundMessagePayload): Promise<OutboundMessageResult> {
-    return sendWhatsAppMessage({
+    if (payload.template?.name) {
+      return routeWhatsAppTemplate({
+        channelId: payload.channelId ?? null,
+        workspaceId: payload.workspaceId,
+        conversationId: payload.conversationId,
+        to: payload.to,
+        name: payload.template.name,
+        languageCode: payload.template.languageCode ?? undefined,
+        components: payload.template.components ?? undefined,
+        body: payload.body
+      });
+    }
+
+    return routeWhatsAppMessage({
+      channelId: payload.channelId ?? null,
       workspaceId: payload.workspaceId,
       conversationId: payload.conversationId,
       to: payload.to,
@@ -47,6 +72,7 @@ class WebJsWhatsAppProvider implements MessagingProvider {
       attachmentUrl: payload.attachmentUrl,
       attachmentMimeType: payload.attachmentMimeType,
       attachmentName: payload.attachmentName,
+      sendAudioAsVoice: payload.sendAudioAsVoice,
       quotedProviderMessageId: payload.quotedProviderMessageId,
       mentions: payload.mentions
     });

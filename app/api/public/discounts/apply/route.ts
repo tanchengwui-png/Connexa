@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getResolvedPublicPackageDefinition } from "@/lib/platform-packages";
+import { getPackageBillingSnapshot } from "@/lib/billing";
 import { resolveCheckoutDiscount } from "@/lib/platform-discounts";
+import { normalizePackageBillingPeriod, PACKAGE_BILLING_PERIOD } from "@/lib/package-pricing";
 import { isPublicPackageKey } from "@/lib/public-packages";
 
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as {
       plan?: string;
+      billingPeriod?: string;
       discountCode?: string;
     };
 
@@ -15,7 +17,8 @@ export async function POST(request: NextRequest) {
       throw new Error("Invalid package selected.");
     }
 
-    const selectedPackage = await getResolvedPublicPackageDefinition(plan);
+    const billingPeriod = normalizePackageBillingPeriod(body.billingPeriod ?? PACKAGE_BILLING_PERIOD.MONTHLY);
+    const selectedPackage = await getPackageBillingSnapshot(plan, billingPeriod);
     if (selectedPackage.priceAmount === null) {
       throw new Error("Discount codes are only available for fixed-price packages.");
     }

@@ -36,6 +36,16 @@ export function AttachmentIcon(props: IconProps) {
   );
 }
 
+export function UploadIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M12 16V5" />
+      <path d="m8.5 8.5 3.5-3.5 3.5 3.5" />
+      <path d="M5 19.5h14" />
+    </BaseIcon>
+  );
+}
+
 export function EmojiIcon(props: IconProps) {
   return (
     <BaseIcon {...props}>
@@ -83,6 +93,26 @@ export function SnoozeIcon(props: IconProps) {
       <circle cx="12" cy="13" r="8" />
       <path d="M12 9v4l2.5 1.5" />
       <path d="M8 3h8" />
+    </BaseIcon>
+  );
+}
+
+export function MuteIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M5 10v4h3l4 3V7l-4 3H5Z" />
+      <path d="m16 9 4 6" />
+      <path d="m20 9-4 6" />
+    </BaseIcon>
+  );
+}
+
+export function VolumeIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M5 10v4h3l4 3V7l-4 3H5Z" />
+      <path d="M16 9.5a4.5 4.5 0 0 1 0 5" />
+      <path d="M18.5 7a8 8 0 0 1 0 10" />
     </BaseIcon>
   );
 }
@@ -137,6 +167,17 @@ export function SendIcon(props: IconProps) {
     <BaseIcon {...props}>
       <path d="m22 2-7 20-4-9-9-4Z" />
       <path d="M22 2 11 13" />
+    </BaseIcon>
+  );
+}
+
+export function MicrophoneIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <rect x="9" y="4" width="6" height="11" rx="3" />
+      <path d="M6.5 11.5a5.5 5.5 0 0 0 11 0" />
+      <path d="M12 17v3.5" />
+      <path d="M9 20.5h6" />
     </BaseIcon>
   );
 }

@@ -1,50 +1,72 @@
 import { useRef, useState } from "react";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
-import type { InboxFilterKey } from "@/components/inbox/types";
+import { Button, getButtonClassName } from "@/components/ui/button";
+import type {
+  InboxBuiltInFilterKey,
+  InboxCustomFilter,
+  InboxFilterCounts,
+  InboxFilterKey
+} from "@/components/inbox/types";
 
 type InboxFilterTabsProps = {
-  counts: Record<InboxFilterKey, number>;
+  counts: InboxFilterCounts;
+  customFilters: InboxCustomFilter[];
   value: InboxFilterKey;
   onChange: (value: InboxFilterKey) => void;
 };
 
-const PRIMARY_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
+const PRIMARY_FILTERS: Array<{ key: InboxBuiltInFilterKey; label: string }> = [
   { key: "all", label: "All" },
   { key: "mine", label: "Mine" },
   { key: "unread", label: "Unread" },
 ];
 
-const OVERFLOW_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
+const OVERFLOW_FILTERS: Array<{ key: InboxBuiltInFilterKey; label: string }> = [
+  { key: "snoozed", label: "Snoozed" },
   { key: "assigned-others", label: "Assigned to others" },
   { key: "unassigned", label: "Unowned" },
   { key: "hot", label: "Hot" }
 ];
 
-export function InboxFilterTabs({ counts, value, onChange }: InboxFilterTabsProps) {
+export function InboxFilterTabs({
+  counts,
+  customFilters,
+  value,
+  onChange
+}: InboxFilterTabsProps) {
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const [isMoreOpen, setIsMoreOpen] = useState(false);
 
   return (
     <div className="inbox-filter-tabs" aria-label="Inbox filters">
       {PRIMARY_FILTERS.map((item) => (
-        <button
+        <Button
           className={`inbox-filter-tab${value === item.key ? " active" : ""}`}
           key={item.key}
           onClick={() => onChange(item.key)}
-          type="button"
+          role="tab"
+          selected={value === item.key}
+          variant="toggle"
         >
           <span>{item.label}</span>
-        </button>
+        </Button>
       ))}
 
-      <button
-        className={`inbox-filter-tab${OVERFLOW_FILTERS.some((item) => item.key === value) ? " active" : ""}`}
+      <Button
+        className={`inbox-filter-tab${
+          OVERFLOW_FILTERS.some((item) => item.key === value) || customFilters.some((item) => item.key === value)
+            ? " active"
+            : ""
+        }`}
         onClick={() => setIsMoreOpen((current) => !current)}
         ref={moreButtonRef}
-        type="button"
+        selected={
+          OVERFLOW_FILTERS.some((item) => item.key === value) || customFilters.some((item) => item.key === value)
+        }
+        variant="toggle"
       >
         <span>More</span>
-      </button>
+      </Button>
 
       <PortalDropdown
         align="start"
@@ -60,7 +82,11 @@ export function InboxFilterTabs({ counts, value, onChange }: InboxFilterTabsProp
           </div>
           {OVERFLOW_FILTERS.map((item) => (
             <button
-              className={`inbox-menu-item${value === item.key ? " active" : ""}`}
+              className={getButtonClassName({
+                className: `inbox-menu-item${value === item.key ? " active" : ""}`,
+                selected: value === item.key,
+                variant: "toggle"
+              })}
               key={item.key}
               onClick={() => {
                 onChange(item.key);
@@ -69,9 +95,32 @@ export function InboxFilterTabs({ counts, value, onChange }: InboxFilterTabsProp
               type="button"
             >
               <span>{item.label}</span>
-              <strong>{counts[item.key]}</strong>
+              <strong>{counts[item.key] ?? 0}</strong>
             </button>
           ))}
+          {customFilters.length ? (
+            <>
+              <span className="inbox-menu-section-label">Custom categories</span>
+              {customFilters.map((item) => (
+                <button
+                  className={getButtonClassName({
+                    className: `inbox-menu-item${value === item.key ? " active" : ""}`,
+                    selected: value === item.key,
+                    variant: "toggle"
+                  })}
+                  key={item.key}
+                  onClick={() => {
+                    onChange(item.key);
+                    setIsMoreOpen(false);
+                  }}
+                  type="button"
+                >
+                  <span>{item.label}</span>
+                  <strong>{counts[item.key] ?? 0}</strong>
+                </button>
+              ))}
+            </>
+          ) : null}
         </div>
       </PortalDropdown>
     </div>

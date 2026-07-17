@@ -1,10 +1,11 @@
-import { OutboundMessageJobStatus } from "@prisma/client";
 import { normalizeWorkspacePackageKey } from "@/lib/billing";
 import { countVisibleContacts } from "@/lib/db-contacts";
+import { OutboundMessageJobStatus } from "@/lib/db-types";
 import { findWorkspaceById } from "@/lib/db-auth";
 import { getPlatformPackageSettings } from "@/lib/platform-packages";
 import { prisma } from "@/lib/prisma";
 import { getPublicPackageDefinition } from "@/lib/public-packages";
+import { getWorkspacePlanSettings } from "@/lib/workspace-plan";
 
 export async function getWorkspacePackageFeatureLimits(workspaceId: string) {
   const workspace = await findWorkspaceById(workspaceId);
@@ -21,6 +22,8 @@ export async function getWorkspacePackageFeatureLimits(workspaceId: string) {
   return {
     packageKey,
     packageLabel: packageDefinition.name,
+    mediaLibraryStorageLimitBytes:
+      packageConfig?.mediaLibraryStorageLimitBytes ?? packageDefinition.limits.mediaLibraryStorageLimitBytes,
     maxOutboundMessages: packageConfig?.maxOutboundMessages ?? packageDefinition.limits.maxOutboundMessages,
     maxActiveContacts: packageConfig?.maxActiveContacts ?? packageDefinition.limits.maxActiveContacts,
     maxActiveAutomations: packageConfig?.maxActiveAutomations ?? packageDefinition.limits.maxActiveAutomations,
@@ -196,5 +199,39 @@ export async function getWorkspacePackageUsageOverview(workspaceId: string) {
       limits.maxWhatsAppCampaigns === null
         ? null
         : Math.max(limits.maxWhatsAppCampaigns - currentWhatsAppCampaigns, 0)
+  };
+}
+
+export async function assertWorkspaceHasWhatsAppNumberCapacity(workspaceId: string, requestedCount = 1) {
+  const workspace = await findWorkspaceById(workspaceId);
+
+  if (!workspace) {
+    throw new Error("Workspace not found.");
+  }
+
+  const planSettings = getWorkspacePlanSettings(workspace.plan);
+  const currentChannels = await prisma.whatsAppChannel.count({
+    where: {
+      workspaceId
+    }
+  });
+
+  if (
+    planSettings.numberLimit !== null &&
+    currentChannels + requestedCount > planSettings.numberLimit
+  ) {
+    throw new Error(
+      `${planSettings.label} plan allows up to ${planSettings.numberLimit} WhatsApp number${
+        planSettings.numberLimit === 1 ? "" : "s"
+      }. Upgrade the workspace plan before adding more numbers.`
+    );
+  }
+
+  return {
+    planLabel: planSettings.label,
+    currentChannels,
+    numberLimit: planSettings.numberLimit,
+    remainingNumberSlots:
+      planSettings.numberLimit === null ? null : Math.max(planSettings.numberLimit - currentChannels, 0)
   };
 }

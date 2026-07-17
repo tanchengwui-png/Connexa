@@ -1,4 +1,5 @@
 import Image from "next/image";
+import lightThemeLogo from "@/Logo-LightTheme.png";
 
 type ConnexaLogoProps = {
   href?: string;
@@ -18,11 +19,19 @@ export function ConnexaLogo({
       <span className="public-logo-frame">
         <Image
           alt="Connexa logo"
-          className="public-logo-image"
-          height={120}
+          className="public-logo-image public-logo-image-dark"
+          height={512}
           priority={priority}
           src="/recurvos_connexa_transparent.png"
-          width={360}
+          width={1024}
+        />
+        <Image
+          alt="Connexa logo"
+          className="public-logo-image public-logo-image-light"
+          height={lightThemeLogo.height}
+          priority={priority}
+          src={lightThemeLogo}
+          width={lightThemeLogo.width}
         />
       </span>
     </a>

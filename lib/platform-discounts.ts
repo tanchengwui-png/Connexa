@@ -1,6 +1,7 @@
 import {
+  activatePlatformDiscountCode,
   createPlatformDiscountCode,
-  deletePlatformDiscountCode,
+  deactivatePlatformDiscountCode,
   ensurePendingWorkspaceCheckoutDiscountColumns,
   ensurePlatformDiscountCodeStore,
   findPlatformDiscountCodeByCode,
@@ -14,7 +15,8 @@ import { type DbExecutor } from "@/lib/db";
 
 type DiscountCodeInput = {
   code: string;
-  percentage: number;
+  percentage?: number | null;
+  amountOff?: number | null;
   expiresOn?: string | null;
 };
 
@@ -28,6 +30,26 @@ function parsePercentage(value: number) {
   }
 
   return value;
+}
+
+function parsePercentageOptional(value: number | null | undefined) {
+  if (value === null || value === undefined || value === 0) {
+    return null;
+  }
+
+  return parsePercentage(value);
+}
+
+function parseAmountOff(value: number | null | undefined) {
+  if (value === null || value === undefined || value === 0) {
+    return null;
+  }
+
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error("Discount value must be greater than 0.");
+  }
+
+  return roundCurrency(value);
 }
 
 function parseExpiryDate(value: string | null | undefined) {
@@ -98,9 +120,17 @@ function validateDiscountCodeInput(input: DiscountCodeInput) {
     throw new Error("Discount code must be 4-32 characters using only letters, numbers, or hyphens.");
   }
 
+  const percentage = parsePercentageOptional(input.percentage);
+  const amountOff = parseAmountOff(input.amountOff);
+
+  if ((percentage === null && amountOff === null) || (percentage !== null && amountOff !== null)) {
+    throw new Error("Provide either a discount percentage or a discount value.");
+  }
+
   return {
     code,
-    percentage: parsePercentage(input.percentage),
+    percentage: percentage ?? 0,
+    amountOff,
     expiresAt: parseExpiryDate(input.expiresOn)
   };
 }
@@ -114,6 +144,7 @@ export async function getPlatformDiscountAdminView() {
     id: row.id,
     code: row.code,
     percentage: row.percentage,
+    amountOff: parseDecimalAmount(row.amountOff),
     expiresAtIso: row.expiresAt?.toISOString() ?? null,
     expiresOn: formatExpiryDateInput(row.expiresAt),
     redeemedAtIso: row.redeemedAt?.toISOString() ?? null,
@@ -121,7 +152,8 @@ export async function getPlatformDiscountAdminView() {
     redeemedByEmail: row.redeemedByEmail,
     redeemedByWorkspaceName: row.redeemedByWorkspaceName,
     isRedeemed: Boolean(row.redeemedAt),
-    isInactive: Boolean(row.redeemedAt) || (row.expiresAt ? row.expiresAt.getTime() < now : false),
+    isManuallyInactive: !row.isActive,
+    isInactive: !row.isActive || Boolean(row.redeemedAt) || (row.expiresAt ? row.expiresAt.getTime() < now : false),
     isExpired: row.expiresAt ? row.expiresAt.getTime() < now : false,
     createdAtIso: row.createdAt.toISOString(),
     updatedAtIso: row.updatedAt.toISOString()
@@ -151,6 +183,10 @@ export async function updatePlatformDiscount(
     throw new Error("Discount code not found.");
   }
 
+  if (current.redeemedAt) {
+    throw new Error("Used discount codes can no longer be edited.");
+  }
+
   const payload = validateDiscountCodeInput(input);
   const duplicate = await findPlatformDiscountCodeByCode(payload.code);
   if (duplicate && duplicate.id !== id) {
@@ -161,6 +197,7 @@ export async function updatePlatformDiscount(
     id,
     code: payload.code,
     percentage: payload.percentage,
+    amountOff: payload.amountOff,
     expiresAt: payload.expiresAt
   });
 }
@@ -168,12 +205,53 @@ export async function updatePlatformDiscount(
 export async function removePlatformDiscount(id: string) {
   await ensurePlatformDiscountCodeStore();
 
-  const deleted = await deletePlatformDiscountCode(id);
-  if (!deleted) {
+  const current = await findPlatformDiscountCodeById(id);
+  if (!current) {
     throw new Error("Discount code not found.");
   }
 
-  return deleted;
+  if (current.redeemedAt) {
+    throw new Error("Used discount codes cannot be set inactive.");
+  }
+
+  if (!current.isActive) {
+    return current;
+  }
+
+  const updated = await deactivatePlatformDiscountCode(id);
+  if (!updated) {
+    throw new Error("Discount code not found.");
+  }
+
+  return updated;
+}
+
+export async function activatePlatformDiscount(id: string) {
+  await ensurePlatformDiscountCodeStore();
+
+  const current = await findPlatformDiscountCodeById(id);
+  if (!current) {
+    throw new Error("Discount code not found.");
+  }
+
+  if (current.redeemedAt) {
+    throw new Error("Used discount codes cannot be reactivated.");
+  }
+
+  if (current.expiresAt && current.expiresAt.getTime() < Date.now()) {
+    throw new Error("Expired discount codes cannot be reactivated.");
+  }
+
+  if (current.isActive) {
+    return current;
+  }
+
+  const updated = await activatePlatformDiscountCode(id);
+  if (!updated) {
+    throw new Error("Discount code not found.");
+  }
+
+  return updated;
 }
 
 export async function resolveCheckoutDiscount(input: {
@@ -189,6 +267,7 @@ export async function resolveCheckoutDiscount(input: {
     return {
       code: null,
       percentage: null,
+      amountOff: null,
       originalAmount: roundCurrency(input.amount),
       discountAmount: 0,
       finalAmount: roundCurrency(input.amount),
@@ -204,6 +283,10 @@ export async function resolveCheckoutDiscount(input: {
     throw new Error("Discount code is invalid.");
   }
 
+  if (!match.isActive) {
+    throw new Error("Discount code is inactive.");
+  }
+
   if (match.expiresAt && match.expiresAt.getTime() < Date.now()) {
     throw new Error("Discount code has expired.");
   }
@@ -213,12 +296,19 @@ export async function resolveCheckoutDiscount(input: {
   }
 
   const originalAmount = roundCurrency(input.amount);
-  const discountAmount = roundCurrency((originalAmount * match.percentage) / 100);
+  const amountOff = parseDecimalAmount(match.amountOff);
+  const discountAmount = roundCurrency(
+    Math.min(
+      originalAmount,
+      amountOff !== null ? amountOff : (originalAmount * match.percentage) / 100
+    )
+  );
   const finalAmount = roundCurrency(Math.max(0, originalAmount - discountAmount));
 
   return {
     code: match.code,
-    percentage: match.percentage,
+    percentage: amountOff === null ? match.percentage : null,
+    amountOff,
     originalAmount,
     discountAmount,
     finalAmount,

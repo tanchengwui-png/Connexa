@@ -84,6 +84,16 @@ export type ContactTeammateRow = {
   agentName: string;
 };
 
+export type ContactExportRow = ContactBaseRow & {
+  ownerName: string | null;
+  collaborators: string | null;
+  remarks: string | null;
+  totalReceived: number;
+  totalSent: number;
+  businessType: string | null;
+  customerCount: number;
+};
+
 function buildContactDirectorySearchClause(search: string | null | undefined, startIndex: number) {
   const normalized = search?.trim().toLowerCase() ?? "";
   if (!normalized) {
@@ -110,6 +120,59 @@ function buildContactDirectorySearchClause(search: string | null | undefined, st
       )
     `,
     values: [likeValue]
+  };
+}
+
+function buildContactDirectoryFilterClauses(input: {
+  search?: string | null;
+  tags?: string[];
+  ownerIds?: string[];
+}, startIndex: number) {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  let nextIndex = startIndex;
+
+  const search = buildContactDirectorySearchClause(input.search, nextIndex);
+  if (search.clause) {
+    clauses.push(search.clause);
+    values.push(...search.values);
+    nextIndex += search.values.length;
+  }
+
+  const normalizedTags = Array.from(new Set((input.tags ?? []).map((value) => value.trim().toLowerCase()).filter(Boolean)));
+  if (normalizedTags.length) {
+    clauses.push(`
+      AND EXISTS (
+        SELECT 1
+        FROM unnest(regexp_split_to_array(COALESCE(c.tags, ''), '\\s*,\\s*')) AS tag(value)
+        WHERE LOWER(tag.value) = ANY($${nextIndex}::text[])
+      )
+    `);
+    values.push(normalizedTags);
+    nextIndex += 1;
+  }
+
+  const normalizedOwnerIds = Array.from(new Set((input.ownerIds ?? []).map((value) => value.trim()).filter(Boolean)));
+  if (normalizedOwnerIds.length) {
+    const includeUnassigned = normalizedOwnerIds.includes("unassigned");
+    const ownerIds = normalizedOwnerIds.filter((value) => value !== "unassigned");
+
+    if (includeUnassigned && ownerIds.length) {
+      clauses.push(`AND (c."ownerId" IS NULL OR c."ownerId" = ANY($${nextIndex}::text[]))`);
+      values.push(ownerIds);
+      nextIndex += 1;
+    } else if (includeUnassigned) {
+      clauses.push(`AND c."ownerId" IS NULL`);
+    } else {
+      clauses.push(`AND c."ownerId" = ANY($${nextIndex}::text[])`);
+      values.push(ownerIds);
+      nextIndex += 1;
+    }
+  }
+
+  return {
+    clause: clauses.join("\n"),
+    values
   };
 }
 
@@ -188,12 +251,21 @@ export async function findContactInWorkspace(contactId: string, workspaceId: str
 export async function findContactsWithOwner(input: {
   workspaceId: string;
   search?: string;
+  tags?: string[];
+  ownerIds?: string[];
   limit: number;
   offset: number;
 }) {
   const values: unknown[] = [input.workspaceId];
-  const search = buildContactDirectorySearchClause(input.search, values.length + 1);
-  values.push(...search.values, input.limit, input.offset);
+  const filters = buildContactDirectoryFilterClauses(
+    {
+      search: input.search,
+      tags: input.tags,
+      ownerIds: input.ownerIds
+    },
+    values.length + 1
+  );
+  values.push(...filters.values, input.limit, input.offset);
 
   return queryMany<ContactWithOwnerRow>(
     `SELECT
@@ -203,7 +275,7 @@ export async function findContactsWithOwner(input: {
       LEFT JOIN "Agent" a ON a.id = c."ownerId"
       WHERE c."workspaceId" = $1
         AND ${CONTACTS_DIRECTORY_VISIBLE_CONDITION}
-        ${search.clause}
+        ${filters.clause}
       ORDER BY c."lastInteractionAt" DESC
       LIMIT $${values.length - 1}
       OFFSET $${values.length}`,
@@ -214,10 +286,19 @@ export async function findContactsWithOwner(input: {
 export async function findAllVisibleContactsWithOwner(input: {
   workspaceId: string;
   search?: string;
+  tags?: string[];
+  ownerIds?: string[];
 }) {
   const values: unknown[] = [input.workspaceId];
-  const search = buildContactDirectorySearchClause(input.search, values.length + 1);
-  values.push(...search.values);
+  const filters = buildContactDirectoryFilterClauses(
+    {
+      search: input.search,
+      tags: input.tags,
+      ownerIds: input.ownerIds
+    },
+    values.length + 1
+  );
+  values.push(...filters.values);
 
   return queryMany<ContactWithOwnerRow>(
     `SELECT
@@ -227,8 +308,82 @@ export async function findAllVisibleContactsWithOwner(input: {
       LEFT JOIN "Agent" a ON a.id = c."ownerId"
       WHERE c."workspaceId" = $1
         AND ${CONTACTS_DIRECTORY_VISIBLE_CONDITION}
-        ${search.clause}
+        ${filters.clause}
       ORDER BY c."lastInteractionAt" DESC`,
+    values
+  );
+}
+
+export async function findContactsExportBatch(input: {
+  workspaceId: string;
+  search?: string;
+  tags?: string[];
+  ownerIds?: string[];
+  limit: number;
+  offset: number;
+}) {
+  const values: unknown[] = [input.workspaceId];
+  const filters = buildContactDirectoryFilterClauses(
+    {
+      search: input.search,
+      tags: input.tags,
+      ownerIds: input.ownerIds
+    },
+    values.length + 1
+  );
+  values.push(...filters.values, input.limit, input.offset);
+
+  return queryMany<ContactExportRow>(
+    `SELECT
+        c.*,
+        a.name AS "ownerName",
+        collaborators.collaborators,
+        remarks.remarks,
+        COALESCE(message_stats."totalReceived", 0) AS "totalReceived",
+        COALESCE(message_stats."totalSent", 0) AS "totalSent",
+        lead_summary."businessType",
+        COALESCE(conversation_stats."customerCount", 0) AS "customerCount"
+      FROM "Contact" c
+      LEFT JOIN "Agent" a ON a.id = c."ownerId"
+      LEFT JOIN LATERAL (
+        SELECT STRING_AGG(agent.name, ', ' ORDER BY agent."createdAt" ASC, agent.name ASC) AS collaborators
+        FROM "ContactTeammate" ct
+        JOIN "Agent" agent ON agent.id = ct."agentId"
+        WHERE ct."contactId" = c.id
+      ) collaborators ON true
+      LEFT JOIN LATERAL (
+        SELECT n.body AS remarks
+        FROM "Note" n
+        WHERE n."workspaceId" = c."workspaceId" AND n."contactId" = c.id
+        ORDER BY n."createdAt" DESC
+        LIMIT 1
+      ) remarks ON true
+      LEFT JOIN LATERAL (
+        SELECT
+          COUNT(*) FILTER (WHERE m.direction = 'INBOUND')::int AS "totalReceived",
+          COUNT(*) FILTER (WHERE m.direction = 'OUTBOUND')::int AS "totalSent"
+        FROM "Conversation" conv
+        JOIN "Message" m ON m."conversationId" = conv.id
+        WHERE conv."contactId" = c.id
+      ) message_stats ON true
+      LEFT JOIN LATERAL (
+        SELECT l."industryType"::text AS "businessType"
+        FROM "Lead" l
+        WHERE l."workspaceId" = c."workspaceId" AND l."contactId" = c.id
+        ORDER BY l."createdAt" DESC
+        LIMIT 1
+      ) lead_summary ON true
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS "customerCount"
+        FROM "Conversation" conv
+        WHERE conv."contactId" = c.id
+      ) conversation_stats ON true
+      WHERE c."workspaceId" = $1
+        AND ${CONTACTS_DIRECTORY_VISIBLE_CONDITION}
+        ${filters.clause}
+      ORDER BY c."lastInteractionAt" DESC, c.id ASC
+      LIMIT $${values.length - 1}
+      OFFSET $${values.length}`,
     values
   );
 }
@@ -294,17 +449,29 @@ export async function listContactTeammatesByWorkspace(workspaceId: string, conta
   );
 }
 
-export async function countVisibleContacts(input: { workspaceId: string; search?: string }) {
+export async function countVisibleContacts(input: {
+  workspaceId: string;
+  search?: string;
+  tags?: string[];
+  ownerIds?: string[];
+}) {
   const values: unknown[] = [input.workspaceId];
-  const search = buildContactDirectorySearchClause(input.search, values.length + 1);
-  values.push(...search.values);
+  const filters = buildContactDirectoryFilterClauses(
+    {
+      search: input.search,
+      tags: input.tags,
+      ownerIds: input.ownerIds
+    },
+    values.length + 1
+  );
+  values.push(...filters.values);
 
   const row = await queryOne<{ total: string }>(
     `SELECT COUNT(*)::text AS total
      FROM "Contact" c
      WHERE c."workspaceId" = $1
        AND ${CONTACTS_DIRECTORY_VISIBLE_CONDITION}
-       ${search.clause}`,
+       ${filters.clause}`,
     values
   );
 

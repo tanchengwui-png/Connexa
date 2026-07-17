@@ -18,7 +18,7 @@ type CalendarAppointmentsPanelProps = {
 
 export function CalendarAppointmentsPanel({ appointments }: CalendarAppointmentsPanelProps) {
   return (
-    <section className="content-card settings-dark-panel">
+    <section className="content-card settings-dark-panel calendar-appointments-panel">
       <div className="card-header settings-dark-panel-head">
         <div>
           <h3 className="card-title">Scheduled appointments</h3>

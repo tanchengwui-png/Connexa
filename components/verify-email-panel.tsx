@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { disableInboxBrowserPushSubscription } from "@/lib/inbox-browser-notifications-client";
 
 type VerifyEmailPanelProps = {
   email: string;
@@ -9,6 +10,7 @@ type VerifyEmailPanelProps = {
   verified?: boolean;
   continueHref?: string;
   continueLabel?: string;
+  verificationAttempted?: boolean;
 };
 
 export function VerifyEmailPanel({
@@ -16,12 +18,69 @@ export function VerifyEmailPanel({
   tokenError = null,
   verified = false,
   continueHref = "/login",
-  continueLabel = "Go to login"
+  continueLabel = "Go to login",
+  verificationAttempted = false
 }: VerifyEmailPanelProps) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(tokenError);
   const [sent, setSent] = useState(false);
   const [pending, setPending] = useState(false);
+  const [stage, setStage] = useState<"verify" | "success">(
+    verificationAttempted && verified && !tokenError ? "verify" : "success"
+  );
+  const [countdown, setCountdown] = useState(4);
+  const destinationLabel =
+    continueHref === "/onboarding"
+      ? "onboarding"
+      : continueHref === "/inbox"
+        ? "your inbox"
+        : "the next page";
+
+  useEffect(() => {
+    if (!verified) {
+      setStage("success");
+      setCountdown(4);
+      return;
+    }
+
+    if (verificationAttempted && !tokenError) {
+      setStage("verify");
+      setCountdown(4);
+
+      const verifyTimeout = window.setTimeout(() => {
+        setStage("success");
+        setCountdown(4);
+      }, 2200);
+
+      return () => {
+        window.clearTimeout(verifyTimeout);
+      };
+    }
+
+    setStage("success");
+    setCountdown(4);
+  }, [tokenError, verificationAttempted, verified]);
+
+  useEffect(() => {
+    if (!verified || stage !== "success") {
+      return;
+    }
+
+    setCountdown(4);
+
+    const interval = window.setInterval(() => {
+      setCountdown((current) => (current > 0 ? current - 1 : 0));
+    }, 1000);
+    const timeout = window.setTimeout(() => {
+      router.replace(continueHref);
+      router.refresh();
+    }, 4000);
+
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [continueHref, router, stage, verified]);
 
   async function handleResend() {
     setPending(true);
@@ -47,10 +106,18 @@ export function VerifyEmailPanel({
     <section className="auth-panel auth-form-panel auth-form-card connexa-public-card connexa-public-form-card register-dark-form-card">
       <div className="auth-form-header">
         <span className="badge auth-badge">Email verification</span>
-        <h2>{verified ? "Email verified" : "Verify your email"}</h2>
+        <h2>
+          {verified
+            ? stage === "verify"
+              ? "Verifying your email"
+              : "Email verified"
+            : "Verify your email"}
+        </h2>
         <p className="muted">
           {verified
-            ? "Your email is confirmed. You can continue to your workspace."
+            ? stage === "verify"
+              ? "We are confirming your email now."
+              : "Verification completed. We are taking you to your workspace."
             : `We sent a verification email to ${email}.`}
         </p>
       </div>
@@ -58,9 +125,22 @@ export function VerifyEmailPanel({
       {error ? <p className="form-error">{error}</p> : null}
 
       {verified ? (
-        <a className="button button-primary auth-submit" href={continueHref}>
-          {continueLabel}
-        </a>
+        <>
+          {stage === "verify" ? (
+            <p className="muted" aria-live="polite">
+              Verifying your email address now. Please wait a moment.
+            </p>
+          ) : (
+            <>
+              <p className="muted" aria-live="polite">
+                Verified completed. Taking you to {destinationLabel} in {countdown} second{countdown === 1 ? "" : "s"}.
+              </p>
+              <a className="button button-primary auth-submit" href={continueHref}>
+                {continueLabel}
+              </a>
+            </>
+          )}
+        </>
       ) : (
         <>
           <p className="muted">
@@ -73,6 +153,7 @@ export function VerifyEmailPanel({
           <button
             className="button button-secondary auth-submit"
             onClick={async () => {
+              await disableInboxBrowserPushSubscription().catch(() => false);
               await fetch("/api/auth/logout", { method: "POST" });
               router.push("/login");
               router.refresh();

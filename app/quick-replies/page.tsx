@@ -1,37 +1,25 @@
 import { DashboardShell } from "@/components/dashboard-shell";
-import { QuickRepliesManager } from "@/components/quick-replies-manager";
-import { getQuickRepliesData } from "@/lib/quick-replies";
+import { MorePageIntro } from "@/components/more-page-intro";
+import { QuickReplyList } from "@/components/quick-reply-list";
+import { getQuickReplyListData } from "@/lib/quick-replies";
 
 export default async function QuickRepliesPage() {
-  const { quickReplies, summary, categories, mediaAssets } = await getQuickRepliesData();
+  const { quickReplies, categories, summary } = await getQuickReplyListData();
 
   return (
     <DashboardShell currentPath="/quick-replies">
-      <section className="hero">
-        <div>
-          <span className="badge">Quick replies</span>
-          <h2>Keep common replies fast, consistent, and close to the queue.</h2>
-          <p className="muted">
-            Templates reduce typing friction and keep handoffs, welcome replies, and
-            repeated support answers consistent across the team.
-          </p>
-        </div>
-      </section>
-
-      <section className="metrics-grid">
-        <article className="content-card metric-card">
-          <div className="metric-label">Total replies</div>
-          <div className="metric-value">{summary.total}</div>
-          <div className="table-subtle">Reusable templates available to the workspace</div>
-        </article>
-        <article className="content-card metric-card">
-          <div className="metric-label">Replies with media</div>
-          <div className="metric-value">{summary.withMedia}</div>
-          <div className="table-subtle">Templates that include shared media attachments</div>
-        </article>
-      </section>
-
-      <QuickRepliesManager categories={categories} mediaAssets={mediaAssets} quickReplies={quickReplies} />
+      <div className="more-page-stack">
+        <MorePageIntro
+          badge="Quick replies"
+          title="Keep the shared reply library clean, searchable, and reusable."
+          description="Standardize saved replies, categories, shortcuts, and attached media so the team sends consistent WhatsApp responses with less manual editing."
+        >
+          <a className="button button-primary" href="/quick-replies/new">
+            Create New Quick Reply
+          </a>
+        </MorePageIntro>
+        <QuickReplyList categories={categories} quickReplies={quickReplies} summary={summary} />
+      </div>
     </DashboardShell>
   );
 }

@@ -6,7 +6,9 @@ import type { InboxAgent, InboxCurrentAgent, InboxSelectedConversation } from "@
 type ActiveConversationHeaderProps = {
   agents: InboxAgent[];
   currentAgent: InboxCurrentAgent;
+  isMuteSupported: boolean;
   onAddTag: (tag?: string) => void;
+  onSetMute: (duration: "8h" | "1w" | "always" | null) => void;
   onSnoozeConversation: () => void;
   onTakeOverConversation: () => void;
   onUpdateConversation: (updates: {
@@ -14,6 +16,7 @@ type ActiveConversationHeaderProps = {
     assigneeId?: string | null;
     teammateIds?: string[];
     snoozedUntil?: string | null;
+    snoozeReason?: string | null;
   }) => void;
   selectedConversation: NonNullable<InboxSelectedConversation>;
 };
@@ -21,7 +24,9 @@ type ActiveConversationHeaderProps = {
 export function ActiveConversationHeader({
   agents,
   currentAgent,
+  isMuteSupported,
   onAddTag,
+  onSetMute,
   onSnoozeConversation,
   onTakeOverConversation,
   onUpdateConversation,
@@ -49,30 +54,38 @@ export function ActiveConversationHeader({
               <StatusChip>{selectedConversation.status}</StatusChip>
             </div>
             <div className="inbox-thread-subline">
+              {selectedConversation.channelLabel ? (
+                <span className="inbox-thread-channel-label">
+                  Replying from: <strong>{selectedConversation.channelLabel}</strong>
+                </span>
+              ) : null}
               {selectedConversation.isGroup ? null : <span>{selectedConversation.phone}</span>}
-              <span>Primary owner: {selectedConversation.assignee}</span>
-              <span>
-                Team: {selectedConversation.teammates.length ? selectedConversation.teammates.map((teammate) => teammate.name).join(", ") : "None"}
-              </span>
               {selectedConversation.scheduledCount ? (
                 <a className="inbox-scheduled-link" href={`/scheduled-messages?conversationId=${selectedConversation.id}`}>
                   {selectedConversation.scheduledCount} scheduled
                   {selectedConversation.nextScheduledAt ? ` · next ${selectedConversation.nextScheduledAt}` : ""}
                 </a>
               ) : null}
-              <a className="inbox-scheduled-link" href={`/message-logs?conversationId=${selectedConversation.id}`}>
-                Message logs
-              </a>
               {selectedConversation.tags.length ? <span>{selectedConversation.tags.length} labels</span> : null}
             </div>
             {automationSummary ? (
               <div className="inbox-thread-chip-row">
                 <TagChip tone={automationSummary.tone}>{automationSummary.label}</TagChip>
-                <span className="inbox-thread-automation-copy">{automationSummary.detail}</span>
                 {automationSummary.linkHref ? (
                   <a className="inbox-scheduled-link" href={automationSummary.linkHref}>
                     {automationSummary.linkLabel}
                   </a>
+                ) : null}
+              </div>
+            ) : null}
+            {selectedConversation.isPinned || selectedConversation.isArchived || selectedConversation.isMuted ? (
+              <div className="inbox-thread-chip-row">
+                {selectedConversation.isPinned ? <TagChip tone="default">Pinned</TagChip> : null}
+                {selectedConversation.isArchived ? <TagChip tone="status">Archived</TagChip> : null}
+                {selectedConversation.isMuted ? (
+                  <TagChip tone="status">
+                    {selectedConversation.muteExpiration ? `Muted until ${selectedConversation.muteExpiration}` : "Muted"}
+                  </TagChip>
                 ) : null}
               </div>
             ) : null}
@@ -82,7 +95,9 @@ export function ActiveConversationHeader({
       <ConversationActionBar
         agents={agents}
         currentAgent={currentAgent}
+        isMuteSupported={isMuteSupported}
         onAddTag={onAddTag}
+        onSetMute={onSetMute}
         onSnoozeConversation={onSnoozeConversation}
         onTakeOverConversation={onTakeOverConversation}
         onUpdateConversation={onUpdateConversation}

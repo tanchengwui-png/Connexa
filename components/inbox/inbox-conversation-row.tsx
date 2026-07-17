@@ -49,9 +49,9 @@ export function InboxConversationRow({
 
           <div className="inbox-list-preview">{conversation.lastMessagePreview}</div>
 
-          {conversation.snoozedUntil ? (
+          {conversation.isSnoozed && conversation.snoozedUntil ? (
             <div className="inbox-list-reminder">
-              <span className="inbox-list-reminder-label">Reminder</span>
+              <span className="inbox-list-reminder-label">{conversation.snoozeReason?.trim() || "Snoozed"}</span>
               <span>{conversation.snoozedUntil}</span>
             </div>
           ) : null}
@@ -61,6 +61,9 @@ export function InboxConversationRow({
               {conversation.assigneeId ? conversation.assignee : "Unassigned"}
             </MetadataChip>
             <MetadataChip tone="channel">WhatsApp</MetadataChip>
+            {conversation.isPinned ? <MetadataChip tone="default">Pinned</MetadataChip> : null}
+            {conversation.isArchived ? <MetadataChip tone="default">Archived</MetadataChip> : null}
+            {conversation.isMuted ? <MetadataChip tone="default">Muted</MetadataChip> : null}
             {conversation.scheduledCount ? (
               <a className="inbox-list-scheduled-chip" href={`/scheduled-messages?conversationId=${conversation.id}`} onClick={(event) => event.stopPropagation()}>
                 {conversation.scheduledCount} scheduled

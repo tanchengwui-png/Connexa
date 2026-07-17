@@ -1,5 +1,6 @@
 import { PlatformAdminShell } from "@/components/platform-admin-shell";
 import { PlatformDatabaseResetCard } from "@/components/platform-database-reset-card";
+import { PlatformMetaSettingsForm } from "@/components/platform-meta-settings-form";
 import { PlatformSmtpSettingsForm } from "@/components/platform-smtp-settings-form";
 import { getPlatformAdminNavItems } from "@/lib/platform-admin-nav";
 import { requireCurrentPlatformAdmin } from "@/lib/platform-auth/current-user";
@@ -17,8 +18,14 @@ export default async function PlatformPage() {
         items={getPlatformAdminNavItems()}
         title="Delivery, checkout, and workflow timeout settings should live in one operational screen."
       >
-        <PlatformSmtpSettingsForm adminEmail={admin.email} initialValues={config} />
-        <PlatformDatabaseResetCard />
+        <div className="platform-email-page-stack">
+          <PlatformSmtpSettingsForm adminEmail={admin.email} initialValues={config} />
+
+          <div className="platform-email-secondary-stack">
+            <PlatformMetaSettingsForm initialValues={config} />
+            <PlatformDatabaseResetCard />
+          </div>
+        </div>
       </PlatformAdminShell>
     </main>
   );

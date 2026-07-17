@@ -1,34 +1,36 @@
 import { ConnexaLogo } from "@/components/connexa-logo";
-import { PublicPackagesGrid } from "@/components/public-packages-grid";
-import { registerTrust } from "@/lib/public-packages";
+import { PackagesPageContent } from "@/components/packages-page-content";
+import { getCurrentAgent } from "@/lib/auth/current-user";
+import { getCurrentSubscriptionOverview } from "@/lib/billing-management";
+import { normalizeWorkspacePackageKey } from "@/lib/billing";
 
-export default function PackagesPage() {
+export default async function PackagesPage() {
+  const currentAgent = await getCurrentAgent();
+  const subscription = currentAgent
+    ? await getCurrentSubscriptionOverview(currentAgent.workspaceId)
+    : null;
+  const currentPlanKey = subscription?.packageCode
+    ? normalizeWorkspacePackageKey(subscription.packageCode)
+    : null;
+
   return (
     <main className="connexa-dark-shell connexa-public-shell packages-page-shell">
       <section className="packages-page-header">
-        <ConnexaLogo dark priority />
+        <div className="packages-page-brand-row">
+          <ConnexaLogo priority />
+        </div>
 
         <div className="packages-page-copy">
-          <span className="badge auth-badge connexa-public-badge">Choose your package</span>
-          <h1>Choose the package, then go to payment before workspace access.</h1>
+          <span className="packages-page-kicker">Pricing Plans</span>
+          <h1>Choose the right plan for your WhatsApp workspace.</h1>
           <p className="muted">
-            Compare the packages first. When you choose one, we&apos;ll take you to checkout, collect
-            the owner account details, and send you to Billplz before the login is activated.
+            Compare monthly and yearly one-time package access, then move to checkout only when you
+            are ready to activate the workspace owner account.
           </p>
         </div>
-
-        <div className="register-trust-row">
-          {registerTrust.map((item) => (
-            <span className="landing-trust-pill" key={item}>
-              {item}
-            </span>
-          ))}
-        </div>
       </section>
 
-      <section className="connexa-section packages-page-section">
-        <PublicPackagesGrid />
-      </section>
+      <PackagesPageContent currentPlanKey={currentPlanKey} />
     </main>
   );
 }

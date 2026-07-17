@@ -1,8 +1,9 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, useTransition, type CSSProperties } from "react";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { AutomationEntryQrPanel } from "@/components/automation-entry-qr-panel";
 import { AutomationTestPanel } from "@/components/automation-test-panel";
 import { useConfirmation } from "@/components/confirmation-provider";
@@ -10,10 +11,17 @@ import { FullEmojiPicker } from "@/components/full-emoji-picker";
 import { AttachmentIcon, EmojiIcon } from "@/components/inbox/icons";
 import { INBOX_LAYERS } from "@/components/inbox/layers";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/toast-provider";
 import { WorkflowLibraryDesigner } from "@/components/workflow-library-designer";
 import { MediaAssetKind, type MediaAssetKind as MediaAssetKindValue } from "@/lib/db-types";
-import { formatMediaAssetSize, getMediaKindLabel, isPdfMimeType, type MediaLibraryAsset } from "@/lib/media-library-shared";
+import {
+  formatMediaAssetSize,
+  getMediaKindLabel,
+  isAudioMimeType,
+  isDocumentMimeType,
+  type MediaLibraryAsset
+} from "@/lib/media-library-shared";
 import {
   getWorkflowContentAttributeHelperText,
   getWorkflowContentAttributePlaceholder,
@@ -127,9 +135,18 @@ type AutomationRulesManagerProps = {
   }>;
   mediaAssets: MediaLibraryAsset[];
   mediaLimits: {
-    maxItems: number;
+    totalAssets: number;
+    imageCount: number;
+    audioCount: number;
+    videoCount: number;
+    documentCount: number;
+    usedStorageBytes: number;
+    storageLimitBytes: number | null;
+    remainingStorageBytes: number | null;
+    storageUsagePercentage: number | null;
+    isStorageUnlimited: boolean;
+    hasStorageLimitConfigured: boolean;
     maxFileBytes: number;
-    remainingItems: number;
   };
   workflows: Array<{
     id: string;
@@ -142,6 +159,9 @@ type AutomationRulesManagerProps = {
 
 type AutomationTab = "rules" | "hours" | "workflow" | "testing" | "entryQr";
 type WorkflowWorkspaceMode = "side" | "bottom";
+type AutomationViewMode = "list" | "editor";
+const DEFAULT_WORKFLOW_WORKSPACE_MODE: WorkflowWorkspaceMode = "side";
+const DEFAULT_WORKFLOW_CANVAS_WIDTH_PERCENT = 62;
 
 const EMPTY_RULE_FORM: {
   id: string | null;
@@ -211,6 +231,8 @@ export function AutomationRulesManager({
   workflows
 }: AutomationRulesManagerProps) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const routeSearchParams = searchParams ?? new URLSearchParams();
   const { confirm } = useConfirmation();
   const { success, error: showError } = useToast();
   const [isPending, startTransition] = useTransition();
@@ -237,22 +259,39 @@ export function AutomationRulesManager({
     targetType: "start" | "action" | "question" | "delay" | "end";
   } | null>(null);
   const [activeEmojiField, setActiveEmojiField] = useState<
-    "replyBody" | "followUpReplyBody" | "workflowReplyBody" | null
+    | "replyBody"
+    | "followUpReplyBody"
+    | "workflowReplyBody"
+    | "workflowPromptBody"
+    | "workflowFallbackReplyBody"
+    | "workflowNotificationMessage"
+    | `workflowMediaItemMessage:${string}`
+    | null
   >(null);
   const [isWorkflowInspectorExpanded, setIsWorkflowInspectorExpanded] = useState(false);
   const [isQuestionOptionsOpen, setIsQuestionOptionsOpen] = useState(false);
   const [isNotificationOptionsOpen, setIsNotificationOptionsOpen] = useState(false);
-  const [workflowWorkspaceMode, setWorkflowWorkspaceMode] = useState<WorkflowWorkspaceMode>("side");
-  const [workflowCanvasWidthPercent, setWorkflowCanvasWidthPercent] = useState(62);
+  const workflowWorkspaceMode: WorkflowWorkspaceMode = DEFAULT_WORKFLOW_WORKSPACE_MODE;
+  const [workflowCanvasWidthPercent, setWorkflowCanvasWidthPercent] = useState(
+    DEFAULT_WORKFLOW_CANVAS_WIDTH_PERCENT
+  );
   const workflowCanvasRef = useRef<HTMLDivElement | null>(null);
   const workflowBuilderRef = useRef<HTMLDivElement | null>(null);
   const workflowResizeStateRef = useRef<{ active: boolean }>({ active: false });
   const replyEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const followUpEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const workflowReplyEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workflowPromptEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workflowFallbackReplyEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workflowNotificationEmojiButtonRef = useRef<HTMLButtonElement | null>(null);
+  const workflowMediaItemEmojiButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const replyBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const followUpReplyBodyRef = useRef<HTMLTextAreaElement | null>(null);
   const workflowReplyBodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const workflowPromptBodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const workflowFallbackReplyBodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const workflowNotificationBodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const workflowMediaItemBodyRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const selectedMatchOperatorOption = RULE_MATCH_OPERATOR_OPTIONS.find(
     (option) => option.value === ruleForm.matchOperator
   );
@@ -267,6 +306,41 @@ export function AutomationRulesManager({
   );
   const anyWordsPreview = useMemo(() => anyWordsValues.slice(0, 4).join(", "), [anyWordsValues]);
   const humanTakeoverPauseEnabled = settingsForm.humanTakeoverPauseMinutes > 0;
+  const activeMode: AutomationViewMode = routeSearchParams.get("mode") === "editor" ? "editor" : "list";
+  const selectedRuleIdFromRoute = routeSearchParams.get("ruleId");
+  const selectedWorkflowIdFromRoute = routeSearchParams.get("workflowId");
+
+  const navigateAutomationView = (
+    tab: AutomationTab,
+    options?: {
+      mode?: AutomationViewMode;
+      ruleId?: string | null;
+      workflowId?: string | null;
+    }
+  ) => {
+    const params = new URLSearchParams(routeSearchParams.toString());
+    params.set("tab", tab);
+
+    if (options?.mode === "editor") {
+      params.set("mode", "editor");
+    } else {
+      params.delete("mode");
+    }
+
+    if (tab === "rules" && options?.ruleId) {
+      params.set("ruleId", options.ruleId);
+    } else {
+      params.delete("ruleId");
+    }
+
+    if (tab === "workflow" && options?.workflowId) {
+      params.set("workflowId", options.workflowId);
+    } else {
+      params.delete("workflowId");
+    }
+
+    router.push(`/automation-rules?${params.toString()}`);
+  };
 
   const beginEditRule = (ruleId: string) => {
     const rule = rules.find((item) => item.id === ruleId);
@@ -296,7 +370,6 @@ export function AutomationRulesManager({
     });
     setAnyWordsDraft("");
     setIsKeywordManagerOpen(false);
-    setActiveTab("rules");
   };
 
   const resetRuleForm = () => {
@@ -399,6 +472,147 @@ export function AutomationRulesManager({
     });
   };
 
+  const insertWorkflowPromptEmoji = (emoji: string) => {
+    const textarea = workflowPromptBodyRef.current;
+
+    updateSelectedWorkflowStep((step) => {
+      if (!("prompt" in step)) {
+        return step;
+      }
+
+      const currentValue = step.prompt ?? "";
+      if (!textarea) {
+        return {
+          ...step,
+          prompt: `${currentValue}${emoji}`
+        };
+      }
+
+      const start = textarea.selectionStart ?? currentValue.length;
+      const end = textarea.selectionEnd ?? currentValue.length;
+      const nextValue = `${currentValue.slice(0, start)}${emoji}${currentValue.slice(end)}`;
+
+      queueMicrotask(() => {
+        textarea.focus();
+        const nextCaret = start + emoji.length;
+        textarea.setSelectionRange(nextCaret, nextCaret);
+      });
+
+      return {
+        ...step,
+        prompt: nextValue
+      };
+    });
+  };
+
+  const insertWorkflowFallbackReplyEmoji = (emoji: string) => {
+    const textarea = workflowFallbackReplyBodyRef.current;
+
+    updateSelectedWorkflowStep((step) => {
+      if (!(step.type === "question" || step.type === "choice")) {
+        return step;
+      }
+
+      const currentValue = step.fallbackReply ?? "";
+      if (!textarea) {
+        return {
+          ...step,
+          fallbackReply: `${currentValue}${emoji}`
+        };
+      }
+
+      const start = textarea.selectionStart ?? currentValue.length;
+      const end = textarea.selectionEnd ?? currentValue.length;
+      const nextValue = `${currentValue.slice(0, start)}${emoji}${currentValue.slice(end)}`;
+
+      queueMicrotask(() => {
+        textarea.focus();
+        const nextCaret = start + emoji.length;
+        textarea.setSelectionRange(nextCaret, nextCaret);
+      });
+
+      return {
+        ...step,
+        fallbackReply: nextValue
+      };
+    });
+  };
+
+  const insertWorkflowNotificationEmoji = (emoji: string) => {
+    const textarea = workflowNotificationBodyRef.current;
+
+    updateSelectedWorkflowStep((step) => {
+      if (!(step.type === "update" || step.type === "action")) {
+        return step;
+      }
+
+      const currentValue = step.notifyMessage ?? "";
+      if (!textarea) {
+        return {
+          ...step,
+          notifyMessage: `${currentValue}${emoji}`
+        };
+      }
+
+      const start = textarea.selectionStart ?? currentValue.length;
+      const end = textarea.selectionEnd ?? currentValue.length;
+      const nextValue = `${currentValue.slice(0, start)}${emoji}${currentValue.slice(end)}`;
+
+      queueMicrotask(() => {
+        textarea.focus();
+        const nextCaret = start + emoji.length;
+        textarea.setSelectionRange(nextCaret, nextCaret);
+      });
+
+      return {
+        ...step,
+        notifyMessage: nextValue
+      };
+    });
+  };
+
+  const insertWorkflowMediaItemEmoji = (mediaAssetId: string, emoji: string) => {
+    const textarea = workflowMediaItemBodyRefs.current[mediaAssetId];
+
+    updateSelectedWorkflowStep((step) => {
+      if (!("mediaItems" in step)) {
+        return step;
+      }
+
+      return {
+        ...step,
+        mediaItems: (step.mediaItems ?? []).map((item) => {
+          if (item.mediaAssetId !== mediaAssetId) {
+            return item;
+          }
+
+          const currentValue = item.message ?? "";
+          if (!textarea) {
+            return {
+              ...item,
+              message: `${currentValue}${emoji}`
+            };
+          }
+
+          const start = textarea.selectionStart ?? currentValue.length;
+          const end = textarea.selectionEnd ?? currentValue.length;
+          const nextValue = `${currentValue.slice(0, start)}${emoji}${currentValue.slice(end)}`;
+
+          queueMicrotask(() => {
+            textarea.focus();
+            const nextCaret = start + emoji.length;
+            textarea.setSelectionRange(nextCaret, nextCaret);
+          });
+
+          return {
+            ...item,
+            message: nextValue
+          };
+        })
+      };
+    });
+  };
+
   const saveSettings = (successTitle: string, successMessage: string) => {
     setError(null);
     startTransition(async () => {
@@ -459,6 +673,7 @@ export function AutomationRulesManager({
         }));
       }
       success("Workflow created", `${nextWorkflow.name} is ready.`);
+      navigateAutomationView("workflow", { mode: "editor", workflowId: nextWorkflow.id });
     });
   };
 
@@ -705,6 +920,7 @@ export function AutomationRulesManager({
 
       success(ruleForm.id ? "Rule updated" : "Rule created", `${ruleForm.name || "Automation rule"} is ready.`);
       resetRuleForm();
+      navigateAutomationView("rules");
       router.refresh();
     });
   };
@@ -764,23 +980,23 @@ export function AutomationRulesManager({
       }
 
       success("Rule deleted", `${rule?.name ?? "Automation rule"} has been removed.`);
+      navigateAutomationView("rules");
       router.refresh();
     });
   };
 
   const renderRules = () => (
     <section className="automation-rule-columns">
-      <article className="content-card">
+      {activeMode === "editor" ? (
+      <article className="content-card automation-rule-card">
         <div className="card-header">
           <div>
             <h3 className="card-title">{ruleForm.id ? "Edit rule" : "Create rule"}</h3>
             <p className="muted">Keep the core rule simple. Expand advanced options only when you need them.</p>
           </div>
-          {ruleForm.id ? (
-            <button className="inbox-search-tool" onClick={resetRuleForm} type="button">
-              Cancel edit
-            </button>
-          ) : null}
+          <button className="inbox-search-tool" onClick={() => navigateAutomationView("rules")} type="button">
+            Back to rules
+          </button>
         </div>
 
         <div className="automation-rule-editor">
@@ -801,7 +1017,7 @@ export function AutomationRulesManager({
               <label className="lead-record-field">
                 <span>Trigger</span>
                 <select
-                  className="lead-record-input app-select"
+                  className="lead-record-input"
                   onChange={(event) =>
                     setRuleForm((current) => ({
                       ...current,
@@ -817,7 +1033,7 @@ export function AutomationRulesManager({
               <label className="lead-record-field">
                 <span>Condition</span>
                 <select
-                  className="lead-record-input app-select"
+                  className="lead-record-input"
                   onChange={(event) =>
                     setRuleForm((current) => ({
                       ...current,
@@ -933,13 +1149,26 @@ export function AutomationRulesManager({
             <div className="lead-record-form-grid">
               <label className="lead-record-field lead-record-field-wide">
                 <span>Reply body</span>
-                <textarea
-                  className="lead-record-input lead-record-textarea"
-                  onChange={(event) => setRuleForm((current) => ({ ...current, replyBody: event.target.value }))}
-                  placeholder={ruleForm.workflowId ? "Optional. Leave blank to start the workflow without sending a rule reply." : ""}
-                  ref={replyBodyRef}
-                  value={ruleForm.replyBody}
-                />
+                <div className="automation-textarea-with-emoji">
+                  <textarea
+                    className="lead-record-input lead-record-textarea automation-textarea-with-emoji-input"
+                    onChange={(event) => setRuleForm((current) => ({ ...current, replyBody: event.target.value }))}
+                    placeholder={ruleForm.workflowId ? "Optional. Leave blank to start the workflow without sending a rule reply." : ""}
+                    ref={replyBodyRef}
+                    value={ruleForm.replyBody}
+                  />
+                  <div className="automation-emoji-toolbar automation-emoji-toolbar-inside">
+                    <button
+                      aria-label="Open emoji picker"
+                      className="automation-emoji-icon-button"
+                      onClick={() => setActiveEmojiField((current) => (current === "replyBody" ? null : "replyBody"))}
+                      ref={replyEmojiButtonRef}
+                      type="button"
+                    >
+                      <EmojiIcon />
+                    </button>
+                  </div>
+                </div>
                 <AutomationMediaSelector
                   assets={mediaAssets}
                   emptyMessage="No media in the library yet. Upload shared assets in Setup > Media Library."
@@ -948,20 +1177,15 @@ export function AutomationRulesManager({
                 />
                 <span className="field-hint">
                   {mediaAssets.length
-                    ? `Select one or more shared assets. ${mediaLimits.remainingItems} upload slot${mediaLimits.remainingItems === 1 ? "" : "s"} left.`
+                    ? `Select one or more shared assets. ${
+                        mediaLimits.isStorageUnlimited
+                          ? "Unlimited Media Library storage."
+                          : mediaLimits.remainingStorageBytes !== null
+                            ? `${formatMediaAssetSize(mediaLimits.remainingStorageBytes)} remaining.`
+                            : "Unlimited Media Library storage."
+                      }`
                     : "No media in the library yet. Upload shared assets in Setup > Media Library."}
                 </span>
-                <div className="automation-emoji-toolbar">
-                  <button
-                    aria-label="Open emoji picker"
-                    className="automation-emoji-icon-button"
-                    onClick={() => setActiveEmojiField((current) => (current === "replyBody" ? null : "replyBody"))}
-                    ref={replyEmojiButtonRef}
-                    type="button"
-                  >
-                    <EmojiIcon />
-                  </button>
-                </div>
               </label>
               <label className="lead-record-field">
                 <span>Workflow to start</span>
@@ -1035,39 +1259,41 @@ export function AutomationRulesManager({
                   <span className="automation-delay-unit">minutes</span>
                 </div>
               </div>
-              <div className="automation-rule-note">
+              <div className="automation-rule-note lead-record-field-wide">
                 <strong>Optional step</strong>
                 <span>Leave this empty if the rule should reply once with no delayed follow-up.</span>
               </div>
               <label className="lead-record-field lead-record-field-wide">
                 <span>Follow-up reply</span>
-                <textarea
-                  className="lead-record-input lead-record-textarea"
-                  onChange={(event) =>
-                    setRuleForm((current) => ({ ...current, followUpReplyBody: event.target.value }))
-                  }
-                  ref={followUpReplyBodyRef}
-                  value={ruleForm.followUpReplyBody}
-                />
+                <div className="automation-textarea-with-emoji">
+                  <textarea
+                    className="lead-record-input lead-record-textarea automation-textarea-with-emoji-input"
+                    onChange={(event) =>
+                      setRuleForm((current) => ({ ...current, followUpReplyBody: event.target.value }))
+                    }
+                    ref={followUpReplyBodyRef}
+                    value={ruleForm.followUpReplyBody}
+                  />
+                  <div className="automation-emoji-toolbar automation-emoji-toolbar-inside">
+                    <button
+                      aria-label="Open emoji picker"
+                      className="automation-emoji-icon-button"
+                      onClick={() =>
+                        setActiveEmojiField((current) => (current === "followUpReplyBody" ? null : "followUpReplyBody"))
+                      }
+                      ref={followUpEmojiButtonRef}
+                      type="button"
+                    >
+                      <EmojiIcon />
+                    </button>
+                  </div>
+                </div>
                 <AutomationMediaSelector
                   assets={mediaAssets}
                   emptyMessage="No media in the library yet. Upload shared assets in Setup > Media Library."
                   onChange={(assetIds) => setRuleForm((current) => ({ ...current, followUpMediaAssetIds: assetIds }))}
                   selectedIds={ruleForm.followUpMediaAssetIds}
                 />
-                <div className="automation-emoji-toolbar">
-                  <button
-                    aria-label="Open emoji picker"
-                    className="automation-emoji-icon-button"
-                    onClick={() =>
-                      setActiveEmojiField((current) => (current === "followUpReplyBody" ? null : "followUpReplyBody"))
-                    }
-                    ref={followUpEmojiButtonRef}
-                    type="button"
-                  >
-                    <EmojiIcon />
-                  </button>
-                </div>
               </label>
             </div>
           </section>
@@ -1090,7 +1316,23 @@ export function AutomationRulesManager({
                   type="number"
                   value={ruleForm.priority}
                 />
+                <span className="field-hint">
+                  Higher priority rules are evaluated first. Use a smaller number for more important rules.
+                </span>
               </label>
+              <label className="lead-record-field lead-record-field-wide automation-toggle-row">
+                <input
+                  checked={ruleForm.stopAfterMatch}
+                  onChange={(event) =>
+                    setRuleForm((current) => ({ ...current, stopAfterMatch: event.target.checked }))
+                  }
+                  type="checkbox"
+                />
+                <span>Stop after this rule matches</span>
+              </label>
+              <span className="field-hint field-hint-tight">
+                Once this is enabled, no lower-priority rules will be triggered.
+              </span>
               <label className="lead-record-field lead-record-field-wide">
                 <span>Cooldown (min)</span>
                 <input
@@ -1105,16 +1347,6 @@ export function AutomationRulesManager({
                 <span className="field-hint">
                   After this rule runs, it will not run again for the same contact until this time passes.
                 </span>
-              </label>
-              <label className="lead-record-field lead-record-field-wide automation-toggle-row">
-                <input
-                  checked={ruleForm.stopAfterMatch}
-                  onChange={(event) =>
-                    setRuleForm((current) => ({ ...current, stopAfterMatch: event.target.checked }))
-                  }
-                  type="checkbox"
-                />
-                <span>Stop after this rule matches</span>
               </label>
               <label className="lead-record-field lead-record-field-wide automation-toggle-row">
                 <input
@@ -1142,19 +1374,34 @@ export function AutomationRulesManager({
 
         {error ? <div className="form-error">{error}</div> : null}
 
-        <div className="composer-actions">
+        <div className="composer-actions automation-rule-actions">
+          <button className="button button-secondary" onClick={() => navigateAutomationView("rules")} type="button">
+            Cancel
+          </button>
           <button className="button button-primary" disabled={isPending} onClick={() => void saveRule()} type="button">
             {isPending ? "Saving..." : ruleForm.id ? "Save rule" : "Create rule"}
           </button>
         </div>
       </article>
+      ) : null}
 
+      {activeMode === "list" ? (
       <article className="table-card">
         <div className="card-header">
           <div>
             <h3 className="card-title">Rules</h3>
             <p className="muted">Use plain-language conditions instead of raw regex for most rules.</p>
           </div>
+          <button
+            className="button button-primary compact-button"
+            onClick={() => {
+              resetRuleForm();
+              navigateAutomationView("rules", { mode: "editor" });
+            }}
+            type="button"
+          >
+            New rule
+          </button>
         </div>
 
         <div className="timeline-list">
@@ -1204,7 +1451,12 @@ export function AutomationRulesManager({
                 </div>
               ) : null}
               <div className="composer-actions inline-actions">
-                <button className="button button-secondary compact-button" disabled={isPending} onClick={() => beginEditRule(rule.id)} type="button">
+                <button
+                  className="button button-secondary compact-button"
+                  disabled={isPending}
+                  onClick={() => navigateAutomationView("rules", { mode: "editor", ruleId: rule.id })}
+                  type="button"
+                >
                   Edit
                 </button>
                 <button
@@ -1228,6 +1480,7 @@ export function AutomationRulesManager({
           ))}
         </div>
       </article>
+      ) : null}
     </section>
   );
 
@@ -2475,8 +2728,24 @@ export function AutomationRulesManager({
                     ? "Please reply with one of the listed options."
                     : "Please reply yes or no."
                 }
+                ref={workflowFallbackReplyBodyRef}
                 value={promptNode.fallbackReply ?? ""}
               />
+              <div className="automation-emoji-toolbar">
+                <button
+                  aria-label="Open emoji picker"
+                  className="automation-emoji-icon-button"
+                  onClick={() =>
+                    setActiveEmojiField((current) =>
+                      current === "workflowFallbackReplyBody" ? null : "workflowFallbackReplyBody"
+                    )
+                  }
+                  ref={workflowFallbackReplyEmojiButtonRef}
+                  type="button"
+                >
+                  <EmojiIcon />
+                </button>
+              </div>
             </label>
           </div>
         ) : null}
@@ -2551,9 +2820,25 @@ export function AutomationRulesManager({
               )
             }
             placeholder="Lead {{name}} replied: {{currentReply}}"
+            ref={workflowNotificationBodyRef}
             rows={4}
             value={step.notifyMessage ?? ""}
           />
+          <div className="automation-emoji-toolbar">
+            <button
+              aria-label="Open emoji picker"
+              className="automation-emoji-icon-button"
+              onClick={() =>
+                setActiveEmojiField((current) =>
+                  current === "workflowNotificationMessage" ? null : "workflowNotificationMessage"
+                )
+              }
+              ref={workflowNotificationEmojiButtonRef}
+              type="button"
+            >
+              <EmojiIcon />
+            </button>
+          </div>
           <span className="field-hint">
             Supports saved variables and built-ins like <code>{"{{name}}"}</code>, <code>{"{{phone}}"}</code>, and <code>{"{{currentReply}}"}</code>.
           </span>
@@ -2867,6 +3152,75 @@ export function AutomationRulesManager({
   }, []);
 
   useEffect(() => {
+    const tabFromRoute = routeSearchParams.get("tab");
+    if (
+      tabFromRoute === "rules" ||
+      tabFromRoute === "workflow" ||
+      tabFromRoute === "hours" ||
+      tabFromRoute === "testing" ||
+      tabFromRoute === "entryQr"
+    ) {
+      setActiveTab(tabFromRoute);
+    }
+  }, [routeSearchParams]);
+
+  useEffect(() => {
+    if (activeTab !== "rules" || activeMode !== "editor") {
+      return;
+    }
+
+    if (!selectedRuleIdFromRoute) {
+      setRuleForm(EMPTY_RULE_FORM);
+      setAnyWordsDraft("");
+      setIsKeywordManagerOpen(false);
+      return;
+    }
+
+    const rule = rules.find((item) => item.id === selectedRuleIdFromRoute);
+    if (!rule) {
+      return;
+    }
+
+    setRuleForm({
+      id: rule.id,
+      name: rule.name,
+      triggerType: rule.triggerType,
+      matchOperator: rule.matchOperator,
+      matchType: rule.matchType,
+      keyword: rule.keyword ?? "",
+      replyBody: rule.replyBody,
+      replyMediaAssetIds: rule.replyMediaAssetIds,
+      workflowId: rule.workflowId ?? "",
+      addTags: rule.addTags.join(", "),
+      priority: rule.priority,
+      cooldownMinutes: rule.cooldownMinutes,
+      stopAfterMatch: rule.stopAfterMatch,
+      businessHoursOnly: rule.businessHoursOnly,
+      followUpDelayMinutes: rule.followUpDelayMinutes ? `${rule.followUpDelayMinutes}` : "",
+      followUpReplyBody: rule.followUpReplyBody ?? "",
+      followUpMediaAssetIds: rule.followUpMediaAssetIds,
+      enabled: rule.enabled
+    });
+    setAnyWordsDraft("");
+    setIsKeywordManagerOpen(false);
+  }, [activeMode, activeTab, rules, selectedRuleIdFromRoute]);
+
+  useEffect(() => {
+    if (activeTab !== "workflow" || activeMode !== "editor") {
+      return;
+    }
+
+    if (selectedWorkflowIdFromRoute && workflowList.some((workflow) => workflow.id === selectedWorkflowIdFromRoute)) {
+      setSelectedWorkflowId(selectedWorkflowIdFromRoute);
+      return;
+    }
+
+    if (!selectedWorkflowIdFromRoute && workflowList[0]?.id) {
+      setSelectedWorkflowId(workflowList[0].id);
+    }
+  }, [activeMode, activeTab, selectedWorkflowIdFromRoute, workflowList]);
+
+  useEffect(() => {
     if (!workflowList.length) {
       if (selectedWorkflowId !== null) {
         setSelectedWorkflowId(null);
@@ -2888,38 +3242,6 @@ export function AutomationRulesManager({
       setIsWorkflowInspectorExpanded(false);
     }
   }, [selectedWorkflowStep]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    const savedMode = window.localStorage.getItem("connexa.workflowWorkspaceMode");
-    if (savedMode === "side" || savedMode === "bottom") {
-      setWorkflowWorkspaceMode(savedMode);
-    }
-
-    const savedWidth = Number(window.localStorage.getItem("connexa.workflowCanvasWidthPercent"));
-    if (Number.isFinite(savedWidth)) {
-      setWorkflowCanvasWidthPercent(Math.min(76, Math.max(42, Math.round(savedWidth))));
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem("connexa.workflowWorkspaceMode", workflowWorkspaceMode);
-  }, [workflowWorkspaceMode]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    window.localStorage.setItem("connexa.workflowCanvasWidthPercent", `${workflowCanvasWidthPercent}`);
-  }, [workflowCanvasWidthPercent]);
 
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
@@ -2970,6 +3292,7 @@ export function AutomationRulesManager({
     }
 
     const isReplyNode = selectedWorkflowStep.type === "reply";
+    const isFollowUpNode = selectedWorkflowStep.type === "follow_up";
     const supportsPrompt =
       "prompt" in selectedWorkflowStep &&
       (selectedWorkflowStep.type === "ask" ||
@@ -3030,10 +3353,6 @@ export function AutomationRulesManager({
               </div>
               <div className="lead-record-form-grid">
                 <label className="lead-record-field">
-                  <span>Node ID</span>
-                  <input className="lead-record-input" readOnly value={selectedWorkflowStep.id} />
-                </label>
-                <label className="lead-record-field">
                   <span>Type</span>
                   <input className="lead-record-input" readOnly value={nodeTypeLabel} />
                 </label>
@@ -3060,8 +3379,22 @@ export function AutomationRulesManager({
                     <textarea
                       className="lead-record-input lead-record-textarea"
                       onChange={(event) => updateSelectedWorkflowStep((step) => ({ ...step, prompt: event.target.value }))}
+                      ref={workflowPromptBodyRef}
                       value={selectedWorkflowStep.prompt ?? ""}
                     />
+                    <div className="automation-emoji-toolbar">
+                      <button
+                        aria-label="Open emoji picker"
+                        className="automation-emoji-icon-button"
+                        onClick={() =>
+                          setActiveEmojiField((current) => (current === "workflowPromptBody" ? null : "workflowPromptBody"))
+                        }
+                        ref={workflowPromptEmojiButtonRef}
+                        type="button"
+                      >
+                        <EmojiIcon />
+                      </button>
+                    </div>
                     {selectedWorkflowStep.type === "question" ? (
                       <>
                         <span className="field-hint">
@@ -3160,6 +3493,62 @@ export function AutomationRulesManager({
               </div>
             ) : null}
 
+            {selectedWorkflowStep.type === "follow_up" ? (
+              <div className="workflow-node-section-card lead-record-field lead-record-field-wide">
+                <div className="workflow-node-section-heading">
+                  <strong>Follow-up Timing</strong>
+                  <span>Wait for this long, then send the follow-up only if the contact still has not replied.</span>
+                </div>
+                <div className="lead-record-form-grid">
+                  <label className="lead-record-field">
+                    <span>Delay minutes</span>
+                    <input
+                      className="lead-record-input"
+                      inputMode="numeric"
+                      min={1}
+                      onChange={(event) =>
+                        updateSelectedWorkflowStep((step) => ({
+                          ...step,
+                          delayMinutes:
+                            event.target.value.trim() && Number(event.target.value) > 0
+                              ? Math.round(Number(event.target.value))
+                              : null
+                        }))
+                      }
+                      placeholder="60"
+                      value={selectedWorkflowStep.delayMinutes ? `${selectedWorkflowStep.delayMinutes}` : ""}
+                    />
+                  </label>
+                  <label className="lead-record-field lead-record-field-wide automation-toggle-row">
+                    <span>Cancel if the contact replies before the timer ends</span>
+                    <input
+                      checked={selectedWorkflowStep.cancelOnInbound !== false}
+                      onChange={(event) =>
+                        updateSelectedWorkflowStep((step) => ({
+                          ...step,
+                          cancelOnInbound: event.target.checked
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                  </label>
+                  <label className="lead-record-field lead-record-field-wide automation-toggle-row">
+                    <span>Cancel if a human reply pauses automation</span>
+                    <input
+                      checked={Boolean(selectedWorkflowStep.cancelOnHumanReply)}
+                      onChange={(event) =>
+                        updateSelectedWorkflowStep((step) => ({
+                          ...step,
+                          cancelOnHumanReply: event.target.checked
+                        }))
+                      }
+                      type="checkbox"
+                    />
+                  </label>
+                </div>
+              </div>
+            ) : null}
+
             {selectedWorkflowStep.type === "go_to" ? (
               <div className="workflow-node-section-card lead-record-field lead-record-field-wide">
                 <div className="workflow-node-section-heading">
@@ -3195,11 +3584,11 @@ export function AutomationRulesManager({
             {"reply" in selectedWorkflowStep ? (
               <div className="workflow-node-section-card lead-record-field lead-record-field-wide">
                 <div className="workflow-node-section-heading">
-                  <strong>{selectedWorkflowStep.type === "reply" ? "Message" : "Reply"}</strong>
+                  <strong>{selectedWorkflowStep.type === "reply" ? "Message" : isFollowUpNode ? "Follow-up Reply" : "Reply"}</strong>
                   <span>{getWorkflowReplyDescription(selectedWorkflowStep.type)}</span>
                 </div>
                 <label className="lead-record-field">
-                  <span>{selectedWorkflowStep.type === "reply" ? "Intro message" : "Reply"}</span>
+                  <span>{selectedWorkflowStep.type === "reply" ? "Intro message" : isFollowUpNode ? "Follow-up message" : "Reply"}</span>
                   <textarea
                     className="lead-record-input lead-record-textarea"
                     onChange={(event) => updateSelectedWorkflowStep((step) => ({ ...step, reply: event.target.value }))}
@@ -3287,8 +3676,30 @@ export function AutomationRulesManager({
                               }))
                             }
                             placeholder="Caption/message for this media"
+                            ref={(node) => {
+                              workflowMediaItemBodyRefs.current[item.mediaAssetId] = node;
+                            }}
                             value={item.message ?? ""}
                           />
+                          <div className="automation-emoji-toolbar">
+                            <button
+                              aria-label="Open emoji picker"
+                              className="automation-emoji-icon-button"
+                              onClick={() =>
+                                setActiveEmojiField((current) =>
+                                  current === `workflowMediaItemMessage:${item.mediaAssetId}`
+                                    ? null
+                                    : `workflowMediaItemMessage:${item.mediaAssetId}`
+                                )
+                              }
+                              ref={(node) => {
+                                workflowMediaItemEmojiButtonRefs.current[item.mediaAssetId] = node;
+                              }}
+                              type="button"
+                            >
+                              <EmojiIcon />
+                            </button>
+                          </div>
                         </div>
                       );
                     })}
@@ -3506,6 +3917,74 @@ export function AutomationRulesManager({
                         ))}
                       </select>
                     </label>
+                  ) : null}
+                  {(selectedWorkflowStep.type === "update" || selectedWorkflowStep.type === "action") ? (
+                    <>
+                      <label className="lead-record-field">
+                        <span>Snooze</span>
+                        <select
+                          className="lead-record-input app-select"
+                          onChange={(event) =>
+                            updateSelectedWorkflowStep((step) =>
+                              step.type === "update" || step.type === "action"
+                                ? {
+                                    ...step,
+                                    snoozeAction: normalizeWorkflowSnoozeAction(event.target.value),
+                                    snoozeDurationMinutes:
+                                      event.target.value === "snooze" ? step.snoozeDurationMinutes ?? 60 : null
+                                  }
+                                : step
+                            )
+                          }
+                          value={selectedWorkflowStep.snoozeAction ?? "none"}
+                        >
+                          <option value="none">No change</option>
+                          <option value="snooze">Snooze conversation</option>
+                          <option value="unsnooze">Unsnooze conversation</option>
+                        </select>
+                      </label>
+                      {(selectedWorkflowStep.snoozeAction ?? "none") === "snooze" ? (
+                        <>
+                          <label className="lead-record-field">
+                            <span>Snooze minutes</span>
+                            <input
+                              className="lead-record-input"
+                              min={1}
+                              onChange={(event) =>
+                                updateSelectedWorkflowStep((step) =>
+                                  step.type === "update" || step.type === "action"
+                                    ? {
+                                        ...step,
+                                        snoozeDurationMinutes: Math.max(1, Number(event.target.value) || 0)
+                                      }
+                                    : step
+                                )
+                              }
+                              type="number"
+                              value={selectedWorkflowStep.snoozeDurationMinutes ?? 60}
+                            />
+                          </label>
+                          <label className="lead-record-field lead-record-field-wide">
+                            <span>Snooze reason</span>
+                            <input
+                              className="lead-record-input"
+                              onChange={(event) =>
+                                updateSelectedWorkflowStep((step) =>
+                                  step.type === "update" || step.type === "action"
+                                    ? {
+                                        ...step,
+                                        snoozeReason: event.target.value
+                                      }
+                                    : step
+                                )
+                              }
+                              placeholder="Awaiting customer reply"
+                              value={selectedWorkflowStep.snoozeReason ?? ""}
+                            />
+                          </label>
+                        </>
+                      ) : null}
+                    </>
                   ) : null}
                   {"leadStage" in selectedWorkflowStep ? (
                     <label className="lead-record-field">
@@ -3880,19 +4359,28 @@ export function AutomationRulesManager({
       <div className="card-header">
         <div>
           <h3 className="card-title">Structured workflow</h3>
-          <p className="muted">Define a graph-like step flow now, then layer drag-and-drop on top later.</p>
+          <p className="muted">
+            {activeMode === "editor"
+              ? "Define a graph-like step flow now, then layer drag-and-drop on top later."
+              : "Only created workflows are shown here. Open one to edit it on the canvas."}
+          </p>
         </div>
+        {activeMode === "editor" ? (
+          <button className="inbox-search-tool" onClick={() => navigateAutomationView("workflow")} type="button">
+            Back to workflows
+          </button>
+        ) : (
+          <button className="button button-primary compact-button" onClick={createWorkflow} type="button">
+            New workflow
+          </button>
+        )}
       </div>
 
+      {activeMode === "list" ? (
       <section className="lead-record-panel">
         <div className="lead-record-section-head">
           <strong>Workflow list</strong>
-          <span>Create, select, and manage multiple workflows for this workspace.</span>
-        </div>
-        <div className="composer-actions inline-actions">
-          <button className="button button-secondary compact-button" onClick={createWorkflow} type="button">
-            New workflow
-          </button>
+          <span>Select an existing workflow or create a new one to open the canvas.</span>
         </div>
         <div className="automation-workflow-list">
           {workflowList.map((workflow) => (
@@ -3900,15 +4388,18 @@ export function AutomationRulesManager({
               className={`automation-workflow-list-item${workflow.id === selectedWorkflowId ? " selected" : ""}`}
               key={workflow.id}
             >
-              <button
-                className="automation-workflow-list-main"
-                onClick={() => setSelectedWorkflowId(workflow.id)}
-                type="button"
-              >
+              <div className="automation-workflow-list-main">
                 <strong>{workflow.name}</strong>
                 <span>{workflow.isActive ? "Active at runtime" : "Inactive workflow"}</span>
-              </button>
+              </div>
               <div className="automation-workflow-list-actions">
+                <button
+                  className="inbox-search-tool"
+                  onClick={() => navigateAutomationView("workflow", { mode: "editor", workflowId: workflow.id })}
+                  type="button"
+                >
+                  Edit
+                </button>
                 {workflow.isActive ? (
                   <button className="inbox-search-tool" onClick={() => toggleWorkflowActive(workflow.id, false)} type="button">
                     Deactivate
@@ -3926,11 +4417,13 @@ export function AutomationRulesManager({
           ))}
         </div>
       </section>
+      ) : null}
 
+      {activeMode === "editor" ? (
       <section className="lead-record-panel">
         <div className="lead-record-section-head">
           <strong>Workflow canvas</strong>
-          <span>Use a resizable split or bottom dock so both canvas and inspector can stay large.</span>
+          <span>Balanced view keeps the canvas and inspector visible together.</span>
         </div>
         {!selectedWorkflow ? (
           <div className="table-subtle">
@@ -3946,49 +4439,6 @@ export function AutomationRulesManager({
               ))}
             </div>
           ) : null}
-          <div className="automation-workflow-toolbar">
-            <div className="composer-actions inline-actions">
-              <button
-                className={`button button-secondary compact-button${workflowWorkspaceMode === "side" ? " active" : ""}`}
-                onClick={() => setWorkflowWorkspaceMode("side")}
-                type="button"
-              >
-                Right dock
-              </button>
-              <button
-                className={`button button-secondary compact-button${workflowWorkspaceMode === "bottom" ? " active" : ""}`}
-                onClick={() => setWorkflowWorkspaceMode("bottom")}
-                type="button"
-              >
-                Bottom dock
-              </button>
-            </div>
-            {workflowWorkspaceMode === "side" ? (
-              <div className="composer-actions inline-actions">
-                <button
-                  className="button button-secondary compact-button"
-                  onClick={() => setWorkflowCanvasWidthPercent(72)}
-                  type="button"
-                >
-                  Canvas focus
-                </button>
-                <button
-                  className="button button-secondary compact-button"
-                  onClick={() => setWorkflowCanvasWidthPercent(62)}
-                  type="button"
-                >
-                  Balanced
-                </button>
-                <button
-                  className="button button-secondary compact-button"
-                  onClick={() => setWorkflowCanvasWidthPercent(48)}
-                  type="button"
-                >
-                  Inspector focus
-                </button>
-              </div>
-            ) : null}
-          </div>
           <label className="lead-record-field lead-record-field-wide">
             <span>Workflow name</span>
             <input
@@ -4163,23 +4613,14 @@ export function AutomationRulesManager({
           </>
         )}
       </section>
+      ) : null}
 
       {error ? <div className="form-error">{error}</div> : null}
 
-      <div className="composer-actions">
-        <button
-          className="button button-secondary"
-          disabled={isPending || !selectedWorkflow}
-          onClick={() =>
-            setWorkflowList((current) =>
-              current.map((workflow) =>
-                workflow.id === selectedWorkflowId ? { ...workflow, definitionJson: DEFAULT_WORKFLOW_DEFINITION_JSON } : workflow
-              )
-            )
-          }
-          type="button"
-        >
-          Load sample workflow
+      {activeMode === "editor" ? (
+      <div className="composer-actions automation-workflow-footer-actions">
+        <button className="button button-secondary" onClick={() => navigateAutomationView("workflow")} type="button">
+          Back
         </button>
         <button
           className="button button-primary"
@@ -4190,6 +4631,7 @@ export function AutomationRulesManager({
           {isPending ? "Saving..." : "Save workflow"}
         </button>
       </div>
+      ) : null}
     </article>
   );
 
@@ -4221,17 +4663,21 @@ export function AutomationRulesManager({
 
         <div aria-label="Automation sections" className="automation-tab-list" role="tablist">
           {TABS.map((tab) => (
-            <button
+            <Button
               aria-selected={activeTab === tab.id}
               className={`automation-tab-button ${activeTab === tab.id ? "active" : ""}`}
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {
+                setActiveTab(tab.id);
+                navigateAutomationView(tab.id);
+              }}
               role="tab"
-              type="button"
+              selected={activeTab === tab.id}
+              variant="toggle"
             >
               <strong>{tab.label}</strong>
               <span>{tab.description}</span>
-            </button>
+            </Button>
           ))}
         </div>
       </article>
@@ -4249,7 +4695,15 @@ export function AutomationRulesManager({
             ? followUpEmojiButtonRef
             : activeEmojiField === "workflowReplyBody"
               ? workflowReplyEmojiButtonRef
-              : replyEmojiButtonRef
+              : activeEmojiField === "workflowPromptBody"
+                ? workflowPromptEmojiButtonRef
+                : activeEmojiField === "workflowFallbackReplyBody"
+                  ? workflowFallbackReplyEmojiButtonRef
+                  : activeEmojiField === "workflowNotificationMessage"
+                    ? workflowNotificationEmojiButtonRef
+                    : activeEmojiField?.startsWith("workflowMediaItemMessage:")
+                      ? { current: workflowMediaItemEmojiButtonRefs.current[activeEmojiField.slice("workflowMediaItemMessage:".length)] ?? null }
+                      : replyEmojiButtonRef
         }
         className="automation-emoji-dropdown"
         onClose={() => setActiveEmojiField(null)}
@@ -4269,7 +4723,29 @@ export function AutomationRulesManager({
                 return;
               }
 
-              insertEmoji(activeEmojiField, emoji);
+              if (activeEmojiField === "workflowPromptBody") {
+                insertWorkflowPromptEmoji(emoji);
+                return;
+              }
+
+              if (activeEmojiField === "workflowFallbackReplyBody") {
+                insertWorkflowFallbackReplyEmoji(emoji);
+                return;
+              }
+
+              if (activeEmojiField === "workflowNotificationMessage") {
+                insertWorkflowNotificationEmoji(emoji);
+                return;
+              }
+
+              if (activeEmojiField.startsWith("workflowMediaItemMessage:")) {
+                insertWorkflowMediaItemEmoji(activeEmojiField.slice("workflowMediaItemMessage:".length), emoji);
+                return;
+              }
+
+              if (activeEmojiField === "replyBody" || activeEmojiField === "followUpReplyBody") {
+                insertEmoji(activeEmojiField, emoji);
+              }
             }}
           />
         </div>
@@ -4626,24 +5102,14 @@ function AutomationMediaPreview({ asset }: { asset: MediaLibraryAsset }) {
   return (
     <div className="automation-media-preview-card">
       <div className="automation-media-preview-frame">
-        {asset.kind === MediaAssetKind.IMAGE ? (
-          <img alt={asset.title} className="automation-media-preview-image" src={asset.publicUrl} />
-        ) : null}
-        {asset.kind === MediaAssetKind.AUDIO ? (
-          <audio className="automation-media-preview-audio" controls preload="metadata" src={asset.publicUrl}>
-            Your browser does not support audio playback.
-          </audio>
-        ) : null}
-        {asset.kind === MediaAssetKind.VIDEO && !isPdfMimeType(asset.mimeType) ? (
-          <video className="automation-media-preview-video" controls preload="metadata" src={asset.publicUrl}>
-            Your browser does not support video playback.
-          </video>
-        ) : null}
-        {isPdfMimeType(asset.mimeType) ? (
-          <a className="automation-media-preview-audio" href={asset.publicUrl} rel="noreferrer" target="_blank">
-            Open PDF
-          </a>
-        ) : null}
+        <AttachmentPreview
+          fileName={asset.originalName || asset.title}
+          fit="cover"
+          mimeType={asset.mimeType}
+          openLabel="Open attachment"
+          sizeLabel={formatMediaAssetSize(asset.sizeBytes)}
+          url={asset.publicUrl}
+        />
       </div>
       <div className="automation-media-preview-copy">
         <strong>{asset.title}</strong>
@@ -4685,6 +5151,7 @@ type WorkflowMediaItem = {
 };
 
 type WorkflowAssignmentMode = "none" | "fixed" | "round_robin";
+type WorkflowSnoozeAction = "none" | "snooze" | "unsnooze";
 
 const LEAD_ATTRIBUTE_OPTIONS = WORKFLOW_CONTENT_ATTRIBUTE_OPTIONS;
 
@@ -4693,7 +5160,7 @@ type WorkflowDraft = {
   variables?: WorkflowVariable[];
   steps: Array<{
     id: string;
-    type: "ask" | "question" | "choice" | "action" | "reply" | "update" | "delay" | "go_to" | "end";
+    type: "ask" | "question" | "choice" | "action" | "reply" | "update" | "delay" | "follow_up" | "go_to" | "end";
     title?: string;
     position?: { x: number; y: number };
     prompt?: string;
@@ -4712,6 +5179,9 @@ type WorkflowDraft = {
     assignmentMode?: WorkflowAssignmentMode;
     roundRobinAgentIds?: string[];
     overwriteExistingOwner?: boolean;
+    snoozeAction?: WorkflowSnoozeAction;
+    snoozeDurationMinutes?: number | null;
+    snoozeReason?: string | null;
     leadStage?: string | null;
     leadAttributeKey?: string | null;
     leadAttributeValue?: string | null;
@@ -4795,6 +5265,18 @@ function parseWorkflowDraft(value: string): WorkflowDraft | null {
           };
         }
 
+        if (step.type === "follow_up") {
+          return {
+            ...step,
+            delayMinutes:
+              typeof step.delayMinutes === "number" && step.delayMinutes > 0
+                ? Math.round(step.delayMinutes)
+                : null,
+            cancelOnInbound: step.cancelOnInbound !== false,
+            cancelOnHumanReply: Boolean(step.cancelOnHumanReply)
+          };
+        }
+
         if (step.type === "update") {
           const assignOwnerId = typeof step.assignOwnerId === "string" ? step.assignOwnerId.trim() || null : null;
           return {
@@ -4806,6 +5288,12 @@ function parseWorkflowDraft(value: string): WorkflowDraft | null {
             notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage : "",
             roundRobinAgentIds: normalizeWorkflowRoundRobinAgentIds(step.roundRobinAgentIds),
             overwriteExistingOwner: Boolean(step.overwriteExistingOwner),
+            snoozeAction: normalizeWorkflowSnoozeAction(step.snoozeAction),
+            snoozeDurationMinutes:
+              typeof step.snoozeDurationMinutes === "number" && step.snoozeDurationMinutes > 0
+                ? Math.round(step.snoozeDurationMinutes)
+                : null,
+            snoozeReason: typeof step.snoozeReason === "string" ? step.snoozeReason : "",
             leadAttributeKey: normalizeWorkflowLeadAttributeKey(step.leadAttributeKey),
             leadAttributeValue: typeof step.leadAttributeValue === "string" ? step.leadAttributeValue : "",
             leadAttributeValueSource: step.leadAttributeValueSource === "savedValue" ? "savedValue" : "literal",
@@ -4819,7 +5307,13 @@ function parseWorkflowDraft(value: string): WorkflowDraft | null {
             ...step,
             notifyAssignedOwner: Boolean(step.notifyAssignedOwner),
             notifyAgentIds: normalizeWorkflowRoundRobinAgentIds(step.notifyAgentIds),
-            notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage : ""
+            notifyMessage: typeof step.notifyMessage === "string" ? step.notifyMessage : "",
+            snoozeAction: normalizeWorkflowSnoozeAction(step.snoozeAction),
+            snoozeDurationMinutes:
+              typeof step.snoozeDurationMinutes === "number" && step.snoozeDurationMinutes > 0
+                ? Math.round(step.snoozeDurationMinutes)
+                : null,
+            snoozeReason: typeof step.snoozeReason === "string" ? step.snoozeReason : ""
           };
         }
 
@@ -4838,16 +5332,18 @@ function getWorkflowReplyValidationError(value: string) {
   }
 
   for (const step of workflow.steps) {
-    if (step.type !== "reply") {
+    if (step.type !== "reply" && step.type !== "follow_up") {
       continue;
     }
 
     const label = step.title?.trim() || step.id;
     const reply = step.reply?.trim() ?? "";
-    const mediaItems = normalizeWorkflowMediaItems(step.mediaItems, step.mediaAssetIds);
+    const mediaItems = step.type === "reply" ? normalizeWorkflowMediaItems(step.mediaItems, step.mediaAssetIds) : [];
 
     if (!reply && !mediaItems.length) {
-      return `Reply step "${label}" requires reply text or at least one media item.`;
+      return step.type === "follow_up"
+        ? `Follow Up step "${label}" requires follow-up reply text.`
+        : `Reply step "${label}" requires reply text or at least one media item.`;
     }
   }
 
@@ -5102,6 +5598,16 @@ function getWorkflowSaveValidationError(value: string) {
       return `Delay step "${label}" needs a delay greater than 0 minutes.`;
     }
 
+    if (step.type === "follow_up") {
+      if (!(typeof step.delayMinutes === "number") || step.delayMinutes <= 0) {
+        return `Follow Up step "${label}" needs a delay greater than 0 minutes.`;
+      }
+
+      if (!step.reply?.trim()) {
+        return `Follow Up step "${label}" needs follow-up reply text before saving.`;
+      }
+    }
+
     if (step.type === "go_to") {
       const targetStepId = step.targetStepId?.trim();
       if (!targetStepId) {
@@ -5118,6 +5624,7 @@ function getWorkflowSaveValidationError(value: string) {
       const assignOwnerId = step.assignOwnerId?.trim() || null;
       const notifyAgentIds = normalizeWorkflowRoundRobinAgentIds(step.notifyAgentIds);
       const roundRobinAgentIds = normalizeWorkflowRoundRobinAgentIds(step.roundRobinAgentIds);
+      const snoozeAction = normalizeWorkflowSnoozeAction(step.snoozeAction);
       const leadAttributeKey = step.leadAttributeKey?.trim() || null;
       const leadAttributeValueSource = step.leadAttributeValueSource === "savedValue" ? "savedValue" : "literal";
 
@@ -5131,6 +5638,10 @@ function getWorkflowSaveValidationError(value: string) {
 
       if ((step.notifyAssignedOwner || notifyAgentIds.length) && !step.notifyMessage?.trim()) {
         return `Update step "${label}" needs a notification message.`;
+      }
+
+      if (snoozeAction === "snooze" && (!step.snoozeDurationMinutes || step.snoozeDurationMinutes <= 0)) {
+        return `Update step "${label}" needs a snooze duration in minutes.`;
       }
 
       if (leadAttributeKey) {
@@ -5161,8 +5672,13 @@ function getWorkflowSaveValidationError(value: string) {
 
     if (step.type === "action") {
       const notifyAgentIds = normalizeWorkflowRoundRobinAgentIds(step.notifyAgentIds);
+      const snoozeAction = normalizeWorkflowSnoozeAction(step.snoozeAction);
       if ((step.notifyAssignedOwner || notifyAgentIds.length) && !step.notifyMessage?.trim()) {
         return `Action step "${label}" needs a notification message.`;
+      }
+
+      if (snoozeAction === "snooze" && (!step.snoozeDurationMinutes || step.snoozeDurationMinutes <= 0)) {
+        return `Action step "${label}" needs a snooze duration in minutes.`;
       }
     }
   }
@@ -5320,6 +5836,16 @@ function getWorkflowActivationValidationError(value: string) {
 
     if (step.type === "delay" && (!(typeof step.delayMinutes === "number") || step.delayMinutes <= 0)) {
       return `Delay step "${label}" needs a delay greater than 0 minutes.`;
+    }
+
+    if (step.type === "follow_up") {
+      if (!(typeof step.delayMinutes === "number") || step.delayMinutes <= 0) {
+        return `Follow Up step "${label}" needs a delay greater than 0 minutes.`;
+      }
+
+      if (!step.reply?.trim()) {
+        return `Follow Up step "${label}" needs follow-up reply text before activation.`;
+      }
     }
 
     if (step.type === "go_to") {
@@ -5502,6 +6028,10 @@ function normalizeWorkflowAssignmentMode(value: unknown): WorkflowAssignmentMode
   return value === "round_robin" ? "round_robin" : value === "fixed" ? "fixed" : "none";
 }
 
+function normalizeWorkflowSnoozeAction(value: unknown): WorkflowSnoozeAction {
+  return value === "snooze" ? "snooze" : value === "unsnooze" ? "unsnooze" : "none";
+}
+
 function normalizeWorkflowRoundRobinAgentIds(value: unknown) {
   if (!Array.isArray(value)) {
     return [] as string[];
@@ -5564,6 +6094,8 @@ function getWorkflowNodeTypeDescription(type: WorkflowDraft["steps"][number]["ty
   switch (type) {
     case "reply":
       return "Sends a message and optional attachments to the contact.";
+    case "follow_up":
+      return "Waits for a set time, cancels if the contact replies, and sends a follow-up if they stay silent.";
     case "question":
       return "Asks a question and waits for the contact's answer.";
     case "choice":
@@ -5591,6 +6123,8 @@ function getWorkflowMainActionDescription(type: WorkflowDraft["steps"][number]["
       return "Write the prompt the contact will see first.";
     case "reply":
       return "Compose the message, attachments, and emoji sent from this step.";
+    case "follow_up":
+      return "Set how long to wait and what follow-up message to send if the contact does not reply.";
     case "go_to":
       return "Choose the next step this node should jump to.";
     case "delay":
@@ -5601,9 +6135,15 @@ function getWorkflowMainActionDescription(type: WorkflowDraft["steps"][number]["
 }
 
 function getWorkflowReplyDescription(type: WorkflowDraft["steps"][number]["type"]) {
-  return type === "reply"
-    ? "Compose the message exactly as it should be sent, including attachments, emoji, and placeholders like {{name}}."
-    : "Define the reply text used by this node.";
+  if (type === "reply") {
+    return "Compose the message exactly as it should be sent, including attachments, emoji, and placeholders like {{name}}.";
+  }
+
+  if (type === "follow_up") {
+    return "Write the delayed follow-up message that sends only if the contact does not reply before the timer ends.";
+  }
+
+  return "Define the reply text used by this node.";
 }
 
 function getWorkflowVariableGroup(key: string): string {

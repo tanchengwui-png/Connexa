@@ -1,6 +1,16 @@
-import { redirect } from "next/navigation";
-import { getCurrentSession } from "@/lib/auth/session";
+import { getCurrentSession, resolveAgentAuthState } from "@/lib/auth/session";
 import { findAgentsByAccountId } from "@/lib/db-auth";
+
+async function redirectTo(path: string): Promise<never> {
+  const { redirect } = await import("next/navigation");
+  return redirect(path);
+}
+
+async function getCurrentRequestPath() {
+  const { headers } = await import("next/headers");
+  const value = (await headers()).get("x-connexa-return-to");
+  return value && value.startsWith("/") ? value : "/inbox";
+}
 
 export async function getCurrentAgent() {
   const session = await getCurrentSession();
@@ -19,6 +29,8 @@ export async function getCurrentAgent() {
     role: session.agent.role
   };
 }
+
+type CurrentAgent = NonNullable<Awaited<ReturnType<typeof getCurrentAgent>>>;
 
 export async function getCurrentAgentMemberships() {
   const agent = await getCurrentAgent();
@@ -44,26 +56,55 @@ export async function getCurrentAgentMemberships() {
   }));
 }
 
-export async function requireCurrentAgent() {
-  const agent = await getCurrentAgent();
+export async function requireCurrentAgent(): Promise<CurrentAgent> {
+  const sessionState = await resolveAgentAuthState({ mode: "page" });
 
-  if (!agent) {
-    redirect("/login");
+  if (sessionState.status === "restore_required") {
+    const returnTo = await getCurrentRequestPath();
+    await redirectTo(`/api/auth/session/restore?returnTo=${encodeURIComponent(returnTo)}`);
   }
 
-  if (!agent.emailVerifiedAt) {
-    redirect("/verify-email");
+  if (sessionState.status !== "authenticated") {
+    await redirectTo(sessionState.status === "expired" ? "/login?reason=session-expired" : "/login");
   }
 
-  return agent;
+  if (sessionState.status !== "authenticated") {
+    throw new Error("Current agent session is required");
+  }
+
+  const currentAgent = {
+    id: sessionState.session.agent.id,
+    accountId: sessionState.session.agent.accountId,
+    workspaceId: sessionState.session.workspaceId,
+    name: sessionState.session.agent.name,
+    email: sessionState.session.agent.email,
+    emailVerifiedAt: sessionState.session.agent.emailVerifiedAt,
+    role: sessionState.session.agent.role
+  };
+
+  if (!currentAgent.emailVerifiedAt) {
+    await redirectTo("/verify-email");
+  }
+
+  return currentAgent;
 }
 
-export async function requireCurrentApiAgent() {
-  const agent = await getCurrentAgent();
+export async function requireCurrentApiAgent(): Promise<CurrentAgent> {
+  const sessionState = await resolveAgentAuthState({ mode: "api" });
 
-  if (!agent) {
+  if (sessionState.status !== "authenticated") {
     throw new Error("UNAUTHORIZED");
   }
+
+  const agent = {
+    id: sessionState.session.agent.id,
+    accountId: sessionState.session.agent.accountId,
+    workspaceId: sessionState.session.workspaceId,
+    name: sessionState.session.agent.name,
+    email: sessionState.session.agent.email,
+    emailVerifiedAt: sessionState.session.agent.emailVerifiedAt,
+    role: sessionState.session.agent.role
+  };
 
   if (!agent.emailVerifiedAt) {
     throw new Error("EMAIL_NOT_VERIFIED");
@@ -81,7 +122,7 @@ export async function requireManager() {
   const agent = await requireCurrentAgent();
 
   if (agent.role !== "MANAGER") {
-    redirect("/inbox");
+    await redirectTo("/inbox");
   }
 
   return agent;

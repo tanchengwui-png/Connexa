@@ -1,24 +1,35 @@
 import { getConversationDetail, listConversations } from "@/lib/conversations";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { releaseExpiredConversationSnoozes } from "@/lib/conversation-snooze";
 import { AgentRole, ConversationStatus, IndustryType, MessageDirection } from "@/lib/db-types";
 import {
   getInboxWorkspaceSummary,
   listAgentNameRows,
   listQuickReplyRows
 } from "@/lib/db-conversations";
+import { listWorkspaceContactTags } from "@/lib/contact-tags";
 import { listWorkspaceMediaAssets } from "@/lib/media-library";
 import { formatMediaAssetSize } from "@/lib/media-library-shared";
 import type { WorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
-import { getWorkspaceWhatsAppHealth } from "@/lib/whatsapp-health";
+import { getWorkspaceWhatsAppChannels } from "@/lib/whatsapp-channel";
+import { canStartUnsavedNumberConversation } from "@/lib/whatsapp-channel";
+import { getWorkspaceWhatsAppHealthForPage } from "@/lib/whatsapp-health";
 import {
   getWhatsAppProviderMode,
   isWhatsAppMockModeEnabled
 } from "@/lib/whatsapp-channel";
+import { getPreferredWhatsAppChannelLabel } from "@/lib/whatsapp-channel-label";
 import { resolveWhatsAppContacts } from "@/lib/whatsapp-runtime";
 import { getConversationScheduledStats } from "@/lib/scheduled-messages";
 import { getPlatformAutomationWorkflowConfig } from "@/lib/platform-config";
+import { getAgentInboxNotificationSoundsMuted } from "@/lib/inbox-notification-preferences";
+import { getAgentInboxNotificationDesktopPromptState } from "@/lib/inbox-notification-preferences";
 
 const DISPLAY_TIME_ZONE = "Asia/Kuala_Lumpur";
+const WHATSAPP_INBOX_HEALTH_TIMEOUT_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.WHATSAPP_INBOX_HEALTH_TIMEOUT_MS ?? "2500", 10) || 2500
+);
 
 const statusLabels: Record<ConversationStatus, string> = {
   OPEN: "Open",
@@ -26,22 +37,34 @@ const statusLabels: Record<ConversationStatus, string> = {
   CLOSED: "Closed"
 };
 
-export async function getInboxData(selectedConversationId?: string) {
+export async function getInboxData(selectedConversationId?: string, selectedChannelId?: string | null) {
   const currentAgent = await requireCurrentAgent();
   const workspaceId = await requireCurrentWorkspaceId();
+  await releaseExpiredConversationSnoozes(workspaceId);
   const isMockMode = isWhatsAppMockModeEnabled();
   const appUrl = process.env.APP_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
-  const [workspace, agents, quickReplies, whatsAppHealth, mediaAssets, scheduledStatsByConversationId, workflowTimeoutConfig] = await Promise.all([
+  const whatsAppChannelsPromise = getWorkspaceWhatsAppChannels(workspaceId);
+  const [workspace, agents, quickReplies, whatsAppHealth, mediaAssets, contactTags, scheduledStatsByConversationId, workflowTimeoutConfig, whatsAppChannels] = await Promise.all([
     getInboxWorkspaceSummary(workspaceId),
     listAgentNameRows(workspaceId),
     listQuickReplyRows(workspaceId),
-    getWorkspaceWhatsAppHealth({
-      workspaceId,
-      agentId: currentAgent.id
-    }),
+    whatsAppChannelsPromise.then((channels) =>
+      getWorkspaceWhatsAppHealthForPage({
+        workspaceId,
+        agentId: currentAgent.id,
+        channelId: selectedChannelId ?? null,
+        fallbackChannel:
+          (selectedChannelId
+            ? channels.find((channel: (typeof channels)[number]) => channel.id === selectedChannelId) ?? null
+            : channels[0] ?? null) as WorkspaceWhatsAppChannelStatus | null,
+        timeoutMs: WHATSAPP_INBOX_HEALTH_TIMEOUT_MS
+      })
+    ),
     listWorkspaceMediaAssets(workspaceId),
+    listWorkspaceContactTags(workspaceId),
     getConversationScheduledStats(workspaceId),
-    getPlatformAutomationWorkflowConfig()
+    getPlatformAutomationWorkflowConfig(),
+    whatsAppChannelsPromise
   ]);
 
   if (!workspace) {
@@ -50,10 +73,21 @@ export async function getInboxData(selectedConversationId?: string) {
 
   const whatsAppChannel = whatsAppHealth.channel as WorkspaceWhatsAppChannelStatus | null;
 
-  const conversationRecords = await listConversations();
-  const selectedConversationRecord =
-    (selectedConversationId && (await getConversationDetail(selectedConversationId))) ||
-    (conversationRecords[0] ? await getConversationDetail(conversationRecords[0].id) : null);
+  let conversationRecords: Awaited<ReturnType<typeof listConversations>> = [];
+  let selectedConversationRecord: Awaited<ReturnType<typeof getConversationDetail>> = null;
+
+  try {
+    conversationRecords = (await listConversations()).filter((conversation) =>
+      selectedChannelId ? conversation.channelId === selectedChannelId : true
+    );
+    selectedConversationRecord =
+      (selectedConversationId && (await getConversationDetail(selectedConversationId))) ||
+      (conversationRecords[0] ? await getConversationDetail(conversationRecords[0].id) : null);
+  } catch (error) {
+    if (!isMissingConversationSnoozeColumnError(error)) {
+      throw error;
+    }
+  }
   const mentionBodiesByMessageId = selectedConversationRecord
     ? await resolveMentionBodies({
         workspaceId,
@@ -73,6 +107,17 @@ export async function getInboxData(selectedConversationId?: string) {
       })
     : new Map<string, string>();
 
+  const [inboxNotificationSoundsMuted, inboxDesktopNotificationPromptState] = await Promise.all([
+    getAgentInboxNotificationSoundsMuted({
+      agentId: currentAgent.id,
+      workspaceId
+    }),
+    getAgentInboxNotificationDesktopPromptState({
+      agentId: currentAgent.id,
+      workspaceId
+    })
+  ]);
+
   return {
     whatsapp: {
       callbackUrl: `${appUrl}/api/webhooks/whatsapp`,
@@ -81,6 +126,20 @@ export async function getInboxData(selectedConversationId?: string) {
       phoneNumberId: isMockMode
         ? whatsAppHealth.channel?.phoneNumber ?? "mock-channel"
         : whatsAppHealth.channel?.phoneNumber ?? null,
+      channels: whatsAppChannels.map((channel: (typeof whatsAppChannels)[number]) => ({
+        id: channel.id,
+        label:
+          getPreferredWhatsAppChannelLabel({
+            displayName: channel.displayName,
+            phoneNumber: channel.phoneNumber,
+            fallbackLabel: `Channel ${channel.id.slice(0, 8)}`
+          }) ?? `Channel ${channel.id.slice(0, 8)}`,
+        phoneNumber: channel.phoneNumber ?? null,
+        runtimeStatus: channel.connectionStatus,
+        connectionMethod: channel.connectionMethod,
+        incognitoMode: channel.incognitoMode,
+        supportsNewNumberConversation: canStartUnsavedNumberConversation(channel)
+      })),
       updatedAt: whatsAppHealth.channel?.updatedAt ? formatDetailTimestamp(whatsAppHealth.channel.updatedAt) : null,
       runtimeStatus: whatsAppHealth.runtimeStatus,
       isInboxReady: whatsAppHealth.isInboxReady,
@@ -94,7 +153,11 @@ export async function getInboxData(selectedConversationId?: string) {
     currentAgent: {
       id: currentAgent.id,
       name: currentAgent.name,
-      role: currentAgent.role as AgentRole
+      role: currentAgent.role as AgentRole,
+      workspaceId,
+      inboxNotificationSoundsMuted,
+      inboxDesktopNotificationsPromptDismissedAt:
+        inboxDesktopNotificationPromptState.inboxDesktopNotificationsPromptDismissedAt
     },
     workspaceIndustryType: workspace.industryType as IndustryType,
     summary: {
@@ -105,13 +168,25 @@ export async function getInboxData(selectedConversationId?: string) {
     },
     conversations: conversationRecords.map((conversation) => ({
       id: conversation.id,
+      channelId: conversation.channelId ?? null,
+      channelLabel: conversation.channelLabel ?? null,
       contactName: conversation.contactName,
       photoUrl: conversation.photoUrl ?? null,
       phone: conversation.phone,
       isGroup: conversation.isGroup,
+      tags: conversation.tags,
       status: formatConversationStatus(conversation.status),
-      snoozedUntil: conversation.snoozedUntil ? formatSnoozeUntil(conversation.snoozedUntil) : null,
-      snoozedUntilIso: conversation.snoozedUntil ? conversation.snoozedUntil.toISOString() : null,
+      isSnoozed: conversation.isSnoozed,
+      snoozedUntil: conversation.isSnoozed && conversation.snoozedUntil ? formatSnoozeUntil(conversation.snoozedUntil) : null,
+      snoozedUntilIso: conversation.isSnoozed && conversation.snoozedUntil ? conversation.snoozedUntil.toISOString() : null,
+      snoozeReason: conversation.isSnoozed ? conversation.snoozeReason : null,
+      snoozeStatus: conversation.snoozeStatus,
+      snoozedBy: conversation.isSnoozed ? conversation.snoozedBy : null,
+      isMuted: conversation.isMuted,
+      muteExpiration: conversation.muteExpiration ? formatDetailTimestamp(conversation.muteExpiration) : null,
+      muteExpirationIso: conversation.muteExpiration?.toISOString() ?? null,
+      isArchived: conversation.isArchived,
+      isPinned: conversation.isPinned,
       unreadCount: conversation.unreadCount,
       isHotLead: conversation.isHotLead,
       scheduledCount: scheduledStatsByConversationId.get(conversation.id)?.scheduledCount ?? 0,
@@ -121,15 +196,18 @@ export async function getInboxData(selectedConversationId?: string) {
       nextScheduledAtIso: scheduledStatsByConversationId.get(conversation.id)?.nextScheduledAt?.toISOString() ?? null,
       assigneeId: conversation.assignee?.id ?? null,
       assignee: conversation.assignee?.name ?? "Unassigned",
-      teammateIds: conversation.teammates.map((teammate) => teammate.id),
+      teammateIds: conversation.teammates.map((teammate: (typeof conversation.teammates)[number]) => teammate.id),
       teammates: conversation.teammates,
       lastMessagePreview: sanitizeInboxDisplayText(conversation.lastMessagePreview) || "No recent messages",
+      lastMessageDirection: conversation.lastMessageDirection,
       lastMessageAt: formatListTimestamp(conversation.lastMessageAt),
       lastMessageAtIso: conversation.lastMessageAt.toISOString()
     })),
     selectedConversation: selectedConversationRecord
       ? {
           id: selectedConversationRecord.id,
+          channelId: selectedConversationRecord.channelId ?? null,
+          channelLabel: selectedConversationRecord.channelLabel ?? null,
           contactName: selectedConversationRecord.contactName,
           photoUrl: selectedConversationRecord.photoUrl ?? null,
           lead: selectedConversationRecord.lead
@@ -138,7 +216,8 @@ export async function getInboxData(selectedConversationId?: string) {
                 product: selectedConversationRecord.lead.product
                   ? formatProductSummary(selectedConversationRecord.lead.product)
                   : null,
-                appointments: selectedConversationRecord.lead.appointments.map((appointment) => ({
+                appointments: selectedConversationRecord.lead.appointments.map(
+                  (appointment: (typeof selectedConversationRecord.lead.appointments)[number]) => ({
                   id: appointment.id,
                   title: appointment.title,
                   type: formatAppointmentType(appointment.type),
@@ -148,7 +227,8 @@ export async function getInboxData(selectedConversationId?: string) {
                   endAtIso: appointment.endAt.toISOString(),
                   location: appointment.location,
                   note: appointment.note
-                })),
+                  })
+                ),
                 budget: selectedConversationRecord.lead.budget,
                 budgetValue: selectedConversationRecord.lead.budgetValue,
                 financingStatus: selectedConversationRecord.lead.financingStatus,
@@ -167,12 +247,23 @@ export async function getInboxData(selectedConversationId?: string) {
           phone: selectedConversationRecord.phone,
           isGroup: selectedConversationRecord.isGroup,
           status: formatConversationStatus(selectedConversationRecord.status),
-          snoozedUntil: selectedConversationRecord.snoozedUntil
+          isSnoozed: selectedConversationRecord.isSnoozed,
+          snoozedUntil: selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
             ? formatSnoozeUntil(selectedConversationRecord.snoozedUntil)
             : null,
-          snoozedUntilIso: selectedConversationRecord.snoozedUntil
+          snoozedUntilIso: selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
             ? selectedConversationRecord.snoozedUntil.toISOString()
             : null,
+          snoozeReason: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozeReason : null,
+          snoozeStatus: selectedConversationRecord.snoozeStatus,
+          snoozedBy: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozedBy : null,
+          isMuted: selectedConversationRecord.isMuted,
+          muteExpiration: selectedConversationRecord.muteExpiration
+            ? formatDetailTimestamp(selectedConversationRecord.muteExpiration)
+            : null,
+          muteExpirationIso: selectedConversationRecord.muteExpiration?.toISOString() ?? null,
+          isArchived: selectedConversationRecord.isArchived,
+          isPinned: selectedConversationRecord.isPinned,
           scheduledCount: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.scheduledCount ?? 0,
           nextScheduledAt: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt
             ? formatDetailTimestamp(scheduledStatsByConversationId.get(selectedConversationRecord.id)!.nextScheduledAt as Date)
@@ -181,17 +272,20 @@ export async function getInboxData(selectedConversationId?: string) {
             scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt?.toISOString() ?? null,
           assignee: selectedConversationRecord.assignee?.name ?? "Unassigned",
           assigneeId: selectedConversationRecord.assignee?.id ?? null,
-          teammateIds: selectedConversationRecord.teammates.map((teammate) => teammate.id),
+          teammateIds: selectedConversationRecord.teammates.map(
+            (teammate: (typeof selectedConversationRecord.teammates)[number]) => teammate.id
+          ),
           teammates: selectedConversationRecord.teammates,
           tags: selectedConversationRecord.tags,
-          notes: selectedConversationRecord.notes.map((note) => ({
+          notes: selectedConversationRecord.notes.map((note: (typeof selectedConversationRecord.notes)[number]) => ({
             id: note.id,
             body: note.body,
             author: note.author,
             createdAt: formatDetailTimestamp(note.createdAt),
             createdAtIso: note.createdAt.toISOString()
           })),
-          auditEvents: selectedConversationRecord.auditEvents.map((event) => ({
+          auditEvents: selectedConversationRecord.auditEvents.map(
+            (event: (typeof selectedConversationRecord.auditEvents)[number]) => ({
             id: event.id,
             type: event.type,
             actor: event.actor,
@@ -199,7 +293,8 @@ export async function getInboxData(selectedConversationId?: string) {
             toAssignee: event.toAssignee,
             createdAt: formatDetailTimestamp(event.createdAt),
             createdAtIso: event.createdAt.toISOString()
-          })),
+            })
+          ),
           automation: selectedConversationRecord.automation
             ? {
                 automationPausedUntil: selectedConversationRecord.automation.automationPausedUntil
@@ -222,7 +317,7 @@ export async function getInboxData(selectedConversationId?: string) {
                     workflowTimeoutConfig.idleAfterHours * 60 * 60 * 1000
               }
             : null,
-          messages: selectedConversationRecord.messages.map((message) => ({
+          messages: selectedConversationRecord.messages.map((message: (typeof selectedConversationRecord.messages)[number]) => ({
             id: message.id,
             attachmentMimeType: message.attachmentMimeType,
             attachmentName: message.attachmentName,
@@ -244,9 +339,12 @@ export async function getInboxData(selectedConversationId?: string) {
             outboundJobLastError: message.outboundJobLastError,
             outboundJobStatus: message.outboundJobStatus,
             providerMessageId: message.providerMessageId,
+            deliveryStatus: normalizeInboxDeliveryStatus(message.deliveryStatus),
+            ack: message.ack,
+            ackUpdatedAt: message.ackUpdatedAt ? message.ackUpdatedAt.toISOString() : null,
             replyToMessageId: message.replyToMessageId,
             replyToMessage: message.replyToMessage,
-            reactions: message.reactions.map((reaction) => ({
+            reactions: message.reactions.map((reaction: (typeof message.reactions)[number]) => ({
               id: reaction.id,
               emoji: reaction.emoji,
               sender: reactionSenderLabelsByReactionId.get(reaction.id) ?? reaction.sender,
@@ -258,7 +356,7 @@ export async function getInboxData(selectedConversationId?: string) {
           }))
         }
       : null,
-    quickReplies: quickReplies.map((item) => ({
+    quickReplies: quickReplies.map((item: (typeof quickReplies)[number]) => ({
       id: item.id,
       title: item.title,
       shortcut: item.shortcut,
@@ -266,19 +364,38 @@ export async function getInboxData(selectedConversationId?: string) {
       body: item.body,
       mediaAssetIds: parseMediaAssetIds(item.mediaAssetIdsJson)
     })),
-    mediaAssets: mediaAssets.map((asset) => ({
+    contactTags,
+    mediaAssets: mediaAssets.map((asset: (typeof mediaAssets)[number]) => ({
       id: asset.id,
       title: asset.title,
+      originalName: asset.originalName,
       publicUrl: asset.publicUrl,
       kind: asset.kind,
       mimeType: asset.mimeType,
       sizeLabel: formatMediaAssetSize(asset.sizeBytes)
     })),
-    agents: agents.map((agent) => ({
+    agents: agents.map((agent: (typeof agents)[number]) => ({
       id: agent.id,
       name: agent.name
     }))
   };
+}
+
+function isMissingConversationSnoozeColumnError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as {
+    code?: string;
+    message?: string;
+  };
+
+  return (
+    candidate.code === "P2022" &&
+    typeof candidate.message === "string" &&
+    candidate.message.includes("Conversation.snoozeReason")
+  );
 }
 
 async function resolveMentionBodies(input: {
@@ -295,7 +412,7 @@ async function resolveMentionBodies(input: {
   const mentionIds = Array.from(
     new Set(
       input.messages
-        .flatMap((message) => getMentionIdsFromMessageMetadata(message))
+        .flatMap((message: (typeof input.messages)[number]) => getMentionIdsFromMessageMetadata(message))
         .map((value) => value.trim())
         .filter(Boolean)
     )
@@ -988,5 +1105,19 @@ function parseImageUrls(value: string | null) {
     return payload.filter((item) => typeof item === "string" && item.trim().length > 0);
   } catch {
     return [];
+  }
+}
+
+function normalizeInboxDeliveryStatus(value: string | null | undefined): "pending" | "sent" | "delivered" | "read" {
+  switch (value) {
+    case "sent":
+    case "delivered":
+    case "read":
+      return value;
+    case "played":
+      return "read";
+    case "pending":
+    default:
+      return "pending";
   }
 }

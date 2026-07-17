@@ -1,5 +1,5 @@
-import { MessageDirection, OutboundMessageJobStatus } from "@prisma/client";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { MessageDirection, OutboundMessageJobStatus } from "@/lib/db-types";
 import { supportsCanceledOutboundMessageJobs } from "@/lib/outbound-message-job-status";
 import { prisma } from "@/lib/prisma";
 
@@ -24,7 +24,9 @@ type MessageLogRow = {
   contactName: string;
   phone: string;
   preview: string;
+  attachmentMimeType: string | null;
   attachmentName: string | null;
+  attachmentUrl: string | null;
   direction: "Inbound" | "Outbound";
   source: "Connexa outbound" | "Inbound" | "Manual outbound";
   status: "Canceled" | "Failed" | "Inbound" | "Processing" | "Queued" | "Sent";
@@ -36,37 +38,78 @@ type MessageLogRow = {
   lastError: string | null;
 };
 
-type MessageLogRecord = Awaited<
-  ReturnType<
-    typeof prisma.message.findMany<{
-      include: {
-        sender: {
-          select: {
-            name: true;
-          };
-        };
-        conversation: {
-          select: {
-            id: true;
-            contact: {
-              select: {
-                displayName: true;
-                phone: true;
-              };
-            };
-          };
-        };
-        outboundJob: {
-          select: {
-            status: true;
-            lastError: true;
-            availableAt: true;
-          };
-        };
-      };
-    }>
-  >
->[number];
+async function findMessageLogRecords(input: {
+  where: ReturnType<typeof buildMessageLogsWhere>;
+  skip: number;
+  take: number;
+}) {
+  return prisma.message.findMany({
+    where: input.where,
+    orderBy: {
+      sentAt: "desc"
+    },
+    skip: input.skip,
+    take: input.take,
+    select: {
+      id: true,
+      conversationId: true,
+      body: true,
+      attachmentMimeType: true,
+      attachmentName: true,
+      attachmentUrl: true,
+      direction: true,
+      sentAt: true,
+      providerMessageId: true,
+      sender: {
+        select: {
+          name: true
+        }
+      },
+      conversation: {
+        select: {
+          id: true,
+          contact: {
+            select: {
+              displayName: true,
+              phone: true
+            }
+          }
+        }
+      },
+      outboundJob: {
+        select: {
+          status: true,
+          lastError: true
+        }
+      }
+    }
+  });
+}
+
+function buildLinkedWhatsAppNumberWhere(workspaceId: string) {
+  return {
+    workspaceId,
+    OR: [
+      {
+        phoneNumber: {
+          not: null as string | null
+        }
+      },
+      {
+        phoneNumberId: {
+          not: null as string | null
+        }
+      },
+      {
+        sessionClientId: {
+          not: null as string | null
+        }
+      }
+    ]
+  };
+}
+
+type MessageLogRecord = Awaited<ReturnType<typeof findMessageLogRecords>>[number];
 
 export async function getMessageLogsData(input?: {
   filter?: MessageLogsFilter;
@@ -84,50 +127,26 @@ export async function getMessageLogsData(input?: {
   const page = Math.min(normalizePositiveInteger(input?.page, 1), totalPages);
   const skip = (page - 1) * pageSize;
 
-  const [counts, messages] = await Promise.all([
+  const [counts, messages, linkedChannelCount] = await Promise.all([
     getMessageLogCounts(workspaceId, scopedConversationId),
-    prisma.message.findMany({
+    findMessageLogRecords({
       where,
-      orderBy: {
-        sentAt: "desc"
-      },
       skip,
-      take: pageSize,
-      include: {
-        sender: {
-          select: {
-            name: true
-          }
-        },
-        conversation: {
-          select: {
-            id: true,
-            contact: {
-              select: {
-                displayName: true,
-                phone: true
-              }
-            }
-          }
-        },
-        outboundJob: {
-          select: {
-            status: true,
-            lastError: true,
-            availableAt: true
-          }
-        }
-      }
+      take: pageSize
+    }),
+    prisma.whatsAppChannel.count({
+      where: buildLinkedWhatsAppNumberWhere(workspaceId)
     })
   ]);
 
-  const rows = messages.map((message) => mapMessageLogRow(message));
+  const rows = messages.map((message: (typeof messages)[number]) => mapMessageLogRow(message));
 
   return {
     filter,
     conversationId: scopedConversationId,
     rows,
     summary: counts,
+    hasLinkedWhatsAppNumbers: linkedChannelCount > 0,
     pagination: {
       total,
       page,
@@ -135,6 +154,59 @@ export async function getMessageLogsData(input?: {
       totalPages,
       pageCount: rows.length
     }
+  };
+}
+
+export async function deleteWorkspaceMessageLogs(workspaceId: string) {
+  const linkedChannelCount = await prisma.whatsAppChannel.count({
+    where: buildLinkedWhatsAppNumberWhere(workspaceId)
+  });
+
+  if (linkedChannelCount > 0) {
+    throw new Error("Disconnect all linked WhatsApp numbers before deleting message logs.");
+  }
+
+  const conversationIds = await prisma.conversation.findMany({
+    where: {
+      workspaceId
+    },
+    select: {
+      id: true
+    }
+  });
+
+  const scopedConversationIds = conversationIds.map((conversation) => conversation.id);
+  if (!scopedConversationIds.length) {
+    return {
+      deletedMessageCount: 0
+    };
+  }
+
+  const result = await prisma.$transaction(async (tx) => {
+    const deletedMessages = await tx.message.deleteMany({
+      where: {
+        conversationId: {
+          in: scopedConversationIds
+        }
+      }
+    });
+
+    await tx.conversation.updateMany({
+      where: {
+        id: {
+          in: scopedConversationIds
+        }
+      },
+      data: {
+        unreadCount: 0
+      }
+    });
+
+    return deletedMessages;
+  });
+
+  return {
+    deletedMessageCount: result.count
   };
 }
 
@@ -249,7 +321,9 @@ function mapMessageLogRow(message: MessageLogRecord): MessageLogRow {
     contactName: message.conversation.contact.displayName,
     phone: message.conversation.contact.phone,
     preview,
+    attachmentMimeType: message.attachmentMimeType,
     attachmentName: message.attachmentName,
+    attachmentUrl: message.attachmentUrl,
     direction: message.direction === MessageDirection.INBOUND ? "Inbound" : "Outbound",
     source:
       message.direction === MessageDirection.INBOUND

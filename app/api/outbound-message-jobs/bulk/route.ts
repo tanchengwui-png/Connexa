@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
-import { OutboundMessageJobStatus } from "@prisma/client";
+import { OutboundMessageJobStatus } from "@/lib/db-types";
 import { supportsCanceledOutboundMessageJobs } from "@/lib/outbound-message-job-status";
 import { prisma } from "@/lib/prisma";
 
@@ -50,8 +50,9 @@ export async function PATCH(request: NextRequest) {
       return NextResponse.json({ error: "No matching scheduled jobs were found." }, { status: 404 });
     }
 
+    type ScheduledJob = (typeof jobs)[number];
     const actionableJobs = jobs.filter(
-      (job) =>
+      (job: ScheduledJob) =>
         !job.message.providerMessageId &&
         job.status !== OutboundMessageJobStatus.RUNNING &&
         (!(body.action === "cancel") || job.status !== OutboundMessageJobStatus.CANCELED)
@@ -65,7 +66,7 @@ export async function PATCH(request: NextRequest) {
       const result = await prisma.outboundMessageJob.updateMany({
         where: {
           id: {
-            in: actionableJobs.map((job) => job.id)
+            in: actionableJobs.map((job: ScheduledJob) => job.id)
           }
         },
         data: {
@@ -83,7 +84,7 @@ export async function PATCH(request: NextRequest) {
     const result = await prisma.outboundMessageJob.updateMany({
       where: {
         id: {
-          in: actionableJobs.map((job) => job.id)
+          in: actionableJobs.map((job: ScheduledJob) => job.id)
         }
       },
       data: {

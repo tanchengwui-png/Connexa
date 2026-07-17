@@ -1,5 +1,5 @@
-import { OutboundMessageJobStatus } from "@prisma/client";
 import { requireCurrentWorkspaceId } from "@/lib/auth/current-user";
+import { OutboundMessageJobStatus } from "@/lib/db-types";
 import { supportsCanceledOutboundMessageJobs } from "@/lib/outbound-message-job-status";
 import { prisma } from "@/lib/prisma";
 
@@ -15,11 +15,15 @@ export type ConversationScheduledStats = {
 
 type ScheduledMessageRow = {
   id: string;
+  channelId: string | null;
+  channelLabel: string | null;
   conversationId: string;
   contactName: string;
   phone: string;
   bodyPreview: string;
+  attachmentMimeType: string | null;
   attachmentName: string | null;
+  attachmentUrl: string | null;
   scheduledFor: string;
   scheduledForIso: string;
   createdAt: string;
@@ -30,9 +34,23 @@ type ScheduledMessageRow = {
   lastError: string | null;
 };
 
+function isMissingOutboundMessageMediaAssetColumnError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const candidate = error as Error & { code?: string; meta?: { column?: string } };
+  return (
+    candidate.code === "P2022" &&
+    (candidate.meta?.column === "OutboundMessageJob.mediaAssetId" ||
+      candidate.message.includes("OutboundMessageJob.mediaAssetId"))
+  );
+}
+
 export async function getScheduledMessagesData(
   filter: ScheduledMessagesFilter = "scheduled",
-  conversationId?: string | null
+  conversationId?: string | null,
+  channelId?: string | null
 ) {
   const workspaceId = await requireCurrentWorkspaceId();
   const now = new Date();
@@ -43,6 +61,7 @@ export async function getScheduledMessagesData(
     prisma.outboundMessageJob.count({
       where: {
         workspaceId,
+        ...(channelId ? { channelId } : {}),
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         status: OutboundMessageJobStatus.PENDING,
         availableAt: {
@@ -53,6 +72,7 @@ export async function getScheduledMessagesData(
     prisma.outboundMessageJob.count({
       where: {
         workspaceId,
+        ...(channelId ? { channelId } : {}),
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         status: OutboundMessageJobStatus.PENDING,
         availableAt: {
@@ -63,6 +83,7 @@ export async function getScheduledMessagesData(
     prisma.outboundMessageJob.count({
       where: {
         workspaceId,
+        ...(channelId ? { channelId } : {}),
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         status: OutboundMessageJobStatus.RUNNING
       }
@@ -70,6 +91,7 @@ export async function getScheduledMessagesData(
     prisma.outboundMessageJob.count({
       where: {
         workspaceId,
+        ...(channelId ? { channelId } : {}),
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         status: OutboundMessageJobStatus.SENT
       }
@@ -77,6 +99,7 @@ export async function getScheduledMessagesData(
     prisma.outboundMessageJob.count({
       where: {
         workspaceId,
+        ...(channelId ? { channelId } : {}),
         ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
         status: OutboundMessageJobStatus.FAILED
       }
@@ -85,27 +108,19 @@ export async function getScheduledMessagesData(
       ? prisma.outboundMessageJob.count({
           where: {
             workspaceId,
+            ...(channelId ? { channelId } : {}),
             ...(scopedConversationId ? { conversationId: scopedConversationId } : {}),
             status: OutboundMessageJobStatus.CANCELED
           }
         })
       : Promise.resolve(0),
-    prisma.outboundMessageJob.findMany({
-      where: buildFilterWhere(workspaceId, filter, now, scopedConversationId, supportsCanceled),
-      orderBy: buildFilterOrder(filter),
-      take: 120,
-      select: {
-        id: true,
-        conversationId: true,
-        messageId: true,
-        to: true,
-        body: true,
-        attachmentName: true,
-        availableAt: true,
-        createdAt: true,
-        status: true,
-        lastError: true
-      }
+    listScheduledOutboundJobs({
+      workspaceId,
+      filter,
+      now,
+      conversationId: scopedConversationId,
+      supportsCanceled,
+      channelId
     })
   ]);
 
@@ -123,6 +138,13 @@ export async function getScheduledMessagesData(
           },
           select: {
             id: true,
+            channelId: true,
+            channel: {
+              select: {
+                displayName: true,
+                phoneNumber: true
+              }
+            },
             contact: {
               select: {
                 displayName: true,
@@ -160,11 +182,18 @@ export async function getScheduledMessagesData(
 
     return {
       id: job.id,
+      channelId: conversation?.channelId ?? null,
+      channelLabel:
+        conversation?.channel?.displayName?.trim() ||
+        conversation?.channel?.phoneNumber?.trim() ||
+        null,
       conversationId: job.conversationId,
       contactName: conversation?.contact.displayName?.trim() || "Unknown contact",
       phone: conversation?.contact.phone?.trim() || job.to,
       bodyPreview: buildBodyPreview(job.body, job.attachmentName),
+      attachmentMimeType: job.attachmentMimeType ?? null,
       attachmentName: job.attachmentName ?? null,
+      attachmentUrl: job.attachmentUrl ?? null,
       scheduledFor: formatDateTime(job.availableAt),
       scheduledForIso: job.availableAt.toISOString(),
       createdAt: formatDateTime(job.createdAt),
@@ -179,6 +208,7 @@ export async function getScheduledMessagesData(
   return {
     filter,
     conversationId: scopedConversationId,
+    channelId: channelId?.trim() || null,
     rows,
     summary: {
       scheduled: scheduledCount,
@@ -192,18 +222,7 @@ export async function getScheduledMessagesData(
 }
 
 export async function getConversationScheduledStats(workspaceId: string) {
-  const jobs = await prisma.outboundMessageJob.findMany({
-    where: {
-      workspaceId,
-      status: {
-        in: [OutboundMessageJobStatus.PENDING, OutboundMessageJobStatus.RUNNING, OutboundMessageJobStatus.FAILED]
-      }
-    },
-    select: {
-      conversationId: true,
-      availableAt: true
-    }
-  });
+  const jobs = await listConversationScheduledJobs(workspaceId);
 
   const statsByConversationId = new Map<string, ConversationScheduledStats>();
 
@@ -225,15 +244,182 @@ export async function getConversationScheduledStats(workspaceId: string) {
   return statsByConversationId;
 }
 
+async function listScheduledOutboundJobs(input: {
+  workspaceId: string;
+  filter: ScheduledMessagesFilter;
+  now: Date;
+  conversationId?: string | null;
+  supportsCanceled: boolean;
+  channelId?: string | null;
+}) {
+  try {
+    return await prisma.outboundMessageJob.findMany({
+      where: buildFilterWhere(
+        input.workspaceId,
+        input.filter,
+        input.now,
+        input.conversationId,
+        input.supportsCanceled,
+        input.channelId
+      ),
+      orderBy: buildFilterOrder(input.filter),
+      take: 120,
+      select: {
+        id: true,
+        conversationId: true,
+        messageId: true,
+        to: true,
+        body: true,
+        attachmentMimeType: true,
+        attachmentName: true,
+        attachmentUrl: true,
+        availableAt: true,
+        createdAt: true,
+        status: true,
+        lastError: true
+      }
+    });
+  } catch (error) {
+    if (!isMissingOutboundMessageMediaAssetColumnError(error)) {
+      throw error;
+    }
+  }
+
+  const conditions = ['"workspaceId" = $1'];
+  const values: unknown[] = [input.workspaceId];
+  let nextIndex = values.length + 1;
+
+  if (input.channelId) {
+    conditions.push(`"channelId" = $${nextIndex}`);
+    values.push(input.channelId);
+    nextIndex += 1;
+  }
+
+  if (input.conversationId) {
+    conditions.push(`"conversationId" = $${nextIndex}`);
+    values.push(input.conversationId);
+    nextIndex += 1;
+  }
+
+  switch (input.filter) {
+    case "scheduled":
+      conditions.push(`status = $${nextIndex}`);
+      values.push(OutboundMessageJobStatus.PENDING);
+      nextIndex += 1;
+      conditions.push(`"availableAt" > $${nextIndex}`);
+      values.push(input.now);
+      break;
+    case "due":
+      conditions.push(`((status = $${nextIndex} AND "availableAt" <= $${nextIndex + 1}) OR status = $${nextIndex + 2})`);
+      values.push(OutboundMessageJobStatus.PENDING, input.now, OutboundMessageJobStatus.RUNNING);
+      break;
+    case "failed":
+      conditions.push(`status = $${nextIndex}`);
+      values.push(OutboundMessageJobStatus.FAILED);
+      break;
+    case "sent":
+      conditions.push(`status = $${nextIndex}`);
+      values.push(OutboundMessageJobStatus.SENT);
+      break;
+    case "canceled":
+      if (!input.supportsCanceled) {
+        return [];
+      }
+      conditions.push(`status = $${nextIndex}`);
+      values.push(OutboundMessageJobStatus.CANCELED);
+      break;
+    case "all":
+    default:
+      break;
+  }
+
+  return prisma.$queryRawUnsafe<
+    Array<{
+      id: string;
+      conversationId: string;
+      messageId: string;
+      to: string;
+      body: string;
+      attachmentMimeType: string | null;
+      attachmentName: string | null;
+      attachmentUrl: string | null;
+      availableAt: Date;
+      createdAt: Date;
+      status: OutboundMessageJobStatus;
+      lastError: string | null;
+    }>
+  >(
+    `SELECT
+      id, "conversationId", "messageId", to, body, "attachmentMimeType", "attachmentName", "attachmentUrl",
+      "availableAt", "createdAt", status, "lastError"
+    FROM "OutboundMessageJob"
+    WHERE ${conditions.join(" AND ")}
+    ${buildLegacyScheduledOrderClause(input.filter)}
+    LIMIT 120`,
+    ...values
+  );
+}
+
+async function listConversationScheduledJobs(workspaceId: string) {
+  try {
+    return await prisma.outboundMessageJob.findMany({
+      where: {
+        workspaceId,
+        status: {
+          in: [OutboundMessageJobStatus.PENDING, OutboundMessageJobStatus.RUNNING, OutboundMessageJobStatus.FAILED]
+        }
+      },
+      select: {
+        conversationId: true,
+        availableAt: true
+      }
+    });
+  } catch (error) {
+    if (!isMissingOutboundMessageMediaAssetColumnError(error)) {
+      throw error;
+    }
+  }
+
+  return prisma.$queryRawUnsafe<Array<{ conversationId: string; availableAt: Date }>>(
+    `SELECT "conversationId", "availableAt"
+     FROM "OutboundMessageJob"
+     WHERE "workspaceId" = $1
+       AND status IN ($2, $3, $4)`,
+    workspaceId,
+    OutboundMessageJobStatus.PENDING,
+    OutboundMessageJobStatus.RUNNING,
+    OutboundMessageJobStatus.FAILED
+  );
+}
+
+function buildLegacyScheduledOrderClause(filter: ScheduledMessagesFilter) {
+  switch (filter) {
+    case "sent":
+      return 'ORDER BY "createdAt" DESC';
+    case "failed":
+    case "canceled":
+      return 'ORDER BY "updatedAt" DESC NULLS LAST, "createdAt" DESC';
+    case "due":
+      return 'ORDER BY "availableAt" ASC, "createdAt" ASC';
+    case "all":
+      return 'ORDER BY "availableAt" ASC, "createdAt" DESC';
+    case "scheduled":
+    default:
+      return 'ORDER BY "availableAt" ASC, "createdAt" ASC';
+  }
+}
+
 function buildFilterWhere(
   workspaceId: string,
   filter: ScheduledMessagesFilter,
   now: Date,
   conversationId?: string | null,
-  supportsCanceled = true
+  supportsCanceled = true,
+  channelId?: string | null
 ) {
   const baseWhere = {
     workspaceId,
+    ...(channelId ? { channelId } : {}),
     ...(conversationId ? { conversationId } : {})
   };
 

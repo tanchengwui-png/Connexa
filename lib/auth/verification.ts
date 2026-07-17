@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import path from "node:path";
+import { activateFreeTrialAfterVerification } from "@/lib/billing-management";
 import { renderEmailTemplate } from "@/lib/email-template";
 import { sendEmail } from "@/lib/mail";
 import { getResolvedPlatformEmailConfig } from "@/lib/platform-config";
+import { logUserSecurityEvent } from "@/lib/user-security-audit";
 import {
   createVerificationTokenRecord,
   deleteVerificationTokenById,
@@ -31,6 +33,11 @@ export async function createEmailVerification(agentId: string) {
   if (!agent) {
     throw new Error("Account not found.");
   }
+
+  await logUserSecurityEvent({
+    agentId,
+    eventType: "verification_email_requested"
+  });
 
   await deleteVerificationTokensByAgentId(agentId);
   await createVerificationTokenRecord({
@@ -109,6 +116,14 @@ export async function createEmailVerification(agentId: string) {
     ]
   });
 
+  await logUserSecurityEvent({
+    agentId,
+    eventType: "verification_email_sent",
+    metadata: {
+      expiresAt: expiresAt.toISOString()
+    }
+  });
+
   return {
     expiresAt
   };
@@ -128,6 +143,11 @@ export async function verifyEmailToken(token: string) {
   }
 
   await verifyAgentEmailAndClearTokens(record.agentId);
+  await activateFreeTrialAfterVerification(record.agentId);
+  await logUserSecurityEvent({
+    agentId: record.agentId,
+    eventType: "email_verified"
+  });
 
   return record.agent;
 }

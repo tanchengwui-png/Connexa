@@ -1,9 +1,13 @@
+import { AccountSecurityCard } from "@/components/account-security-card";
 import { DashboardShell } from "@/components/dashboard-shell";
+import { WorkspacePackageUpgradeCard } from "@/components/workspace-package-upgrade-card";
 import { requireManager } from "@/lib/auth/current-user";
 import { findWorkspaceById } from "@/lib/db-auth";
 import { getWorkspacePackageUsageOverview } from "@/lib/package-feature-limits";
+import { getDefaultWorkspacePackageBillingPeriod } from "@/lib/workspace-package-management";
+import { getWorkspacePackageUpgradeOptions, listWorkspacePackageUpgradeInvoices } from "@/lib/workspace-package-upgrades";
 import type { WorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
-import { getWorkspaceWhatsAppHealth } from "@/lib/whatsapp-health";
+import { getWorkspaceWhatsAppHealthForPage, type WorkspaceWhatsAppHealth } from "@/lib/whatsapp-health";
 import { getWorkspacePlanSettings } from "@/lib/workspace-plan";
 
 const DISPLAY_TIME_ZONE = "Asia/Kuala_Lumpur";
@@ -69,7 +73,7 @@ function getVerificationLabel(state: string) {
   return "No live traffic verified yet";
 }
 
-function getInboxReadinessLabel(health: Awaited<ReturnType<typeof getWorkspaceWhatsAppHealth>>) {
+function getInboxReadinessLabel(health: WorkspaceWhatsAppHealth) {
   if (health.isConnectionStalled) {
     return "Connection stalled";
   }
@@ -93,7 +97,7 @@ function getInboxReadinessLabel(health: Awaited<ReturnType<typeof getWorkspaceWh
   return "Not ready yet";
 }
 
-function getWorkspaceStatusLabel(health: Awaited<ReturnType<typeof getWorkspaceWhatsAppHealth>>) {
+function getWorkspaceStatusLabel(health: WorkspaceWhatsAppHealth) {
   if (health.isConnectionStalled) {
     return "Attention needed";
   }
@@ -113,7 +117,7 @@ function getWorkspaceStatusLabel(health: Awaited<ReturnType<typeof getWorkspaceW
   return health.runtimeStatus === "DISCONNECTED" ? "Not connected" : "Attention needed";
 }
 
-function getWorkerStatusLabel(health: Awaited<ReturnType<typeof getWorkspaceWhatsAppHealth>>) {
+function getWorkerStatusLabel(health: WorkspaceWhatsAppHealth) {
   if (health.workerStatus.heartbeat?.isOnline) {
     return `Online (${health.workerStatus.heartbeat.workerLabel ?? "worker"})`;
   }
@@ -133,22 +137,46 @@ function formatRemainingValue(remaining: number | null, label: string) {
   return remaining === null ? `No package cap for ${label}.` : `${remaining} remaining ${label}.`;
 }
 
-export default async function AccountSettingsPage() {
+export default async function AccountSettingsPage({
+  searchParams
+}: {
+  searchParams?: Promise<{ packageUpgrade?: string; planSelection?: string }>;
+}) {
   const manager = await requireManager();
-  const [workspace, health, packageUsage] = await Promise.all([
-    findWorkspaceById(manager.workspaceId),
-    getWorkspaceWhatsAppHealth({
-      workspaceId: manager.workspaceId,
-      agentId: manager.id
-    }),
-    getWorkspacePackageUsageOverview(manager.workspaceId)
-  ]);
+  const workspace = await findWorkspaceById(manager.workspaceId);
 
   if (!workspace) {
     throw new Error("Workspace not found.");
   }
 
+  const [health, packageUsage, resolvedSearchParams, packageUpgradeOptions, packageUpgradeInvoices] = await Promise.all([
+    getWorkspaceWhatsAppHealthForPage({
+      workspaceId: manager.workspaceId,
+      agentId: manager.id
+    }),
+    getWorkspacePackageUsageOverview(manager.workspaceId),
+    searchParams ?? Promise.resolve<{ packageUpgrade?: string; planSelection?: string }>({}),
+    getWorkspacePackageUpgradeOptions(workspace.plan),
+    listWorkspacePackageUpgradeInvoices(workspace.id)
+  ]);
+
   const planSettings = getWorkspacePlanSettings(workspace.plan);
+  const visiblePackageUpgradeOptions = packageUpgradeOptions
+    .filter((option) => option.key !== "enterprise")
+    .map((option) => ({ ...option, operationType: "UPGRADE" as const }));
+  const initialPackageBillingPeriod = getDefaultWorkspacePackageBillingPeriod({
+    pendingPlanChanges: packageUpgradeInvoices
+  });
+  const packageUpgradeStatus =
+    resolvedSearchParams.packageUpgrade === "success" ||
+    resolvedSearchParams.packageUpgrade === "failed" ||
+    resolvedSearchParams.packageUpgrade === "pending"
+      ? resolvedSearchParams.packageUpgrade
+      : null;
+  const planSelectionNotice =
+    resolvedSearchParams.planSelection === "current"
+      ? "This is your current plan."
+      : null;
   const channel = health.channel as WorkspaceWhatsAppChannelStatus | null;
   const effectiveConnectionStatus = health.runtimeStatus ?? channel?.connectionStatus ?? "DISCONNECTED";
   const inboxReadinessLabel = getInboxReadinessLabel(health);
@@ -185,302 +213,248 @@ export default async function AccountSettingsPage() {
   const numberLimitLabel = numberLimit === null ? "Unlimited" : `${numberLimit} numbers`;
   const numberUsageLabel =
     numberLimit === null ? `${activeNumbersCount} active` : `${activeNumbersCount} of ${numberLimit}`;
+  const packageStepStatus = "Completed";
+  const numberStepStatus = hasConnectedNumber ? "Completed" : "Needs setup";
+  const inboxStepStatus = health.isInboxReady ? "Completed" : "Review";
+  const usageStepStatus = "Completed";
+  const completedSetupSteps = [
+    packageStepStatus,
+    numberStepStatus,
+    inboxStepStatus,
+    usageStepStatus
+  ].filter((status) => status === "Completed").length;
 
   return (
     <DashboardShell currentPath="/account-settings">
-      <section className="settings-dark-hero">
-        <div className="settings-dark-copy">
-          <span className="badge connexa-public-badge">Account Setting</span>
-          <h1>Manage this workspace&apos;s WhatsApp setup.</h1>
-          <p>
-            Review the current WhatsApp number, monitor connection status, and prepare for multi-number
-            support. Number limits will follow the selected package when that feature is enabled.
-          </p>
-        </div>
-      </section>
-
-      <section className="account-settings-summary-grid">
-        <article className="settings-dark-status-card">
-          <span>Package</span>
-          <strong>{planSettings.label}</strong>
-          <p>
-            {numberLimit === null
-              ? "This package supports unlimited WhatsApp numbers when multi-number support goes live."
-              : `This package supports up to ${numberLimit} WhatsApp number${numberLimit === 1 ? "" : "s"}.`}
-          </p>
-        </article>
-        <article className="settings-dark-status-card">
-          <span>Numbers in use</span>
-          <strong>{numberUsageLabel}</strong>
-          <p>
-            {numberLimit === null
-              ? "Additional numbers can be added without a package cap."
-              : remainingNumberSlots === 0
-                ? "This workspace is at the current package limit."
-                : `${remainingNumberSlots} slot${remainingNumberSlots === 1 ? "" : "s"} remaining under this package.`}
-          </p>
-        </article>
-        <article className="settings-dark-status-card">
-          <span>Number limit</span>
-          <strong>{numberLimitLabel}</strong>
-          <p>Capacity is tied to the selected package rather than a fixed workspace default.</p>
-        </article>
-        <article className="settings-dark-status-card">
-          <span>Workspace status</span>
-          <strong>{workspaceStatusLabel}</strong>
-          <p>{inboxReadinessLabel}</p>
-        </article>
-      </section>
-
-      <section className="settings-dark-grid">
-        <article className="content-card settings-dark-panel">
-          <div className="card-header settings-dark-panel-head">
-            <div>
-              <h3 className="card-title">Current plan usage</h3>
-              <p className="muted">
-                Workspace usage is shown against the active {packageUsage.packageLabel} package limits for outbound messages, active contacts, active automations, and WhatsApp campaigns.
-              </p>
-            </div>
+      <div className="more-page-stack">
+        <section className="account-setup-hero">
+          <div className="account-setup-hero-copy">
+            <span className="account-setup-kicker">Account settings</span>
+            <h2>Finish your workspace setup step by step.</h2>
+            <p>
+              Keep the essentials visible: package, WhatsApp number, inbox readiness, and usage.
+              Detailed diagnostics stay available when needed.
+            </p>
           </div>
 
-          <div className="account-settings-summary-grid">
-            <article className="settings-dark-status-card">
-              <span>Outbound messages</span>
-              <strong>
-                {formatUsageValue(packageUsage.currentOutboundMessages, packageUsage.maxOutboundMessages)}
-              </strong>
-              <p>{formatRemainingValue(packageUsage.remainingOutboundMessages, "outbound messages")}</p>
-            </article>
-            <article className="settings-dark-status-card">
-              <span>Active contacts</span>
-              <strong>
-                {formatUsageValue(packageUsage.currentActiveContacts, packageUsage.maxActiveContacts)}
-              </strong>
-              <p>{formatRemainingValue(packageUsage.remainingActiveContacts, "active contacts")}</p>
-            </article>
-            <article className="settings-dark-status-card">
-              <span>Active automations</span>
-              <strong>
-                {formatUsageValue(packageUsage.currentActiveAutomations, packageUsage.maxActiveAutomations)}
-              </strong>
-              <p>{formatRemainingValue(packageUsage.remainingActiveAutomations, "active automations")}</p>
-            </article>
-            <article className="settings-dark-status-card">
-              <span>WhatsApp campaigns</span>
-              <strong>
-                {formatUsageValue(packageUsage.currentWhatsAppCampaigns, packageUsage.maxWhatsAppCampaigns)}
-              </strong>
-              <p>{formatRemainingValue(packageUsage.remainingWhatsAppCampaigns, "WhatsApp campaigns")}</p>
-            </article>
-          </div>
-        </article>
-      </section>
-
-      <section className="settings-dark-grid">
-        <article className="content-card settings-dark-panel">
-          <div className="card-header settings-dark-panel-head">
-            <div>
-              <h3 className="card-title">WhatsApp numbers</h3>
-              <p className="muted">
-                Each number will have its own connection state, inbox readiness, and history status.
-                Today this workspace shows the current active line and reserves room for more.
-              </p>
+          <div className="account-setup-progress-card">
+            <span>Setup progress</span>
+            <strong>{completedSetupSteps} of 4 completed</strong>
+            <div className="account-setup-progress-track">
+              <div style={{ width: `${(completedSetupSteps / 4) * 100}%` }} />
             </div>
-            <a className="button button-primary" href="/settings/whatsapp">
-              {hasConnectedNumber ? "Open WhatsApp setup" : "Add WhatsApp number"}
+            <p>{workspace.name}</p>
+            <a className="button button-primary" href="/account-settings/billing">
+              Billing &amp; Subscription
             </a>
           </div>
+        </section>
 
-          <div className="account-settings-number-list">
-            {numberEntries.map((entry) => (
-              <article className="account-settings-number-row" key={entry.id}>
-                <div className="account-settings-number-main">
-                  <div className="account-settings-number-badge">{entry.orderLabel}</div>
-                  <div className="account-settings-number-copy">
-                    <div className="account-settings-number-head">
-                      <strong>{entry.title}</strong>
-                      <span
-                        className={`account-settings-number-status${entry.isReady ? " ready" : ""}`}
-                      >
-                        {entry.connectionLabel}
-                      </span>
-                    </div>
-                    <p>{entry.description}</p>
-                  </div>
+        {planSelectionNotice ? <p className="form-success">{planSelectionNotice}</p> : null}
+
+        <AccountSecurityCard />
+
+        <section className="account-setup-layout">
+        <div className="account-setup-steps">
+          <article className="account-setup-step">
+            <div className="account-setup-step-marker">1</div>
+            <div className="account-setup-step-body">
+              <div className="account-setup-step-head">
+                <div>
+                  <span className="account-setup-eyebrow">Choose package</span>
+                  <h3>{planSettings.label}</h3>
                 </div>
+                <span className="account-setup-status completed">{packageStepStatus}</span>
+              </div>
+              <p>
+                Your package controls workspace limits and WhatsApp number capacity.
+              </p>
+              <div className="account-setup-mini-grid">
+                <div>
+                  <span>Numbers</span>
+                  <strong>{numberLimitLabel}</strong>
+                </div>
+                <div>
+                  <span>In use</span>
+                  <strong>{numberUsageLabel}</strong>
+                </div>
+              </div>
+              <WorkspacePackageUpgradeCard
+                currentPackageLabel={planSettings.label}
+                feedbackStatus={packageUpgradeStatus}
+                initialBillingPeriod={initialPackageBillingPeriod}
+                initialInvoices={packageUpgradeInvoices}
+                options={visiblePackageUpgradeOptions}
+              />
+            </div>
+          </article>
 
-                <div className="account-settings-number-meta">
+          <article className="account-setup-step account-setup-step-primary">
+            <div className="account-setup-step-marker">2</div>
+            <div className="account-setup-step-body">
+              <div className="account-setup-step-head">
+                <div>
+                  <span className="account-setup-eyebrow">Connect WhatsApp number</span>
+                  <h3>{numberEntries[0].title}</h3>
+                </div>
+                <span className={`account-setup-status${hasConnectedNumber ? " completed" : " needs-setup"}`}>
+                  {numberStepStatus}
+                </span>
+              </div>
+              <p>{numberEntries[0].description}</p>
+              <div className="account-setup-actions">
+                <a className="button button-primary" href="/settings/whatsapp">
+                  {hasConnectedNumber ? "Open WhatsApp setup" : "Add WhatsApp number"}
+                </a>
+                <a className="button button-secondary" href="/inbox">
+                  Open inbox
+                </a>
+              </div>
+
+              <details className="account-setup-details">
+                <summary>View number details</summary>
+                <div className="account-setup-detail-grid">
                   <div>
                     <span>Connexa user</span>
-                    <strong>{entry.sessionOwner}</strong>
+                    <strong>{numberEntries[0].sessionOwner}</strong>
                   </div>
                   <div>
                     <span>Profile name</span>
-                    <strong>{entry.profileName}</strong>
+                    <strong>{numberEntries[0].profileName}</strong>
                   </div>
                   <div>
                     <span>Last connected</span>
-                    <strong>{entry.lastConnected}</strong>
-                  </div>
-                  <div>
-                    <span>Inbox readiness</span>
-                    <strong>{entry.inboxReadiness}</strong>
+                    <strong>{numberEntries[0].lastConnected}</strong>
                   </div>
                   <div>
                     <span>Health</span>
-                    <strong>{entry.healthSummary}</strong>
+                    <strong>{numberEntries[0].healthSummary}</strong>
+                  </div>
+                </div>
+              </details>
+            </div>
+          </article>
+
+          <article className="account-setup-step">
+            <div className="account-setup-step-marker">3</div>
+            <div className="account-setup-step-body">
+              <div className="account-setup-step-head">
+                <div>
+                  <span className="account-setup-eyebrow">Check inbox readiness</span>
+                  <h3>{inboxReadinessLabel}</h3>
+                </div>
+                <span className={`account-setup-status${health.isInboxReady ? " completed" : " review"}`}>
+                  {inboxStepStatus}
+                </span>
+              </div>
+              <p>
+                Confirm the connection, worker, and message import health before relying on the inbox.
+              </p>
+              <div className="account-setup-mini-grid">
+                <div>
+                  <span>Runtime</span>
+                  <strong>{health.runtimeStatus}</strong>
+                </div>
+                <div>
+                  <span>Worker</span>
+                  <strong>{getWorkerStatusLabel(health)}</strong>
+                </div>
+              </div>
+
+              <details className="account-setup-details">
+                <summary>View diagnostics</summary>
+                <div className="account-setup-detail-grid">
+                  <div>
+                    <span>Imported</span>
+                    <strong>{health.importedConversationCount} conversations, {health.importedMessageCount} messages</strong>
                   </div>
                   <div>
-                    <span>Connection screen</span>
-                    <a href="/settings/whatsapp">Open WhatsApp setup</a>
+                    <span>Latest sync issue</span>
+                    <strong>{latestSyncIssue}</strong>
+                  </div>
+                  <div>
+                    <span>Live traffic</span>
+                    <strong>{getVerificationLabel(health.verificationState)}</strong>
+                  </div>
+                  <div>
+                    <span>Last inbound</span>
+                    <strong>{formatConnectedAt(health.lastInboundAt)}</strong>
+                  </div>
+                  <div>
+                    <span>Last outbound</span>
+                    <strong>{formatConnectedAt(health.lastOutboundAt)}</strong>
                   </div>
                 </div>
-              </article>
-            ))}
+              </details>
+            </div>
+          </article>
 
-            <article className="account-settings-number-row account-settings-number-row-placeholder">
-              <div className="account-settings-number-main">
-                <div className="account-settings-number-badge account-settings-number-badge-muted">+</div>
-                <div className="account-settings-number-copy">
-                  <div className="account-settings-number-head">
-                    <strong>Additional numbers</strong>
-                    <span className="account-settings-number-status account-settings-number-status-muted">Package-based</span>
-                  </div>
-                  <p>
-                    More WhatsApp lines will appear here when multi-number support is enabled for the
-                    selected workspace package.
-                  </p>
+          <article className="account-setup-step">
+            <div className="account-setup-step-marker">4</div>
+            <div className="account-setup-step-body">
+              <div className="account-setup-step-head">
+                <div>
+                  <span className="account-setup-eyebrow">Review usage</span>
+                  <h3>{packageUsage.packageLabel} usage</h3>
                 </div>
+                <span className="account-setup-status completed">{usageStepStatus}</span>
               </div>
-
-              <div className="account-settings-number-meta">
-                <div>
-                  <span>Cap policy</span>
-                  <strong>{numberLimit === null ? "Unlimited under package" : `${numberLimit} number limit`}</strong>
-                </div>
-                <div>
-                  <span>Expected use</span>
-                  <strong>Sales, support, branch lines</strong>
-                </div>
-                <div>
-                  <span>Current state</span>
-                  <strong>UI ready, backend cap pending</strong>
-                </div>
-              </div>
-            </article>
-          </div>
-        </article>
-
-        <article className="content-card settings-dark-panel">
-          <div className="card-header settings-dark-panel-head">
-            <div>
-              <h3 className="card-title">Number health</h3>
-              <p className="muted">
-                Health is shown for the currently connected number. When multi-number support is enabled,
-                each line should have its own health panel or drawer.
+              <p>
+                Track usage against package limits without crowding the main setup flow.
               </p>
+              <div className="account-setup-usage-grid">
+                <div>
+                  <span>Outbound messages</span>
+                  <strong>{formatUsageValue(packageUsage.currentOutboundMessages, packageUsage.maxOutboundMessages)}</strong>
+                  <p>{formatRemainingValue(packageUsage.remainingOutboundMessages, "outbound messages")}</p>
+                </div>
+                <div>
+                  <span>Active contacts</span>
+                  <strong>{formatUsageValue(packageUsage.currentActiveContacts, packageUsage.maxActiveContacts)}</strong>
+                  <p>{formatRemainingValue(packageUsage.remainingActiveContacts, "active contacts")}</p>
+                </div>
+                <div>
+                  <span>Active automations</span>
+                  <strong>{formatUsageValue(packageUsage.currentActiveAutomations, packageUsage.maxActiveAutomations)}</strong>
+                  <p>{formatRemainingValue(packageUsage.remainingActiveAutomations, "active automations")}</p>
+                </div>
+                <div>
+                  <span>WhatsApp campaigns</span>
+                  <strong>{formatUsageValue(packageUsage.currentWhatsAppCampaigns, packageUsage.maxWhatsAppCampaigns)}</strong>
+                  <p>{formatRemainingValue(packageUsage.remainingWhatsAppCampaigns, "WhatsApp campaigns")}</p>
+                </div>
+              </div>
             </div>
-          </div>
+          </article>
+        </div>
 
-          <div className="panel-row">
-            <div className="lead-row">
-              <strong>Runtime status</strong>
-              <div className="table-subtle">
-                {health.runtimeStatus}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Inbox readiness</strong>
-              <div className="table-subtle">
-                {inboxReadinessLabel}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Imported so far</strong>
-              <div className="table-subtle">
-                {health.importedConversationCount} conversations, {health.importedMessageCount} messages
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Outbound worker</strong>
-              <div className="table-subtle">
-                {getWorkerStatusLabel(health)}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Latest sync issue</strong>
-              <div className="table-subtle">
-                {latestSyncIssue}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Health scope</strong>
-              <div className="table-subtle">
-                This panel reflects the current connected number. Future work should split health by
-                line instead of treating the whole workspace as one runtime.
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Live traffic check</strong>
-              <div className="table-subtle">
-                {getVerificationLabel(health.verificationState)}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Last inbound</strong>
-              <div className="table-subtle">
-                {formatConnectedAt(health.lastInboundAt)}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Last outbound</strong>
-              <div className="table-subtle">
-                {formatConnectedAt(health.lastOutboundAt)}
-              </div>
-            </div>
-          </div>
-        </article>
-
-        <article className="content-card settings-dark-panel">
-          <div className="card-header settings-dark-panel-head">
-            <div>
-              <h3 className="card-title">Package capacity</h3>
-              <p className="muted">
-                The selected package will control how many WhatsApp numbers this workspace can connect.
-              </p>
-            </div>
-          </div>
-
-          <div className="panel-row">
-            <div className="lead-row">
-              <strong>Current package</strong>
-              <div className="table-subtle">{planSettings.label}</div>
-            </div>
-            <div className="lead-row">
-              <strong>Allowed numbers</strong>
-              <div className="table-subtle">{numberLimit === null ? "Unlimited" : `${numberLimit} numbers`}</div>
-            </div>
-            <div className="lead-row">
-              <strong>Connected today</strong>
-              <div className="table-subtle">
-                {activeNumbersCount} active {activeNumbersCount === 1 ? "number" : "numbers"}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Available slots</strong>
-              <div className="table-subtle">
-                {remainingNumberSlots === null
-                  ? "Unlimited"
-                  : `${remainingNumberSlots} slot${remainingNumberSlots === 1 ? "" : "s"} remaining`}
-              </div>
-            </div>
-            <div className="lead-row">
-              <strong>Expansion model</strong>
-              <div className="table-subtle">Add sales, support, or branch lines under the selected package.</div>
-            </div>
-          </div>
-        </article>
-      </section>
+        <aside className="account-setup-side">
+          <article className="account-setup-side-card">
+            <span>Workspace status</span>
+            <strong>{workspaceStatusLabel}</strong>
+            <p>{inboxReadinessLabel}</p>
+          </article>
+          <article className="account-setup-side-card">
+            <span>Available number slots</span>
+            <strong>
+              {remainingNumberSlots === null
+                ? "Unlimited"
+                : `${remainingNumberSlots} slot${remainingNumberSlots === 1 ? "" : "s"}`}
+            </strong>
+            <p>
+              {numberLimit === null
+                ? "Additional numbers can be added without a package cap."
+                : "Additional numbers depend on the selected package."}
+            </p>
+          </article>
+          <article className="account-setup-side-card muted">
+            <span>Additional numbers</span>
+            <strong>Package-based</strong>
+            <p>More WhatsApp lines will appear here when multi-number support is enabled.</p>
+          </article>
+        </aside>
+        </section>
+      </div>
     </DashboardShell>
   );
 }

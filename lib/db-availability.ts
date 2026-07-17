@@ -1,9 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { execute, queryMany, queryOne, transaction } from "@/lib/db";
 import { AvailabilityOverrideType } from "@/lib/db-types";
+
+function createRecordId() {
+  return randomUUID().replace(/-/g, "");
+}
 
 export type AgentAvailabilityRuleRow = {
   dayOfWeek: number;
   enabled: boolean;
+  allDay: boolean;
   startTime: string;
   endTime: string;
 };
@@ -43,7 +49,7 @@ export async function findAgentAvailability(agentId: string) {
 
   const [availabilityRules, availabilityOverrides] = await Promise.all([
     queryMany<AgentAvailabilityRuleRow>(
-      `SELECT "dayOfWeek" AS "dayOfWeek", enabled, "startTime" AS "startTime", "endTime" AS "endTime"
+      `SELECT "dayOfWeek" AS "dayOfWeek", enabled, "allDay" AS "allDay", "startTime" AS "startTime", "endTime" AS "endTime"
        FROM "AgentAvailabilityRule"
        WHERE "agentId" = $1
        ORDER BY "dayOfWeek" ASC`,
@@ -77,18 +83,22 @@ export async function replaceAgentAvailability(
 
     for (const rule of input.weeklyRules) {
       await execute(
-        `INSERT INTO "AgentAvailabilityRule" ("agentId", "dayOfWeek", enabled, "startTime", "endTime")
-         VALUES ($1, $2, $3, $4, $5)`,
-        [agentId, rule.dayOfWeek, rule.enabled, rule.startTime, rule.endTime],
+        `INSERT INTO "AgentAvailabilityRule" (
+           id, "agentId", "dayOfWeek", enabled, "allDay", "startTime", "endTime", "createdAt", "updatedAt"
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())`,
+        [createRecordId(), agentId, rule.dayOfWeek, rule.enabled, rule.allDay, rule.startTime, rule.endTime],
         client
       );
     }
 
     for (const override of input.overrides) {
       await execute(
-        `INSERT INTO "AgentAvailabilityOverride" ("agentId", type, "startAt", "endAt", note)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [agentId, override.type, override.startAt, override.endAt, override.note],
+        `INSERT INTO "AgentAvailabilityOverride" (
+           id, "agentId", type, "startAt", "endAt", note, "createdAt", "updatedAt"
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())`,
+        [createRecordId(), agentId, override.type, override.startAt, override.endAt, override.note],
         client
       );
     }
@@ -110,8 +120,8 @@ export async function listWorkspaceAvailabilityAgents(workspaceId: string) {
 
   const agentIds = agents.map((agent) => agent.id);
   const [rules, overrides] = await Promise.all([
-    queryMany<{ agentId: string; dayOfWeek: number; enabled: boolean; startTime: string; endTime: string }>(
-      `SELECT "agentId" AS "agentId", "dayOfWeek" AS "dayOfWeek", enabled, "startTime" AS "startTime", "endTime" AS "endTime"
+    queryMany<{ agentId: string; dayOfWeek: number; enabled: boolean; allDay: boolean; startTime: string; endTime: string }>(
+      `SELECT "agentId" AS "agentId", "dayOfWeek" AS "dayOfWeek", enabled, "allDay" AS "allDay", "startTime" AS "startTime", "endTime" AS "endTime"
        FROM "AgentAvailabilityRule"
        WHERE "agentId" = ANY($1::text[])`,
       [agentIds]
@@ -128,12 +138,13 @@ export async function listWorkspaceAvailabilityAgents(workspaceId: string) {
   const rulesByAgent = new Map<string, AgentAvailabilityRuleRow[]>();
   for (const rule of rules) {
     const existing = rulesByAgent.get(rule.agentId) ?? [];
-    existing.push({
-      dayOfWeek: rule.dayOfWeek,
-      enabled: rule.enabled,
-      startTime: rule.startTime,
-      endTime: rule.endTime
-    });
+      existing.push({
+        dayOfWeek: rule.dayOfWeek,
+        enabled: rule.enabled,
+        allDay: rule.allDay,
+        startTime: rule.startTime,
+        endTime: rule.endTime
+      });
     rulesByAgent.set(rule.agentId, existing);
   }
 

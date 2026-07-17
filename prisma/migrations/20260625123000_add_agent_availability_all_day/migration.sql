@@ -1,0 +1,2 @@
+ALTER TABLE "AgentAvailabilityRule"
+ADD COLUMN IF NOT EXISTS "allDay" BOOLEAN NOT NULL DEFAULT false;

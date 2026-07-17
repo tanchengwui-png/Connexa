@@ -1,0 +1,73 @@
+%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 595.28 841.89] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >> endobj
+4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj
+5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >> endobj
+6 0 obj << /Length 3842 >> stream
+BT /F2 31 Tf 0.05 0.12 0.3 rg 1 0 0 1 50.52 766.89 Tm (Recurvos) Tj ET
+BT /F2 31 Tf 0.05 0.12 0.3 rg 1 0 0 1 50.52 732.89 Tm (Connexa) Tj ET
+BT /F1 10.6 Tf 0.17 0.22 0.34 rg 1 0 0 1 50.52 705.29 Tm (Email: tanchengwui@gmail.com) Tj ET
+0.79 0.86 0.97 RG 1 w 306.76 597.89 246.00 208.00 re S
+BT /F2 34 Tf 0.05 0.12 0.3 rg 1 0 0 1 403.48 755.89 Tm (INVOICE) Tj ET
+0.79 0.86 0.97 RG 1 w 322.76 741.89 m 536.76 741.89 l S
+BT /F1 10.8 Tf 0.18 0.35 0.74 rg 1 0 0 1 322.76 711.09 Tm (Invoice No) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 418.82 711.09 Tm (INV-20260715-52BFEB9F) Tj ET
+BT /F1 10.8 Tf 0.18 0.35 0.74 rg 1 0 0 1 322.76 683.09 Tm (Invoice Date) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 474.98 683.09 Tm (15 Jul 2026) Tj ET
+BT /F1 10.8 Tf 0.18 0.35 0.74 rg 1 0 0 1 322.76 655.09 Tm (Due Date) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 474.98 655.09 Tm (17 Jul 2026) Tj ET
+BT /F1 10.8 Tf 0.18 0.35 0.74 rg 1 0 0 1 322.76 627.09 Tm (Currency) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 519.91 627.09 Tm (MYR) Tj ET
+0.79 0.86 0.97 RG 1 w 42.52 373.89 248.12 200.00 re S
+BT /F2 11.5 Tf 0.18 0.35 0.74 rg 1 0 0 1 60.52 542.39 Tm (Bill To) Tj ET
+BT /F2 12.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 505.39 Tm (LFT) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 490.09 Tm (Email: pohmy@logicflowtech.com) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 473.09 Tm (Phone: 0112223344) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 456.09 Tm (Address: 11,11) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 439.09 Tm (: 12,22) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 422.09 Tm (: 43244 Puchong) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 405.09 Tm (: Selangor) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 60.52 388.09 Tm (: Malaysia) Tj ET
+0.79 0.86 0.97 RG 1 w 304.64 373.89 248.12 200.00 re S
+BT /F2 11.5 Tf 0.18 0.35 0.74 rg 1 0 0 1 320.64 542.39 Tm (Summary) Tj ET
+BT /F1 10.8 Tf 0.17 0.22 0.34 rg 1 0 0 1 320.64 505.09 Tm (Subtotal) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 486.22 505.09 Tm (MYR 79.00) Tj ET
+0.79 0.86 0.97 RG 1 w 320.64 497.89 m 536.76 497.89 l S
+BT /F1 10.8 Tf 0.17 0.22 0.34 rg 1 0 0 1 320.64 475.09 Tm (Discount) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 491.83 475.09 Tm (MYR 0.00) Tj ET
+BT /F1 10.8 Tf 0.17 0.22 0.34 rg 1 0 0 1 320.64 447.09 Tm (Tax) Tj ET
+BT /F1 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 491.83 447.09 Tm (MYR 0.00) Tj ET
+BT /F2 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 320.64 419.09 Tm (Total) Tj ET
+BT /F2 10.8 Tf 0.05 0.12 0.3 rg 1 0 0 1 482.33 419.09 Tm (MYR 79.00) Tj ET
+0.79 0.86 0.97 RG 1 w 42.52 219.89 510.24 138.00 re S
+BT /F2 11.5 Tf 0.18 0.35 0.74 rg 1 0 0 1 58.52 326.39 Tm (Invoice Items) Tj ET
+BT /F1 10.6 Tf 0.18 0.35 0.74 rg 1 0 0 1 66.52 313.29 Tm (Description) Tj ET
+BT /F1 10.6 Tf 0.18 0.35 0.74 rg 1 0 0 1 300.98 313.29 Tm (Qty) Tj ET
+BT /F1 10.6 Tf 0.18 0.35 0.74 rg 1 0 0 1 357.40 313.29 Tm (Unit Price) Tj ET
+BT /F1 10.6 Tf 0.18 0.35 0.74 rg 1 0 0 1 473.64 313.29 Tm (Line Total) Tj ET
+0.79 0.86 0.97 RG 1 w 58.52 305.89 m 536.76 305.89 l S
+BT /F1 10.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 66.52 277.39 Tm (Starter package \(Monthly\)) Tj ET
+BT /F1 10.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 312.06 277.39 Tm (1) Tj ET
+BT /F1 10.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 363.38 277.39 Tm (MYR 79.00) Tj ET
+BT /F1 10.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 479.62 277.39 Tm (MYR 79.00) Tj ET
+0.79 0.86 0.97 RG 1 w 58.52 255.89 m 536.76 255.89 l S
+BT /F2 11.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 426.60 224.39 Tm (Total) Tj ET
+BT /F2 11.5 Tf 0.05 0.12 0.3 rg 1 0 0 1 470.80 224.39 Tm (MYR 79.00) Tj ET
+0.79 0.86 0.97 RG 1 w 44.52 203.89 m 554.76 203.89 l S
+BT /F1 10.5 Tf 0.18 0.35 0.74 rg 1 0 0 1 46.52 183.39 Tm (Please include the invoice number with your payment reference.) Tj ET
+BT /F1 10.5 Tf 0.18 0.35 0.74 rg 1 0 0 1 46.52 166.39 Tm (This is a system generated invoice.) Tj ET
+endstream endobj
+xref
+0 7
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000257 00000 n 
+0000000327 00000 n 
+0000000402 00000 n 
+trailer << /Size 7 /Root 1 0 R >>
+startxref
+4296
+%%EOF

@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { AttachmentPreview } from "@/components/attachment-preview";
 import { FullEmojiPicker } from "@/components/full-emoji-picker";
 import {
   AttachmentIcon,
@@ -10,6 +12,7 @@ import {
   TemplateIcon
 } from "@/components/inbox/icons";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
+import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/toast-provider";
 import {
   formatMalaysiaDateTimeLocalInput,
@@ -46,7 +49,7 @@ type CampaignMediaAsset = {
   id: string;
   title: string;
   publicUrl: string;
-  kind: "IMAGE" | "AUDIO" | "VIDEO";
+  kind: "IMAGE" | "AUDIO" | "VIDEO" | "DOCUMENT";
   mimeType: string;
   sizeLabel: string;
 };
@@ -100,17 +103,26 @@ type CampaignsWorkspaceProps = {
   initialRuns: CampaignRun[];
   mediaAssets: CampaignMediaAsset[];
   quickReplies: CampaignQuickReply[];
+  initialDraft?: CampaignDraft | null;
+  mode?: "create" | "edit" | "workspace";
+  redirectOnSaveTo?: string | null;
+  showHistory?: boolean;
 };
 
 export function CampaignsWorkspace({
   agents,
   contacts,
+  initialDraft = null,
   initialDrafts,
   initialRuns,
   mediaAssets,
-  quickReplies
+  quickReplies,
+  mode = "workspace",
+  redirectOnSaveTo = null,
+  showHistory = true
 }: CampaignsWorkspaceProps) {
   const { error: showError, success } = useToast();
+  const router = useRouter();
   const attachmentButtonRef = useRef<HTMLButtonElement | null>(null);
   const emojiButtonRef = useRef<HTMLButtonElement | null>(null);
   const templateButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -125,7 +137,6 @@ export function CampaignsWorkspace({
   const [searchValue, setSearchValue] = useState("");
   const [ownerFilter, setOwnerFilter] = useState("all");
   const [tagFilter, setTagFilter] = useState("all");
-  const [showHotOnly, setShowHotOnly] = useState(false);
   const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
   const [messageBody, setMessageBody] = useState("");
   const [scheduleAt, setScheduleAt] = useState("");
@@ -167,6 +178,24 @@ export function CampaignsWorkspace({
     });
   }, [activeView]);
 
+  useEffect(() => {
+    if (!initialDraft) {
+      return;
+    }
+
+    setActiveDraftId(initialDraft.id);
+    setActiveView("builder");
+    setCampaignName(initialDraft.name);
+    setSelectedContactIds(
+      initialDraft.selectedContactIds.filter((contactId) => contacts.some((contact) => contact.id === contactId))
+    );
+    setMessageBody(initialDraft.messageBody);
+    setScheduleAt(formatMalaysiaDateTimeLocalInput(initialDraft.scheduleAt ? new Date(initialDraft.scheduleAt) : null));
+    setSelectedAttachmentIds(
+      initialDraft.selectedAttachmentIds.filter((assetId) => mediaAssets.some((asset) => asset.id === assetId))
+    );
+  }, [contacts, initialDraft, mediaAssets]);
+
   const tagOptions = useMemo(
     () =>
       Array.from(new Set(contacts.flatMap((contact) => contact.tags)))
@@ -187,10 +216,6 @@ export function CampaignsWorkspace({
         return false;
       }
 
-      if (showHotOnly && !contact.isHotLead) {
-        return false;
-      }
-
       if (!query) {
         return true;
       }
@@ -206,7 +231,7 @@ export function CampaignsWorkspace({
         .toLowerCase()
         .includes(query);
     });
-  }, [contacts, ownerFilter, searchValue, showHotOnly, tagFilter]);
+  }, [contacts, ownerFilter, searchValue, tagFilter]);
 
   const selectedContacts = useMemo(
     () =>
@@ -319,6 +344,8 @@ export function CampaignsWorkspace({
   }, [selectedContacts]);
 
   const launchableCount = eligibilityReport.eligible.length + eligibilityReport.caution.length;
+  const activeRunsCount = campaignRuns.filter((run) => run.pendingJobCount > 0 || run.processingJobCount > 0).length;
+  const scheduledRunsCount = campaignRuns.filter((run) => run.queuedJobCount > 0).length;
 
   const sampleEligibleRecipients = useMemo(
     () => eligibilityReport.entries.filter((entry) => entry.status !== "excluded").slice(0, 6),
@@ -439,13 +466,20 @@ export function CampaignsWorkspace({
     );
     setActiveDraftId(nextDraft.id);
     success("Draft saved", `${nextDraft.name} is ready to revisit from Campaigns.`);
+
+    if (redirectOnSaveTo) {
+      router.push(redirectOnSaveTo);
+      router.refresh();
+    }
   };
 
   const loadDraft = (draft: CampaignDraft) => {
     setActiveDraftId(draft.id);
     setActiveView("builder");
     setCampaignName(draft.name);
-    setSelectedContactIds(draft.selectedContactIds.filter((contactId) => contacts.some((contact) => contact.id === contactId)));
+    setSelectedContactIds(
+      draft.selectedContactIds.filter((contactId) => contacts.some((contact) => contact.id === contactId))
+    );
     setMessageBody(draft.messageBody);
     setScheduleAt(formatMalaysiaDateTimeLocalInput(draft.scheduleAt ? new Date(draft.scheduleAt) : null));
     setSelectedAttachmentIds(
@@ -552,79 +586,108 @@ export function CampaignsWorkspace({
     }
   };
 
+  const heroTitle =
+    mode === "create" ? "Create campaign" : mode === "edit" ? "Edit campaign" : "Campaigns";
+  const heroDescription =
+    mode === "create"
+      ? "Build the audience, compose the message, and save the new campaign draft."
+      : mode === "edit"
+        ? "Update the saved campaign draft, then return to the campaign list."
+        : "Build the audience, compose the message, and launch from one guided outbound workspace.";
+  const launchStatusCopy =
+    mode === "workspace"
+      ? "Switch between builder and review below, then check launchability before queueing the outbound jobs."
+      : "Use the same campaign builder and review flow, then save to return to the campaign list.";
+
   return (
     <section className="campaigns-workspace">
-      <div className="campaigns-stage-header">
+      <section className="auth-page-hero">
+        <div className="auth-page-hero-copy">
+          <span className="auth-page-kicker">Broadcast workflow</span>
+          <h2>{heroTitle}</h2>
+          <p>{heroDescription}</p>
+          <div className="auth-page-hero-metrics">
+            <span className="auth-page-hero-stat">
+              <strong>{campaignDrafts.length}</strong>
+              <small>drafts</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{selectedContacts.length}</strong>
+              <small>selected contacts</small>
+            </span>
+            <span className="auth-page-hero-stat">
+              <strong>{launchableCount}</strong>
+              <small>launchable</small>
+            </span>
+          </div>
+        </div>
+        <div className="auth-page-hero-side">
+          <div className="auth-page-hero-actions">
+            {mode === "workspace" ? (
+              <button className="button button-primary" onClick={startNewCampaign} type="button">
+                Create campaign
+              </button>
+            ) : (
+              <a className="button button-secondary" href="/campaigns">
+                Back to campaigns
+              </a>
+            )}
+            <button className="button button-secondary" onClick={() => void saveCurrentDraft()} type="button">
+              {mode === "edit" ? "Update campaign" : "Save draft"}
+            </button>
+          </div>
+          <div className="auth-page-hero-panel">
+            <span className="auth-page-hero-panel-label">Launch status</span>
+            <strong>{activeRunsCount} active runs · {scheduledRunsCount} queued</strong>
+            <p>{launchStatusCopy}</p>
+          </div>
+        </div>
+      </section>
+
+      <div className="campaigns-stage-header campaigns-stage-header-compact">
         <div className="campaigns-stage-copy">
-          <span className="campaigns-kicker">Outbound workspace</span>
           <div className="campaigns-stage-title-row">
             <div>
-              <h3 className="card-title">Campaigns</h3>
+              <h3 className="card-title">Campaign builder</h3>
               <p className="muted">
-                Create one WhatsApp broadcast by choosing an audience, writing the message, then reviewing before launch.
+                Build the audience, compose the message, then review and launch from one controlled flow.
               </p>
             </div>
             <div className="campaigns-stage-tabs" role="tablist" aria-label="Campaign workflow">
-              <button
+              <Button
                 aria-selected={activeView === "builder"}
                 className={`campaigns-stage-tab${activeView === "builder" ? " active" : ""}`}
                 onClick={() => setActiveView("builder")}
                 role="tab"
-                type="button"
+                selected={activeView === "builder"}
+                variant="toggle"
               >
                 Builder
-              </button>
-              <button
+              </Button>
+              <Button
                 aria-selected={activeView === "review"}
                 className={`campaigns-stage-tab${activeView === "review" ? " active" : ""}`}
                 onClick={handleReviewCampaign}
                 role="tab"
-                type="button"
+                selected={activeView === "review"}
+                variant="toggle"
               >
                 Review
-              </button>
+              </Button>
             </div>
           </div>
           <div className="campaigns-stage-metrics">
+            <span className="campaigns-stage-pill">{campaignDrafts.length} drafts</span>
+            <span className="campaigns-stage-pill">{activeRunsCount} active</span>
+            <span className="campaigns-stage-pill">{scheduledRunsCount} queued</span>
             <span className="campaigns-stage-pill">{selectedContacts.length} selected</span>
             <span className="campaigns-stage-pill">{launchableCount} launchable</span>
-            <span className="campaigns-stage-pill">
-              {selectedAttachmentIds.length ? `${selectedAttachmentIds.length} media attached` : "Text-only draft"}
-            </span>
           </div>
         </div>
-        <div className="campaigns-stage-actions">
-          <button className="button button-primary" onClick={startNewCampaign} type="button">
-            Create campaign
-          </button>
-          <button className="button button-secondary" onClick={() => void saveCurrentDraft()} type="button">
-            Save draft
-          </button>
-        </div>
+        <div className="campaigns-stage-actions" />
       </div>
 
-      <section className="campaigns-start-card">
-        <div className="campaigns-start-copy">
-          <span className="campaigns-kicker">Start here</span>
-          <strong>Create a campaign in 3 steps</strong>
-          <div className="campaigns-start-steps" aria-label="Campaign steps">
-            <span>1. Choose audience</span>
-            <span>2. Write message</span>
-            <span>3. Review and launch</span>
-          </div>
-        </div>
-        <div className="campaigns-start-actions">
-          <button className="button button-primary" onClick={startNewCampaign} type="button">
-            Create campaign
-          </button>
-          {campaignDrafts.length ? (
-            <button className="button button-secondary" onClick={() => setIsDraftsOpen(true)} type="button">
-              Open saved drafts
-            </button>
-          ) : null}
-        </div>
-      </section>
-
+      {showHistory ? (
       <section className="campaigns-history-grid">
         <div className="content-card campaigns-drafts-strip">
           <button className="campaigns-history-toggle" onClick={() => setIsDraftsOpen((current) => !current)} type="button">
@@ -717,33 +780,7 @@ export function CampaignsWorkspace({
           ) : null}
         </div>
       </section>
-
-      <div className="campaigns-overview-grid">
-        <article className="content-card campaigns-overview-card">
-          <span className="metric-label">Selectable contacts</span>
-          <strong className="metric-value">{contacts.length}</strong>
-          <span className="table-subtle">Contacts only. Group records stay excluded.</span>
-        </article>
-        <article className="content-card campaigns-overview-card is-primary">
-          <span className="metric-label">Launchable audience</span>
-          <strong className="metric-value">{launchableCount}</strong>
-          <span className="table-subtle">
-            {eligibilityReport.excluded.length
-              ? `${eligibilityReport.excluded.length} currently excluded`
-              : "Build by search, owner, tags, and hot-lead signal."}
-          </span>
-        </article>
-        <article className="content-card campaigns-overview-card">
-          <span className="metric-label">Quick replies</span>
-          <strong className="metric-value">{quickReplies.length}</strong>
-          <span className="table-subtle">Insert reusable templates straight into the composer.</span>
-        </article>
-        <article className="content-card campaigns-overview-card">
-          <span className="metric-label">Workflow stage</span>
-          <strong className="metric-value">{activeView === "review" ? "Review" : "Draft"}</strong>
-          <span className="table-subtle">Audience, message, and readiness stay in one campaign workspace.</span>
-        </article>
-      </div>
+      ) : null}
 
       <div className="campaigns-main-grid" ref={builderRef}>
         <section className="content-card campaigns-panel campaigns-audience-panel">
@@ -768,7 +805,7 @@ export function CampaignsWorkspace({
                 value={searchValue}
               />
             </label>
-            <select className="lead-record-input campaigns-filter-select" onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
+            <select className="lead-record-input app-select campaigns-filter-select" onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
               <option value="all">All owners</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
@@ -776,7 +813,7 @@ export function CampaignsWorkspace({
                 </option>
               ))}
             </select>
-            <select className="lead-record-input campaigns-filter-select" onChange={(event) => setTagFilter(event.target.value)} value={tagFilter}>
+            <select className="lead-record-input app-select campaigns-filter-select" onChange={(event) => setTagFilter(event.target.value)} value={tagFilter}>
               <option value="all">All tags</option>
               {tagOptions.map((tag) => (
                 <option key={tag} value={tag}>
@@ -784,14 +821,6 @@ export function CampaignsWorkspace({
                 </option>
               ))}
             </select>
-            <button
-              aria-pressed={showHotOnly}
-              className={`campaigns-filter-chip${showHotOnly ? " active" : ""}`}
-              onClick={() => setShowHotOnly((current) => !current)}
-              type="button"
-            >
-              Hot leads only
-            </button>
           </div>
 
           <div className="campaigns-audience-utility">
@@ -946,16 +975,25 @@ export function CampaignsWorkspace({
                 </div>
                 <div className="inbox-attachment-row">
                   {selectedMedia.map((asset) => (
-                    <button
-                      className="inbox-attachment-chip"
-                      key={asset.id}
-                      onClick={() => toggleMediaSelection(asset.id)}
-                      title={asset.title}
-                      type="button"
-                    >
-                      <AttachmentIcon />
-                      <span>{`${asset.title} · ${getMediaKindLabel(asset.kind, asset.mimeType)}`}</span>
-                    </button>
+                    <div className="campaigns-attachment-preview-card" key={asset.id}>
+                      <AttachmentPreview
+                        className="attachment-preview-compact"
+                        fileName={asset.title}
+                        fit="cover"
+                        mimeType={asset.mimeType}
+                        openLabel="Open attachment"
+                        sizeLabel={asset.sizeLabel}
+                        url={asset.publicUrl}
+                      />
+                      <button
+                        className="inbox-attachment-clear campaigns-attachment-remove"
+                        onClick={() => toggleMediaSelection(asset.id)}
+                        title={`Remove ${asset.title}`}
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -1011,7 +1049,7 @@ export function CampaignsWorkspace({
 
             <div className="campaigns-composer-actions">
               <button className="button button-secondary" onClick={() => void saveCurrentDraft()} type="button">
-                Save draft
+                {mode === "edit" ? "Update campaign" : "Save draft"}
               </button>
               <button className="button button-primary" onClick={handleReviewCampaign} type="button">
                 <SendIcon />
@@ -1166,10 +1204,16 @@ export function CampaignsWorkspace({
                 {selectedMedia.length ? (
                   <div className="campaigns-preview-media-list">
                     {selectedMedia.map((asset) => (
-                      <span className="inbox-attachment-chip" key={asset.id}>
-                        <AttachmentIcon />
-                        <span>{`${asset.title} · ${getMediaKindLabel(asset.kind, asset.mimeType)}`}</span>
-                      </span>
+                      <AttachmentPreview
+                        className="attachment-preview-compact campaigns-preview-attachment"
+                        fileName={asset.title}
+                        fit="cover"
+                        key={asset.id}
+                        mimeType={asset.mimeType}
+                        openLabel="Open attachment"
+                        sizeLabel={asset.sizeLabel}
+                        url={asset.publicUrl}
+                      />
                     ))}
                   </div>
                 ) : null}

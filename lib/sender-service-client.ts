@@ -15,6 +15,11 @@ const SENDER_SERVICE_SEND_TIMEOUT_MS = Math.max(
   Number.parseInt(process.env.SENDER_SERVICE_SEND_TIMEOUT_MS ?? "30000", 10) || 30000
 );
 
+const SENDER_SERVICE_RUNTIME_TIMEOUT_MS = Math.max(
+  SENDER_SERVICE_TIMEOUT_MS,
+  Number.parseInt(process.env.SENDER_SERVICE_RUNTIME_TIMEOUT_MS ?? "30000", 10) || 30000
+);
+
 type RemoteChannelPayload = {
   connectedAt?: string | Date | null;
   lastSeenAt?: string | Date | null;
@@ -105,7 +110,11 @@ async function callSenderService<T>(
       throw new Error(`Sender service timed out after ${timeoutMs}ms.`);
     }
 
-    throw error;
+    const message = error instanceof Error ? error.message.trim() : "Unknown sender service error.";
+    throw new Error(
+      `Sender service is unreachable at ${baseUrl}. ${message || "Fetch failed."} ` +
+        "Check SENDER_SERVICE_URL and confirm the sender service is running and reachable from the app container."
+    );
   } finally {
     clearTimeout(timeoutId);
   }
@@ -131,7 +140,16 @@ async function callSenderService<T>(
 export async function getRemoteWhatsAppRuntimeStatus(input: {
   workspaceId: string;
   agentId: string;
+  channelId?: string | null;
 }) {
+  const searchParams = new URLSearchParams({
+    workspaceId: input.workspaceId,
+    agentId: input.agentId
+  });
+  if (input.channelId) {
+    searchParams.set("channelId", input.channelId);
+  }
+
   const payload = await callSenderService<{
     status: {
       channel?: unknown;
@@ -152,10 +170,8 @@ export async function getRemoteWhatsAppRuntimeStatus(input: {
       };
     };
   }>("/whatsapp/runtime", {
-    searchParams: new URLSearchParams({
-      workspaceId: input.workspaceId,
-      agentId: input.agentId
-    })
+    searchParams,
+    timeoutMs: SENDER_SERVICE_RUNTIME_TIMEOUT_MS
   });
 
   return {
@@ -217,32 +233,47 @@ export async function getRemoteSenderServiceMetrics() {
 export async function ensureRemoteWorkspaceWhatsAppClient(input: {
   workspaceId: string;
   agentId: string;
+  channelId?: string | null;
 }) {
   await callSenderService<{ ok: true }>("/whatsapp/runtime/start", {
     method: "POST",
-    body: input
+    body: input,
+    timeoutMs: SENDER_SERVICE_RUNTIME_TIMEOUT_MS
   });
 }
 
-export async function disconnectRemoteWorkspaceWhatsAppClient(workspaceId: string) {
+export async function disconnectRemoteWorkspaceWhatsAppClient(workspaceId: string, channelId?: string | null) {
+  const searchParams = new URLSearchParams({ workspaceId });
+  if (channelId) {
+    searchParams.set("channelId", channelId);
+  }
+
   await callSenderService<{ ok: true }>("/whatsapp/runtime", {
     method: "DELETE",
-    searchParams: new URLSearchParams({
-      workspaceId
-    })
+    searchParams
   });
 }
 
-export async function deleteRemoteWorkspaceWhatsAppClientSession(workspaceId: string) {
+export async function deleteRemoteWorkspaceWhatsAppClientSession(workspaceId: string, channelId?: string | null) {
+  const searchParams = new URLSearchParams({ workspaceId });
+  if (channelId) {
+    searchParams.set("channelId", channelId);
+  }
+
   await callSenderService<{ ok: true }>("/whatsapp/runtime/session", {
     method: "DELETE",
-    searchParams: new URLSearchParams({
-      workspaceId
-    })
+    searchParams
   });
 }
 
-export async function syncRemoteWorkspaceHistory(workspaceId: string) {
+export async function syncRemoteWorkspaceHistory(
+  workspaceId: string,
+  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background" } | null,
+  options: { triggeredBy?: "manual" | "background" } = {}
+) {
+  const channelId = typeof channelIdOrOptions === "string" ? channelIdOrOptions : null;
+  const resolvedOptions =
+    typeof channelIdOrOptions === "object" && channelIdOrOptions !== null ? channelIdOrOptions : options;
   const payload = await callSenderService<{
     ok: true;
     result: {
@@ -251,7 +282,11 @@ export async function syncRemoteWorkspaceHistory(workspaceId: string) {
     };
   }>("/whatsapp/runtime/sync", {
     method: "POST",
-    body: { workspaceId }
+    body: {
+      workspaceId,
+      channelId,
+      triggeredBy: resolvedOptions.triggeredBy
+    }
   });
 
   return payload.result;
@@ -299,6 +334,7 @@ export async function listRemoteWhatsAppMentionCandidates(input: {
 }
 
 export async function sendRemoteWhatsAppMessage(input: {
+  channelId?: string | null;
   conversationId: string;
   workspaceId: string;
   to: string;
@@ -317,6 +353,7 @@ export async function sendRemoteWhatsAppMessage(input: {
   attachmentUrl?: string | null;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
+  sendAudioAsVoice?: boolean;
 }) {
   const payload = await callSenderService<{
     result: {
@@ -334,6 +371,7 @@ export async function sendRemoteWhatsAppMessage(input: {
 
 export async function deleteRemoteWhatsAppMessageForEveryone(input: {
   workspaceId: string;
+  channelId?: string | null;
   providerMessageId: string;
 }) {
   const payload = await callSenderService<{
@@ -346,4 +384,44 @@ export async function deleteRemoteWhatsAppMessageForEveryone(input: {
   });
 
   return payload.result;
+}
+
+export async function sendRemoteWhatsAppChatSeen(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  conversationId: string;
+}) {
+  const payload = await callSenderService<{
+    result: {
+      status: "seen" | "skipped";
+    };
+  }>("/messages/seen", {
+    method: "POST",
+    body: input
+  });
+
+  return payload.result;
+}
+
+export async function setRemoteWhatsAppChatMute(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  conversationId: string;
+  mute: boolean;
+  muteUntil?: string | null;
+}) {
+  const payload = await callSenderService<{
+    result: {
+      isMuted: boolean;
+      muteExpiration: string | null;
+    };
+  }>("/chats/mute", {
+    method: "POST",
+    body: input
+  });
+
+  return {
+    isMuted: payload.result.isMuted,
+    muteExpiration: payload.result.muteExpiration ? new Date(payload.result.muteExpiration) : null
+  };
 }

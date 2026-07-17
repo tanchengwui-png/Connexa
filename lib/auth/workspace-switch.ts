@@ -1,5 +1,10 @@
 import { getAgentEntryPath } from "@/lib/auth/entry-path";
-import { clearSession, createSession, getCurrentSession } from "@/lib/auth/session";
+import {
+  getCurrentRememberSession,
+  getCurrentSession,
+  replaceActiveSession,
+  updateCurrentRememberSessionWorkspace
+} from "@/lib/auth/session";
 import { findAgentsByAccountId } from "@/lib/db-auth";
 
 export async function switchWorkspaceSession(input: {
@@ -27,12 +32,20 @@ export async function switchWorkspaceSession(input: {
     throw new Error("UNAUTHORIZED");
   }
 
-  await clearSession();
-  await createSession({
+  await replaceActiveSession({
     agentId: target.id,
     workspaceId: target.workspaceId,
     remember: currentSession.remember
   });
+
+  const rememberSession = await getCurrentRememberSession();
+
+  if (rememberSession) {
+    await updateCurrentRememberSessionWorkspace({
+      agentId: target.id,
+      workspaceId: target.workspaceId
+    });
+  }
 
   return {
     redirectTo: await getAgentEntryPath({

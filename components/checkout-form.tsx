@@ -1,28 +1,37 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import {
+  DEFAULT_BILLING_COUNTRY,
+  getBillingDetailsErrorMessage,
+  normalizeBillingDetails,
+  type BillingDetailsErrors,
+  validateBillingDetails
+} from "@/lib/billing-details";
 
 export function CheckoutForm({
   selectedPlan,
+  selectedBillingPeriod,
   selectedPlanLabel,
   selectedPlanPriceAmount,
-  selectedPlanCurrency,
-  selectedPlanBillingPeriod
+  selectedPlanCurrency
 }: {
   selectedPlan: string;
+  selectedBillingPeriod: "MONTHLY" | "YEARLY";
   selectedPlanLabel: string;
   selectedPlanPriceAmount: number | null;
   selectedPlanCurrency: string | null;
-  selectedPlanBillingPeriod: "MONTHLY" | "YEARLY" | null;
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [billingErrors, setBillingErrors] = useState<BillingDetailsErrors>({});
   const [discountCode, setDiscountCode] = useState("");
   const [discountPending, setDiscountPending] = useState(false);
   const [discountMessage, setDiscountMessage] = useState<string | null>(null);
   const [discountSummary, setDiscountSummary] = useState<{
     code: string | null;
     percentage: number | null;
+    amountOff: number | null;
     originalAmount: number;
     discountAmount: number;
     finalAmount: number;
@@ -40,10 +49,30 @@ export function CheckoutForm({
 
     const formData = new FormData(event.currentTarget);
     const password = String(formData.get("password") ?? "");
-    const confirmPassword = String(formData.get("confirmPassword") ?? "");
+    const confirmPassword = String(formData.get("confirm_password") ?? "");
+    const billingDetails = normalizeBillingDetails({
+      billingName: formData.get("billing_name"),
+      billingPhoneNumber: formData.get("billing_phone_number"),
+      billingAddressLine1: formData.get("billing_address_line_1"),
+      billingAddressLine2: formData.get("billing_address_line_2"),
+      billingCity: formData.get("billing_city"),
+      billingState: formData.get("billing_state"),
+      billingPostcode: formData.get("billing_postcode"),
+      billingCountry: formData.get("billing_country"),
+      billingTaxId: formData.get("billing_tax_id")
+    });
+    const nextBillingErrors = validateBillingDetails(billingDetails);
+
+    setBillingErrors(nextBillingErrors);
 
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
+      setPending(false);
+      return;
+    }
+
+    if (getBillingDetailsErrorMessage(nextBillingErrors)) {
+      setError(getBillingDetailsErrorMessage(nextBillingErrors));
       setPending(false);
       return;
     }
@@ -56,9 +85,11 @@ export function CheckoutForm({
       body: JSON.stringify({
         name: String(formData.get("name") ?? ""),
         email: String(formData.get("email") ?? ""),
-        workspaceName: String(formData.get("workspaceName") ?? ""),
+        workspaceName: String(formData.get("workspace_name") ?? ""),
         password,
         plan: String(formData.get("plan") ?? ""),
+        billingPeriod: String(formData.get("billing_period") ?? "monthly"),
+        billingDetails,
         remember: formData.get("remember") === "on",
         discountCode: discountCode.trim()
       })
@@ -72,6 +103,7 @@ export function CheckoutForm({
       return;
     }
 
+    setBillingErrors({});
     window.location.href = data.paymentUrl;
   }
 
@@ -91,6 +123,7 @@ export function CheckoutForm({
       },
       body: JSON.stringify({
         plan: selectedPlan,
+        billingPeriod: selectedBillingPeriod,
         discountCode
       })
     });
@@ -100,6 +133,7 @@ export function CheckoutForm({
       discount?: {
         code: string | null;
         percentage: number | null;
+        amountOff: number | null;
         originalAmount: number;
         discountAmount: number;
         finalAmount: number;
@@ -124,13 +158,20 @@ export function CheckoutForm({
     }
 
     setDiscountSummary(data.discount);
-    setDiscountMessage(`${data.discount.code} applied. ${data.discount.percentage}% discount is ready.`);
+    setDiscountMessage(
+      `${data.discount.code} applied. ${formatDiscountLabel(
+        data.discount.percentage,
+        data.discount.amountOff,
+        selectedPlanCurrency
+      )} discount is ready.`
+    );
     setDiscountPending(false);
   }
 
   return (
-    <form className="auth-form" onSubmit={handleSubmit}>
+    <form autoComplete="off" className="auth-form" onSubmit={handleSubmit}>
       <input name="plan" type="hidden" value={selectedPlan} />
+      <input name="billing_period" type="hidden" value={selectedBillingPeriod.toLowerCase()} />
 
       <label className="control-block">
         <span className="control-label">Selected package</span>
@@ -139,19 +180,20 @@ export function CheckoutForm({
 
       <label className="control-block">
         <span className="control-label">Your name</span>
-        <input className="control-input" name="name" placeholder="Farid Rahman" type="text" />
+        <input autoComplete="off" className="control-input" name="name" placeholder="Farid Rahman" type="text" />
       </label>
 
       <label className="control-block">
         <span className="control-label">Work email</span>
-        <input className="control-input" name="email" placeholder="you@company.com" type="email" />
+        <input autoComplete="off" className="control-input" name="email" placeholder="you@company.com" type="email" />
       </label>
 
       <label className="control-block">
         <span className="control-label">Workspace name</span>
         <input
+          autoComplete="off"
           className="control-input"
-          name="workspaceName"
+          name="workspace_name"
           placeholder="Serene Peak Realty"
           type="text"
         />
@@ -160,6 +202,7 @@ export function CheckoutForm({
       <label className="control-block">
         <span className="control-label">Password</span>
         <input
+          autoComplete="off"
           className="control-input"
           name="password"
           placeholder="Create a password"
@@ -170,12 +213,129 @@ export function CheckoutForm({
       <label className="control-block">
         <span className="control-label">Confirm password</span>
         <input
+          autoComplete="off"
           className="control-input"
-          name="confirmPassword"
+          name="confirm_password"
           placeholder="Repeat your password"
           type="password"
         />
       </label>
+
+      <div className="checkout-billing-card">
+        <div className="checkout-billing-head">
+          <strong>Billing details</strong>
+          <p>These details will appear on your invoices and receipts.</p>
+        </div>
+
+        <div className="platform-settings-field-grid compact checkout-billing-grid">
+          <label className="control-block">
+            <span className="control-label">Billing name / company name</span>
+            <input
+              className="control-input"
+              name="billing_name"
+              onChange={() => clearBillingError("billingName")}
+              required
+              type="text"
+            />
+            {billingErrors.billingName ? <p className="form-error">{billingErrors.billingName}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Phone number</span>
+            <input
+              className="control-input"
+              name="billing_phone_number"
+              onChange={() => clearBillingError("billingPhoneNumber")}
+              required
+              type="tel"
+            />
+            {billingErrors.billingPhoneNumber ? <p className="form-error">{billingErrors.billingPhoneNumber}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Billing address line 1</span>
+            <input
+              className="control-input"
+              name="billing_address_line_1"
+              onChange={() => clearBillingError("billingAddressLine1")}
+              required
+              type="text"
+            />
+            {billingErrors.billingAddressLine1 ? <p className="form-error">{billingErrors.billingAddressLine1}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Billing address line 2</span>
+            <input
+              className="control-input"
+              name="billing_address_line_2"
+              onChange={() => clearBillingError("billingAddressLine2")}
+              type="text"
+            />
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">City</span>
+            <input
+              className="control-input"
+              name="billing_city"
+              onChange={() => clearBillingError("billingCity")}
+              required
+              type="text"
+            />
+            {billingErrors.billingCity ? <p className="form-error">{billingErrors.billingCity}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">State</span>
+            <input
+              className="control-input"
+              name="billing_state"
+              onChange={() => clearBillingError("billingState")}
+              required
+              type="text"
+            />
+            {billingErrors.billingState ? <p className="form-error">{billingErrors.billingState}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Postcode</span>
+            <input
+              className="control-input"
+              inputMode="numeric"
+              name="billing_postcode"
+              onChange={() => clearBillingError("billingPostcode")}
+              pattern="[0-9]{5}"
+              required
+              type="text"
+            />
+            {billingErrors.billingPostcode ? <p className="form-error">{billingErrors.billingPostcode}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Country</span>
+            <input
+              className="control-input"
+              defaultValue={DEFAULT_BILLING_COUNTRY}
+              name="billing_country"
+              onChange={() => clearBillingError("billingCountry")}
+              required
+              type="text"
+            />
+            {billingErrors.billingCountry ? <p className="form-error">{billingErrors.billingCountry}</p> : null}
+          </label>
+
+          <label className="control-block">
+            <span className="control-label">Tax ID / SST number</span>
+            <input
+              className="control-input"
+              name="billing_tax_id"
+              onChange={() => clearBillingError("billingTaxId")}
+              type="text"
+            />
+          </label>
+        </div>
+      </div>
 
       {canApplyDiscount ? (
         <div className="checkout-discount-card">
@@ -186,6 +346,7 @@ export function CheckoutForm({
 
           <div className="checkout-discount-input-row">
             <input
+              autoComplete="off"
               className="control-input"
               onChange={(event) => {
                 setDiscountCode(event.target.value.toUpperCase());
@@ -196,7 +357,7 @@ export function CheckoutForm({
               type="text"
               value={discountCode}
             />
-            <button className="button" disabled={discountPending || !discountCode.trim()} onClick={applyDiscount} type="button">
+            <button className="button button-secondary" disabled={discountPending || !discountCode.trim()} onClick={applyDiscount} type="button">
               {discountPending ? "Applying..." : "Apply"}
             </button>
           </div>
@@ -206,7 +367,7 @@ export function CheckoutForm({
               <span className="table-subtle">Package price</span>
               <strong>
                 {discountSummary?.formattedOriginalAmount ??
-                  formatPackageAmount(selectedPlanPriceAmount, selectedPlanCurrency, selectedPlanBillingPeriod)}
+                  formatPackageAmount(selectedPlanPriceAmount, selectedPlanCurrency, selectedBillingPeriod)}
               </strong>
             </div>
             <div>
@@ -217,7 +378,7 @@ export function CheckoutForm({
               <span className="table-subtle">You pay</span>
               <strong>
                 {discountSummary?.formattedFinalAmount ??
-                  formatPackageAmount(selectedPlanPriceAmount, selectedPlanCurrency, selectedPlanBillingPeriod)}
+                  formatPackageAmount(selectedPlanPriceAmount, selectedPlanCurrency, selectedBillingPeriod)}
               </strong>
             </div>
           </div>
@@ -240,6 +401,17 @@ export function CheckoutForm({
       </button>
     </form>
   );
+
+  function clearBillingError(field: keyof BillingDetailsErrors) {
+    setBillingErrors((current) => {
+      if (!current[field]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[field];
+      return next;
+    });
+  }
 }
 
 function formatPackageAmount(
@@ -258,4 +430,16 @@ function formatPackageAmount(
   const currencyPrefix = currency === "MYR" || !currency ? "RM" : `${currency} `;
   const periodSuffix = billingPeriod === "YEARLY" ? "/yr" : billingPeriod === "MONTHLY" ? "/mo" : "";
   return `${currencyPrefix}${formattedAmount}${periodSuffix}`;
+}
+
+function formatDiscountLabel(percentage: number | null, amountOff: number | null, currency: string | null) {
+  if (amountOff !== null) {
+    return formatPackageAmount(amountOff, currency, null);
+  }
+
+  if (percentage !== null) {
+    return `${percentage}%`;
+  }
+
+  return "";
 }

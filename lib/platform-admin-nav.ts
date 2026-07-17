@@ -22,6 +22,13 @@ export function getPlatformAdminNavItems() {
       status: "live" as const
     },
     {
+      key: "transactions",
+      title: "Transactions",
+      description: "Review payments, invoices, receipts, and gateway transaction records.",
+      href: "/platform/transactions",
+      status: "live" as const
+    },
+    {
       key: "whatsapp",
       title: "WhatsApp ops",
       description: "Connection health, import stability, worker state, and live traffic proof across workspaces.",
@@ -29,15 +36,16 @@ export function getPlatformAdminNavItems() {
       status: "live" as const
     },
     {
-      key: "branding",
-      title: "Brand & identity",
-      description: "Shared logos, signatures, and outbound brand defaults.",
-      status: "planned" as const
-    },
-    {
       key: "security",
       title: "Security",
       description: "Platform-level admin access, audit controls, and hardening.",
+      href: "/platform/security",
+      status: "live" as const
+    },
+    {
+      key: "branding",
+      title: "Brand & identity",
+      description: "Shared logos, signatures, and outbound brand defaults.",
       status: "planned" as const
     },
     {

@@ -2,6 +2,7 @@
 .gitignore
 .next
 node_modules
+node_modules.broken-*
 npm-debug.log
 .env
 .env.local
@@ -9,5 +10,16 @@ npm-debug.log
 .env.test.local
 .env.production.local
 .wwebjs_auth
+public/uploads
+public/uploads/**
+public/whatsapp-media
+public/whatsapp-media/**
+public/whatsapp-profile
+public/whatsapp-profile/**
+.agents
+.codex
+*.tsbuildinfo
+core
+core.*
 prisma/*.db
 prisma/*.db-*

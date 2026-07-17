@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import {
   AssignIcon,
+  MuteIcon,
   MoreIcon,
   SnoozeIcon,
   StatusIcon,
@@ -14,7 +15,9 @@ import type { InboxAgent, InboxCurrentAgent, InboxSelectedConversation } from "@
 type ConversationActionBarProps = {
   agents: InboxAgent[];
   currentAgent: InboxCurrentAgent;
+  isMuteSupported: boolean;
   onAddTag: (tag?: string) => void;
+  onSetMute: (duration: "8h" | "1w" | "always" | null) => void;
   onSnoozeConversation: () => void;
   onTakeOverConversation: () => void;
   onUpdateConversation: (updates: {
@@ -22,6 +25,7 @@ type ConversationActionBarProps = {
     assigneeId?: string | null;
     teammateIds?: string[];
     snoozedUntil?: string | null;
+    snoozeReason?: string | null;
   }) => void;
   selectedConversation: NonNullable<InboxSelectedConversation>;
 };
@@ -36,17 +40,20 @@ const STATUS_OPTIONS = [
 export function ConversationActionBar({
   agents,
   currentAgent,
+  isMuteSupported,
   onAddTag,
+  onSetMute,
   onSnoozeConversation,
   onTakeOverConversation,
   onUpdateConversation,
   selectedConversation
 }: ConversationActionBarProps) {
   const assignButtonRef = useRef<HTMLButtonElement | null>(null);
+  const muteButtonRef = useRef<HTMLButtonElement | null>(null);
   const statusButtonRef = useRef<HTMLButtonElement | null>(null);
   const tagButtonRef = useRef<HTMLButtonElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [openMenu, setOpenMenu] = useState<"assign" | "more" | "status" | "tag" | null>(null);
+  const [openMenu, setOpenMenu] = useState<"assign" | "more" | "mute" | "status" | "tag" | null>(null);
   const canTakeOverConversation = Boolean(selectedConversation.assigneeId && selectedConversation.assigneeId !== currentAgent.id);
 
   return (
@@ -88,8 +95,21 @@ export function ConversationActionBar({
       >
         <SnoozeIcon />
         <span>Reminder</span>
-        <strong>{selectedConversation.snoozedUntil ? "Active" : "Set"}</strong>
+        <strong>{selectedConversation.isSnoozed ? "Active" : "Set"}</strong>
       </button>
+
+      {isMuteSupported ? (
+        <button
+          className="inbox-action-button"
+          onClick={() => setOpenMenu((current) => (current === "mute" ? null : "mute"))}
+          ref={muteButtonRef}
+          type="button"
+        >
+          <MuteIcon />
+          <span>Mute</span>
+          <strong>{selectedConversation.isMuted ? "On" : "Off"}</strong>
+        </button>
+      ) : null}
 
       <button
         className="inbox-action-button"
@@ -207,6 +227,64 @@ export function ConversationActionBar({
 
       <PortalDropdown
         align="start"
+        anchorRef={muteButtonRef}
+        className="inbox-portal-menu"
+        matchTriggerWidth
+        onClose={() => setOpenMenu(null)}
+        open={openMenu === "mute"}
+      >
+        <div className="inbox-menu-panel">
+          <div className="inbox-menu-panel-head">
+            <strong>{selectedConversation.isMuted ? "Mute settings" : "Mute conversation"}</strong>
+            <span>Personal WhatsApp only. Syncs back into the inbox in realtime.</span>
+          </div>
+          <button
+            className="inbox-menu-item"
+            onClick={() => {
+              onSetMute("8h");
+              setOpenMenu(null);
+            }}
+            type="button"
+          >
+            <span>Mute for 8 hours</span>
+          </button>
+          <button
+            className="inbox-menu-item"
+            onClick={() => {
+              onSetMute("1w");
+              setOpenMenu(null);
+            }}
+            type="button"
+          >
+            <span>Mute for 1 week</span>
+          </button>
+          <button
+            className="inbox-menu-item"
+            onClick={() => {
+              onSetMute("always");
+              setOpenMenu(null);
+            }}
+            type="button"
+          >
+            <span>Mute always</span>
+          </button>
+          {selectedConversation.isMuted ? (
+            <button
+              className="inbox-menu-item"
+              onClick={() => {
+                onSetMute(null);
+                setOpenMenu(null);
+              }}
+              type="button"
+            >
+              <span>Unmute conversation</span>
+            </button>
+          ) : null}
+        </div>
+      </PortalDropdown>
+
+      <PortalDropdown
+        align="start"
         anchorRef={tagButtonRef}
         className="inbox-portal-menu"
         onClose={() => setOpenMenu(null)}
@@ -263,18 +341,18 @@ export function ConversationActionBar({
             }}
             type="button"
           >
-            <span>{selectedConversation.snoozedUntil ? "Edit snooze reminder" : "Set snooze reminder"}</span>
+            <span>{selectedConversation.isSnoozed ? "Edit snooze reminder" : "Set snooze reminder"}</span>
           </button>
-          {selectedConversation.snoozedUntil ? (
+          {selectedConversation.isSnoozed ? (
             <button
               className="inbox-menu-item"
               onClick={() => {
-                onUpdateConversation({ snoozedUntil: null });
+                onUpdateConversation({ snoozedUntil: null, snoozeReason: null });
                 setOpenMenu(null);
               }}
               type="button"
             >
-              <span>Clear snooze reminder</span>
+              <span>Unsnooze conversation</span>
             </button>
           ) : null}
         </div>

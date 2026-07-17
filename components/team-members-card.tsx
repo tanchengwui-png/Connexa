@@ -137,7 +137,7 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
   };
 
   return (
-    <section className="content-card">
+    <section className="content-card team-members-card">
       <div className="card-header">
         <div>
           <h3 className="card-title">Workspace members</h3>

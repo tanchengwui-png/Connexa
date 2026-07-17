@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiPlatformAdmin } from "@/lib/platform-auth/current-user";
 import {
+  activatePlatformDiscount,
   createPlatformDiscount,
   getPlatformDiscountAdminView,
   removePlatformDiscount,
@@ -23,13 +24,15 @@ export async function POST(request: NextRequest) {
     await requireApiPlatformAdmin();
     const body = (await request.json()) as {
       code?: string;
-      percentage?: number;
+      percentage?: number | null;
+      amountOff?: number | null;
       expiresOn?: string | null;
     };
 
     await createPlatformDiscount({
       code: String(body.code ?? ""),
-      percentage: Number(body.percentage ?? 0),
+      percentage: body.percentage ?? null,
+      amountOff: body.amountOff ?? null,
       expiresOn: body.expiresOn ?? null
     });
 
@@ -46,7 +49,8 @@ export async function PUT(request: NextRequest) {
     const body = (await request.json()) as {
       id?: string;
       code?: string;
-      percentage?: number;
+      percentage?: number | null;
+      amountOff?: number | null;
       expiresOn?: string | null;
     };
 
@@ -57,7 +61,8 @@ export async function PUT(request: NextRequest) {
 
     await updatePlatformDiscount(id, {
       code: String(body.code ?? ""),
-      percentage: Number(body.percentage ?? 0),
+      percentage: body.percentage ?? null,
+      amountOff: body.amountOff ?? null,
       expiresOn: body.expiresOn ?? null
     });
 
@@ -83,7 +88,27 @@ export async function DELETE(request: NextRequest) {
     await removePlatformDiscount(id);
     return NextResponse.json({ ok: true, discounts: await getPlatformDiscountAdminView() });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Unable to delete discount code.";
+    const message = error instanceof Error ? error.message : "Unable to set discount code inactive.";
+    return NextResponse.json({ error: message === "UNAUTHORIZED" ? "Unauthorized." : message }, { status: message === "UNAUTHORIZED" ? 401 : 400 });
+  }
+}
+
+export async function PATCH(request: NextRequest) {
+  try {
+    await requireApiPlatformAdmin();
+    const body = (await request.json()) as {
+      id?: string;
+    };
+
+    const id = String(body.id ?? "");
+    if (!id) {
+      throw new Error("Discount code id is required.");
+    }
+
+    await activatePlatformDiscount(id);
+    return NextResponse.json({ ok: true, discounts: await getPlatformDiscountAdminView() });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to activate discount code.";
     return NextResponse.json({ error: message === "UNAUTHORIZED" ? "Unauthorized." : message }, { status: message === "UNAUTHORIZED" ? 401 : 400 });
   }
 }
