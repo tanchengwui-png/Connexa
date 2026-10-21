@@ -1,6 +1,10 @@
 import { randomBytes } from "node:crypto";
 import { sanitizeSensitiveText } from "@/lib/crypto";
 import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
+import {
+  getWhatsAppCloudFeatureFlags,
+  isWhatsAppCloudEnabledForWorkspace
+} from "@/lib/whatsapp-cloud/feature-flags";
 
 const DEFAULT_META_GRAPH_VERSION = "v23.0";
 
@@ -14,6 +18,8 @@ type MetaPhoneNumberNode = {
   verified_name?: string;
   code_verification_status?: string;
   quality_rating?: string;
+  is_on_biz_app?: boolean;
+  platform_type?: string;
 };
 
 type MetaWabaNode = {
@@ -37,20 +43,9 @@ export type MetaEmbeddedSignupPhoneNumber = {
   verifiedName: string | null;
   codeVerificationStatus: string | null;
   qualityRating: string | null;
+  isOnBizApp: boolean | null;
+  platformType: string | null;
 };
-
-type MetaEmbeddedSignupSetupSession = {
-  accessToken: string;
-  tokenExpiresAt: Date | null;
-  phoneNumbers: MetaEmbeddedSignupPhoneNumber[];
-  createdAt: number;
-};
-
-declare global {
-  var metaEmbeddedSignupSessions: Map<string, MetaEmbeddedSignupSetupSession> | undefined;
-}
-
-const META_EMBEDDED_SIGNUP_SESSION_TTL_MS = 15 * 60 * 1000;
 
 export function getMetaGraphVersion() {
   return (
@@ -60,13 +55,19 @@ export function getMetaGraphVersion() {
   );
 }
 
-export async function getMetaEmbeddedSignupConfig() {
+export async function getMetaEmbeddedSignupConfig(workspaceId?: string) {
   const resolvedConfig = await getResolvedPlatformMetaConfig();
   const appId = resolvedConfig.appId.trim();
   const configId = resolvedConfig.configId.trim();
+  const flags = getWhatsAppCloudFeatureFlags();
 
   return {
-    enabled: Boolean(appId && configId),
+    enabled: Boolean(
+      (workspaceId ? isWhatsAppCloudEnabledForWorkspace(workspaceId, flags) : flags.cloudEnabled) &&
+      appId &&
+      configId
+    ),
+    coexistenceEnabled: Boolean(flags.cloudEnabled && flags.coexistenceEnabled),
     appId,
     configId,
     graphVersion: resolvedConfig.graphVersion.trim() || getMetaGraphVersion()
@@ -154,7 +155,9 @@ function listPhoneNumbersFromBusinesses(businesses: MetaBusinessNode[]) {
           displayPhoneNumber: `${phone.display_phone_number ?? ""}`.trim() || null,
           verifiedName: `${phone.verified_name ?? ""}`.trim() || null,
           codeVerificationStatus: `${phone.code_verification_status ?? ""}`.trim() || null,
-          qualityRating: `${phone.quality_rating ?? ""}`.trim() || null
+          qualityRating: `${phone.quality_rating ?? ""}`.trim() || null,
+          isOnBizApp: typeof phone.is_on_biz_app === "boolean" ? phone.is_on_biz_app : null,
+          platformType: `${phone.platform_type ?? ""}`.trim() || null
         });
       }
     }
@@ -276,7 +279,7 @@ export async function fetchMetaEmbeddedSignupPhoneNumbers(accessToken: string) {
   const resolvedConfig = await getResolvedPlatformMetaConfig();
   const graphVersion = resolvedConfig.graphVersion.trim() || getMetaGraphVersion();
   const fields =
-    "id,name,owned_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name,code_verification_status,quality_rating}},client_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name,code_verification_status,quality_rating}}";
+    "id,name,owned_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name,code_verification_status,quality_rating,is_on_biz_app,platform_type}},client_whatsapp_business_accounts{id,name,phone_numbers{id,display_phone_number,verified_name,code_verification_status,quality_rating,is_on_biz_app,platform_type}}";
 
   const mePayload = await metaGraphGet<{
     businesses?: MetaGraphEnvelope<MetaBusinessNode>;
@@ -305,53 +308,6 @@ export async function fetchMetaEmbeddedSignupPhoneNumbers(accessToken: string) {
   }
 
   return businessPhoneNumbers;
-}
-
-function getMetaEmbeddedSignupSessionStore() {
-  if (!global.metaEmbeddedSignupSessions) {
-    global.metaEmbeddedSignupSessions = new Map<string, MetaEmbeddedSignupSetupSession>();
-  }
-
-  const now = Date.now();
-  for (const [setupId, session] of global.metaEmbeddedSignupSessions.entries()) {
-    if (now - session.createdAt > META_EMBEDDED_SIGNUP_SESSION_TTL_MS) {
-      global.metaEmbeddedSignupSessions.delete(setupId);
-    }
-  }
-
-  return global.metaEmbeddedSignupSessions;
-}
-
-export function createMetaEmbeddedSignupSetupSession(input: {
-  accessToken: string;
-  tokenExpiresAt: Date | null;
-  phoneNumbers: MetaEmbeddedSignupPhoneNumber[];
-}) {
-  const setupId = randomBytes(18).toString("hex");
-  getMetaEmbeddedSignupSessionStore().set(setupId, {
-    accessToken: input.accessToken,
-    tokenExpiresAt: input.tokenExpiresAt,
-    phoneNumbers: input.phoneNumbers,
-    createdAt: Date.now()
-  });
-  return setupId;
-}
-
-export function consumeMetaEmbeddedSignupSetupSession(setupId: string) {
-  const normalizedSetupId = setupId.trim();
-  if (!normalizedSetupId) {
-    return null;
-  }
-
-  const store = getMetaEmbeddedSignupSessionStore();
-  const session = store.get(normalizedSetupId) ?? null;
-  if (!session || Date.now() - session.createdAt > META_EMBEDDED_SIGNUP_SESSION_TTL_MS) {
-    store.delete(normalizedSetupId);
-    return null;
-  }
-
-  store.delete(normalizedSetupId);
-  return session;
 }
 
 export async function getMetaWebhookVerifyToken() {

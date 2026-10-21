@@ -56,6 +56,12 @@ model Workspace {
   contactImports ContactImport[]
   inboxNewConversationRequests InboxNewConversationRequest[]
   rememberSessions RememberSession[]
+  metaOnboardingAttempts MetaOnboardingAttempt[]
+  metaWebhookEvents MetaWebhookEvent[]
+  whatsAppCoexistenceSyncJobs WhatsAppCoexistenceSyncJob[]
+  whatsAppUsageLedger WhatsAppUsageLedger[]
+  usageCreditReservations UsageCreditReservation[]
+  tenantFundingAccount TenantFundingAccount?
 }
 
 model Account {
@@ -1226,8 +1232,16 @@ model WhatsAppChannel {
   workspaceId           String
   provider              String?
   channelType           String?
-  phoneNumberId         String?  @unique
+  phoneNumberId         String?
   businessAccountId     String?
+  metaBusinessPortfolioId String?
+  legacyWabaId          String?
+  waacId                String?
+  messagingAccountId    String?
+  integrationIdentity   String?
+  serviceRoutingPartnerId String?
+  accountModelVersion   String?
+  onboardingMode        String?
   accessTokenCiphertext String?
   appSecretCiphertext   String?
   verifyTokenHash       String?  @unique
@@ -1248,6 +1262,8 @@ model WhatsAppChannel {
   disconnectedAt        DateTime?
   lastSeenAt            DateTime?
   lastWebhookAt         DateTime?
+  latestHealthCheckAt   DateTime?
+  lastErrorCode         String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   workspace             Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
@@ -1258,10 +1274,171 @@ model WhatsAppChannel {
   whatsAppMessageEnvelopes WhatsAppMessageEnvelope[]
   messageUsageLogs      MessageUsageLog[]
   inboxNewConversationRequests InboxNewConversationRequest[]
+  metaOnboardingAttempts MetaOnboardingAttempt[]
+  metaWebhookEvents MetaWebhookEvent[]
+  coexistenceSyncJobs WhatsAppCoexistenceSyncJob[]
+  usageLedger WhatsAppUsageLedger[]
+  usageCreditReservations UsageCreditReservation[]
 
   @@index([workspaceId, createdAt])
   @@index([workspaceId, connectionStatus, updatedAt])
   @@index([connectionStatus])
+  @@index([provider, integrationIdentity, messagingAccountId, phoneNumberId])
+  @@index([workspaceId, waacId, messagingAccountId])
+}
+
+// Cloud API state is deliberately separate from whatsapp-web.js session state.
+// Every record is tenant scoped and all live Cloud behavior remains feature-flagged.
+model MetaOnboardingAttempt {
+  id                      String          @id @default(cuid())
+  workspaceId             String
+  channelId               String
+  initiatedByAgentId      String
+  stateHash               String          @unique
+  configId                String
+  mode                    String
+  status                  String          @default("PENDING")
+  authorizationCiphertext String?
+  returnedAssetsJson      String?
+  failureCode             String?
+  expiresAt               DateTime
+  consumedAt              DateTime?
+  cancelledAt             DateTime?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  workspace               Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel                 WhatsAppChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, channelId, status])
+  @@index([expiresAt, status])
+}
+
+model MetaWebhookEvent {
+  id                  String          @id @default(cuid())
+  workspaceId         String
+  channelId           String
+  provider            String
+  integrationIdentity String
+  waacId              String?
+  messagingAccountId  String?
+  phoneNumberId       String?
+  idempotencyKey      String
+  eventType           String
+  payloadDigest       String
+  providerOccurredAt  DateTime?
+  receivedAt          DateTime        @default(now())
+  processingStatus    String          @default("RECEIVED")
+  processedAt         DateTime?
+  lastErrorCode       String?
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  workspace           Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel             WhatsAppChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, integrationIdentity, idempotencyKey])
+  @@index([workspaceId, processingStatus, receivedAt])
+  @@index([channelId, providerOccurredAt])
+}
+
+model WhatsAppCoexistenceSyncJob {
+  id                 String          @id @default(cuid())
+  workspaceId        String
+  channelId          String
+  syncType           String
+  requestId          String?
+  explicitConsentAt  DateTime
+  consentedByAgentId String
+  status             String          @default("PENDING")
+  expiresAt          DateTime
+  progressJson       String?
+  lastErrorCode      String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  workspace          Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel            WhatsAppChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, channelId, status])
+  @@index([expiresAt, status])
+}
+
+model TenantFundingAccount {
+  id                            String                   @id @default(cuid())
+  workspaceId                   String                   @unique
+  billingRoute                  String                   @default("unconfigured")
+  providerIdentity              String?
+  verified                      Boolean                  @default(false)
+  allocationReferenceCiphertext String?
+  billingCurrency               String                   @default("MYR")
+  prepaidBalance                Decimal                  @default(0) @db.Decimal(18, 6)
+  monthlyCap                    Decimal?                 @db.Decimal(18, 6)
+  spentThisPeriod               Decimal                  @default(0) @db.Decimal(18, 6)
+  periodStartedAt               DateTime?
+  gracePolicy                   String                   @default("BLOCK_OUTBOUND")
+  verifiedAt                    DateTime?
+  verifiedByAdminId             String?
+  createdAt                     DateTime                 @default(now())
+  updatedAt                     DateTime                 @updatedAt
+  workspace                     Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  reservations                  UsageCreditReservation[]
+
+  @@index([billingRoute, verified])
+}
+
+model UsageCreditReservation {
+  id               String               @id @default(cuid())
+  workspaceId      String
+  channelId        String
+  fundingAccountId String
+  idempotencyKey   String
+  currency         String
+  estimatedAmount  Decimal              @db.Decimal(18, 6)
+  settledAmount    Decimal?             @db.Decimal(18, 6)
+  status           String               @default("RESERVED")
+  expiresAt        DateTime
+  settledAt        DateTime?
+  releasedAt       DateTime?
+  createdAt        DateTime             @default(now())
+  updatedAt        DateTime             @updatedAt
+  workspace        Workspace            @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel          WhatsAppChannel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  fundingAccount   TenantFundingAccount @relation(fields: [fundingAccountId], references: [id], onDelete: Restrict)
+
+  @@unique([workspaceId, idempotencyKey])
+  @@index([fundingAccountId, status, expiresAt])
+  @@index([channelId, createdAt])
+}
+
+model WhatsAppUsageLedger {
+  id                   String          @id @default(cuid())
+  workspaceId          String
+  channelId            String
+  reservationId        String?
+  messageId            String?
+  providerReference    String?
+  direction            String
+  category             String
+  destinationMarket    String?
+  currency             String
+  rateCardVersion      String
+  rateEffectiveAt      DateTime
+  estimatedCost        Decimal         @default(0) @db.Decimal(18, 6)
+  finalCost            Decimal?        @db.Decimal(18, 6)
+  reconciliationStatus String          @default("ESTIMATED")
+  deliveryResult       String?
+  billingPeriodKey     String
+  occurredAt           DateTime        @default(now())
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  workspace            Workspace       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  channel              WhatsAppChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, providerReference, category, billingPeriodKey])
+  @@index([workspaceId, billingPeriodKey, category])
+  @@index([channelId, occurredAt])
+  @@index([reservationId])
+  @@index([reconciliationStatus, occurredAt])
 }
 
 model InboxNewConversationRequest {

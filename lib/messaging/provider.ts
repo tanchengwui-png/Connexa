@@ -32,6 +32,7 @@ type OutboundMessagePayload = {
     languageCode?: string | null;
     components?: WhatsAppTemplateComponent[] | null;
   } | null;
+  usageReservationId?: string | null;
 };
 
 export type OutboundMessageResult = {
@@ -54,7 +55,8 @@ class WebJsWhatsAppProvider implements MessagingProvider {
         name: payload.template.name,
         languageCode: payload.template.languageCode ?? undefined,
         components: payload.template.components ?? undefined,
-        body: payload.body
+        body: payload.body,
+        usageReservationId: payload.usageReservationId
       });
     }
 
@@ -74,7 +76,8 @@ class WebJsWhatsAppProvider implements MessagingProvider {
       attachmentName: payload.attachmentName,
       sendAudioAsVoice: payload.sendAudioAsVoice,
       quotedProviderMessageId: payload.quotedProviderMessageId,
-      mentions: payload.mentions
+      mentions: payload.mentions,
+      usageReservationId: payload.usageReservationId
     });
   }
 }

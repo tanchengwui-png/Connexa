@@ -1,14 +1,19 @@
 import { createHash } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
-import { decryptSecret } from "@/lib/crypto";
 import { getMetaWebhookVerifyToken } from "@/lib/meta-whatsapp";
+import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
 import { prisma } from "@/lib/prisma";
 import { persistWhatsAppMessageAck } from "@/lib/whatsapp-ack";
 import {
   getWebhookPhoneNumberId,
-  ingestWhatsAppClientMessage,
-  isValidWhatsappSignature
+  ingestWhatsAppClientMessage
 } from "@/lib/whatsapp";
+import { assertWhatsAppCloudEnabled } from "@/lib/whatsapp-cloud/feature-flags";
+import {
+  buildMetaWebhookIdempotencyKey,
+  sha256 as sha256Payload,
+  verifyMetaWebhookSignature
+} from "@/lib/whatsapp-cloud/security";
 import { normalizeCloudMessage } from "@/services/messageNormalizer.js";
 
 function sha256(value: string) {
@@ -37,20 +42,35 @@ async function isDefaultMetaWebhookVerifyToken(verifyToken: string) {
   return Boolean(defaultVerifyToken && defaultVerifyToken === verifyToken.trim());
 }
 
-async function findChannelByPhoneNumberId(phoneNumberId: string) {
-  if (!phoneNumberId.trim()) {
+async function findChannelByVerifiedContext(input: {
+  phoneNumberId: string;
+  messagingAccountId: string;
+  integrationIdentity: string;
+}) {
+  if (!input.phoneNumberId.trim() || !input.integrationIdentity.trim()) {
     return null;
   }
 
   const channel = await prisma.whatsAppChannel.findFirst({
     where: {
-      phoneNumberId: phoneNumberId.trim()
+      phoneNumberId: input.phoneNumberId.trim(),
+      provider: "meta_direct",
+      integrationIdentity: input.integrationIdentity.trim(),
+      OR: input.messagingAccountId.trim()
+        ? [
+            { messagingAccountId: input.messagingAccountId.trim() },
+            { legacyWabaId: input.messagingAccountId.trim() },
+            { businessAccountId: input.messagingAccountId.trim() }
+          ]
+        : undefined
     },
     select: {
       id: true,
       workspaceId: true,
       phoneNumberId: true,
-      appSecretCiphertext: true
+      integrationIdentity: true,
+      messagingAccountId: true,
+      waacId: true
     }
   });
 
@@ -58,10 +78,65 @@ async function findChannelByPhoneNumberId(phoneNumberId: string) {
     return null;
   }
 
-  return {
-    ...channel,
-    appSecret: channel.appSecretCiphertext ? decryptSecret(channel.appSecretCiphertext) : null
+  return channel;
+}
+
+function getMessagingAccountId(payload: Record<string, unknown>) {
+  for (const entry of Array.isArray(payload.entry) ? payload.entry : []) {
+    if (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string") {
+      return ((entry as { id: string }).id ?? "").trim();
+    }
+  }
+  return "";
+}
+
+async function reserveWebhookEvent(input: {
+  channel: {
+    id: string;
+    workspaceId: string;
+    integrationIdentity: string | null;
+    messagingAccountId: string | null;
+    waacId: string | null;
+    phoneNumberId: string | null;
   };
+  eventType: string;
+  providerEventId: string;
+  occurredAt: Date | null;
+  payloadDigest: string;
+}) {
+  const integrationIdentity = input.channel.integrationIdentity ?? "";
+  const idempotencyKey = buildMetaWebhookIdempotencyKey({
+    integrationIdentity,
+    providerEventId: input.providerEventId,
+    eventType: input.eventType,
+    occurredAt: input.occurredAt?.toISOString() ?? null,
+    payloadDigest: input.payloadDigest
+  });
+  try {
+    const event = await prisma.metaWebhookEvent.create({
+      data: {
+        workspaceId: input.channel.workspaceId,
+        channelId: input.channel.id,
+        provider: "meta_direct",
+        integrationIdentity,
+        waacId: input.channel.waacId,
+        messagingAccountId: input.channel.messagingAccountId,
+        phoneNumberId: input.channel.phoneNumberId,
+        idempotencyKey,
+        eventType: input.eventType,
+        payloadDigest: input.payloadDigest,
+        providerOccurredAt: input.occurredAt,
+        processingStatus: "PROCESSING"
+      },
+      select: { id: true }
+    });
+    return event.id;
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "P2002") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function buildPersistableCloudMessages(payload: Record<string, unknown>) {
@@ -80,6 +155,13 @@ function buildPersistableCloudMessages(payload: Record<string, unknown>) {
 
     for (const change of Array.isArray((entry as { changes?: unknown[] }).changes) ? (entry as { changes?: unknown[] }).changes! : []) {
       if (!change || typeof change !== "object") {
+        continue;
+      }
+
+      const field = typeof (change as { field?: unknown }).field === "string"
+        ? (change as { field: string }).field.trim()
+        : "";
+      if (["history", "smb_app_state_sync", "smb_message_echoes"].includes(field)) {
         continue;
       }
 
@@ -159,9 +241,31 @@ function buildPersistableCloudMessages(payload: Record<string, unknown>) {
   return persistedMessages;
 }
 
+function buildCoexistenceControlEvents(payload: Record<string, unknown>) {
+  const events: Array<{ eventType: string; providerEventId: string }> = [];
+  for (const entry of Array.isArray(payload.entry) ? payload.entry : []) {
+    if (!entry || typeof entry !== "object") continue;
+    const entryId = typeof (entry as { id?: unknown }).id === "string" ? (entry as { id: string }).id : "unknown";
+    const changes = Array.isArray((entry as { changes?: unknown[] }).changes)
+      ? (entry as { changes: unknown[] }).changes
+      : [];
+    changes.forEach((change, index) => {
+      if (!change || typeof change !== "object") return;
+      const field = typeof (change as { field?: unknown }).field === "string"
+        ? (change as { field: string }).field.trim()
+        : "";
+      if (["history", "smb_app_state_sync", "smb_message_echoes"].includes(field)) {
+        events.push({ eventType: field, providerEventId: `${entryId}:${field}:${index}` });
+      }
+    });
+  }
+  return events;
+}
+
 function buildCloudStatusUpdates(payload: Record<string, unknown>) {
   const updates: Array<{
     providerMessageId: string;
+    rawProviderMessageId: string;
     status: string;
     timestamp: Date | null;
   }> = [];
@@ -201,6 +305,7 @@ function buildCloudStatusUpdates(payload: Record<string, unknown>) {
 
         updates.push({
           providerMessageId: `cloud:${rawProviderMessageId}`,
+          rawProviderMessageId,
           status: normalizedStatus,
           timestamp: Number.isFinite(timestampValue) ? new Date(timestampValue * 1000) : null
         });
@@ -267,25 +372,40 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   try {
     const rawBody = await request.text();
+    const platformConfig = await getResolvedPlatformMetaConfig();
+    const integrationIdentity = platformConfig.appId.trim();
+    const appSecret = platformConfig.appSecret.trim();
+    if (!integrationIdentity || !appSecret) {
+      return NextResponse.json({ error: "Meta webhook verification is not configured." }, { status: 503 });
+    }
+    const signature = request.headers.get("x-hub-signature-256");
+    if (!verifyMetaWebhookSignature({ appSecret, rawBody, signatureHeader: signature })) {
+      return NextResponse.json({ error: "Invalid webhook signature." }, { status: 401 });
+    }
+
     const payload = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
     const phoneNumberId = getWebhookPhoneNumberId(payload);
+    const messagingAccountId = getMessagingAccountId(payload);
 
     if (!phoneNumberId?.trim()) {
       return NextResponse.json({ error: "Missing phone_number_id in webhook payload." }, { status: 400 });
     }
 
-    const channel = await findChannelByPhoneNumberId(phoneNumberId);
+    const channel = await findChannelByVerifiedContext({
+      phoneNumberId,
+      messagingAccountId,
+      integrationIdentity
+    });
     if (!channel) {
       return NextResponse.json({ error: "No WhatsApp Cloud channel found for phone_number_id." }, { status: 404 });
     }
 
-    const signature = request.headers.get("x-hub-signature-256");
-    if (channel.appSecret && !isValidWhatsappSignature(rawBody, signature, channel.appSecret)) {
-      return NextResponse.json({ error: "Invalid webhook signature." }, { status: 401 });
-    }
+    assertWhatsAppCloudEnabled(channel.workspaceId);
 
     const messages = buildPersistableCloudMessages(payload);
     const statusUpdates = buildCloudStatusUpdates(payload);
+    const coexistenceControlEvents = buildCoexistenceControlEvents(payload);
+    const payloadDigest = sha256Payload(rawBody);
     const persistedEvents: Array<{
       channel: "cloud";
       workspaceId: string;
@@ -298,6 +418,16 @@ export async function POST(request: NextRequest) {
     }> = [];
 
     for (const message of messages) {
+      const webhookEventId = await reserveWebhookEvent({
+        channel,
+        eventType: "message",
+        providerEventId: message.rawProviderMessageId,
+        occurredAt: message.normalized.timestamp,
+        payloadDigest
+      });
+      if (!webhookEventId) {
+        continue;
+      }
       try {
         const from = message.normalized.from;
         if (!from) {
@@ -326,18 +456,65 @@ export async function POST(request: NextRequest) {
           message: message.normalized.message,
           timestamp: message.normalized.timestamp.toISOString()
         });
+        await prisma.metaWebhookEvent.update({
+          where: { id: webhookEventId },
+          data: { processingStatus: "PROCESSED", processedAt: new Date() }
+        });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : "Unknown ingest error.";
         if (errorMessage === "This inbound message has already been processed.") {
+          await prisma.metaWebhookEvent.update({
+            where: { id: webhookEventId },
+            data: { processingStatus: "PROCESSED", processedAt: new Date() }
+          });
           continue;
         }
+
+        await prisma.metaWebhookEvent.update({
+          where: { id: webhookEventId },
+          data: { processingStatus: "FAILED", lastErrorCode: "INBOUND_INGEST_FAILED" }
+        }).catch(() => null);
 
         throw error;
       }
     }
 
-    if (statusUpdates.length) {
-      await applyCloudStatusUpdates(channel.id, statusUpdates);
+    for (const update of statusUpdates) {
+      const webhookEventId = await reserveWebhookEvent({
+        channel,
+        eventType: `status:${update.status}`,
+        providerEventId: update.rawProviderMessageId,
+        occurredAt: update.timestamp,
+        payloadDigest
+      });
+      if (!webhookEventId) {
+        continue;
+      }
+      await applyCloudStatusUpdates(channel.id, [update]);
+      await prisma.metaWebhookEvent.update({
+        where: { id: webhookEventId },
+        data: { processingStatus: "PROCESSED", processedAt: new Date() }
+      });
+    }
+
+    for (const controlEvent of coexistenceControlEvents) {
+      const webhookEventId = await reserveWebhookEvent({
+        channel,
+        eventType: controlEvent.eventType,
+        providerEventId: controlEvent.providerEventId,
+        occurredAt: null,
+        payloadDigest
+      });
+      if (!webhookEventId) continue;
+      const isEcho = controlEvent.eventType === "smb_message_echoes";
+      await prisma.metaWebhookEvent.update({
+        where: { id: webhookEventId },
+        data: {
+          processingStatus: isEcho ? "PROCESSED" : "DEFERRED",
+          processedAt: isEcho ? new Date() : null,
+          lastErrorCode: isEcho ? "AUTOMATION_SUPPRESSED" : "ASYNC_SYNC_PROCESSOR_NOT_ENABLED"
+        }
+      });
     }
 
     await prisma.whatsAppChannel.update({
@@ -354,7 +531,8 @@ export async function POST(request: NextRequest) {
       {
         ok: true,
         normalized: persistedEvents,
-        statusUpdatesApplied: statusUpdates.length
+        statusUpdatesApplied: statusUpdates.length,
+        coexistenceEventsRecorded: coexistenceControlEvents.length
       },
       { status: 200 }
     );

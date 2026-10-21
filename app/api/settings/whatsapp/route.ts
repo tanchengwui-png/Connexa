@@ -16,6 +16,8 @@ import {
   syncWorkspaceHistory
 } from "@/lib/whatsapp-runtime";
 import { logWhatsAppRuntimeEvent } from "@/lib/whatsapp-runtime-events";
+import { assertWhatsAppCloudEnabled } from "@/lib/whatsapp-cloud/feature-flags";
+import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
 
 function getChannelIdFromRequest(request: NextRequest) {
   return request.nextUrl.searchParams.get("channelId")?.trim() || null;
@@ -111,17 +113,25 @@ export async function POST(request: NextRequest) {
     }
 
     if (body?.action === "save-cloud") {
+      assertWhatsAppCloudEnabled(manager.workspaceId);
+      const metaConfig = await getResolvedPlatformMetaConfig();
       const channel = await saveWhatsAppCloudCredentials({
         workspaceId: manager.workspaceId,
         channelId: requiredChannelId,
         phoneNumberId: body?.phoneNumberId ?? "",
         businessAccountId: body?.businessAccountId ?? null,
+        legacyWabaId: body?.businessAccountId ?? null,
+        messagingAccountId: body?.businessAccountId ?? null,
+        integrationIdentity: metaConfig.appId,
         accessToken: body?.accessToken ?? "",
+        appSecret: metaConfig.appSecret,
         verifyToken: body?.webhookVerifyToken ?? null,
         displayName: sanitizeWhatsAppChannelDisplayName(body?.connectionName),
         phoneNumber: body?.phoneNumber ?? null,
-        provider: "meta",
-        channelType: "cloudapi"
+        provider: "meta_direct",
+        channelType: "cloud_api",
+        onboardingMode: "standard",
+        accountModelVersion: "legacy_compatible"
       });
       await logWhatsAppRuntimeEvent({
         workspaceId: manager.workspaceId,
@@ -130,8 +140,8 @@ export async function POST(request: NextRequest) {
         message: "WhatsApp Cloud credentials saved manually.",
         metadata: {
           channelId: channel.id,
-          provider: "meta",
-          channelType: "cloudapi",
+          provider: "meta_direct",
+          channelType: "cloud_api",
           phoneNumberId: channel.phoneNumberId,
           businessAccountId: channel.businessAccountId
         }

@@ -47,6 +47,10 @@ function getMetaGraphVersionFromEnv() {
   return process.env.META_GRAPH_API_VERSION ?? process.env.META_GRAPH_VERSION ?? "v23.0";
 }
 
+function getMetaConfigIdFromEnv() {
+  return process.env.META_EMBEDDED_SIGNUP_CONFIG_ID ?? process.env.META_CONFIG_ID ?? "";
+}
+
 function getMetaWebhookVerifyTokenFromEnv() {
   return process.env.META_VERIFY_TOKEN ?? process.env.META_WEBHOOK_VERIFY_TOKEN ?? "";
 }
@@ -76,7 +80,7 @@ export async function getPlatformConfigForAdmin() {
     billplzCollectionId: config?.billplzCollectionId ?? process.env.BILLPLZ_COLLECTION_ID ?? "",
     billplzSandbox: config?.billplzSandbox ?? process.env.BILLPLZ_SANDBOX === "true",
     metaAppId: config?.metaAppId ?? process.env.META_APP_ID ?? "",
-    metaConfigId: config?.metaConfigId ?? process.env.META_CONFIG_ID ?? "",
+    metaConfigId: config?.metaConfigId ?? getMetaConfigIdFromEnv(),
     metaGraphVersion: config?.metaGraphVersion ?? getMetaGraphVersionFromEnv(),
     metaRedirectUri: config?.metaRedirectUri ?? process.env.META_REDIRECT_URI ?? "",
     metaAppSecretConfigured: Boolean(config?.metaAppSecret ?? process.env.META_APP_SECRET),
@@ -84,7 +88,7 @@ export async function getPlatformConfigForAdmin() {
     metaEmbeddedSignupConfigured: Boolean(
       (config?.metaAppId ?? process.env.META_APP_ID) &&
         (config?.metaAppSecret ?? process.env.META_APP_SECRET) &&
-        (config?.metaConfigId ?? process.env.META_CONFIG_ID) &&
+        (config?.metaConfigId ?? getMetaConfigIdFromEnv()) &&
         (config?.metaRedirectUri ?? process.env.META_REDIRECT_URI) &&
         (config?.metaWebhookVerifyToken ?? getMetaWebhookVerifyTokenFromEnv())
     ),
@@ -205,7 +209,7 @@ export async function getResolvedPlatformMetaConfig() {
   return {
     appId: config?.metaAppId ?? process.env.META_APP_ID ?? "",
     appSecret: config?.metaAppSecret ?? process.env.META_APP_SECRET ?? "",
-    configId: config?.metaConfigId ?? process.env.META_CONFIG_ID ?? "",
+    configId: config?.metaConfigId ?? getMetaConfigIdFromEnv(),
     graphVersion: config?.metaGraphVersion ?? getMetaGraphVersionFromEnv(),
     redirectUri: config?.metaRedirectUri ?? process.env.META_REDIRECT_URI ?? "",
     webhookVerifyToken: config?.metaWebhookVerifyToken ?? getMetaWebhookVerifyTokenFromEnv()

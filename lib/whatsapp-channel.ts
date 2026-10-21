@@ -846,6 +846,14 @@ export async function saveWhatsAppCloudCredentials(input: {
   provider?: string | null;
   channelType?: string | null;
   tokenExpiresAt?: Date | null;
+  onboardingMode?: "standard" | "coexistence";
+  metaBusinessPortfolioId?: string | null;
+  legacyWabaId?: string | null;
+  waacId?: string | null;
+  messagingAccountId?: string | null;
+  integrationIdentity?: string | null;
+  serviceRoutingPartnerId?: string | null;
+  accountModelVersion?: string | null;
 }) {
   const existing = await prisma.whatsAppChannel.findFirst({
     where: {
@@ -887,6 +895,14 @@ export async function saveWhatsAppCloudCredentials(input: {
       channelType: input.channelType?.trim() || "cloudapi",
       phoneNumberId: normalizedPhoneNumberId,
       businessAccountId: input.businessAccountId?.trim() || null,
+      metaBusinessPortfolioId: input.metaBusinessPortfolioId?.trim() || null,
+      legacyWabaId: input.legacyWabaId?.trim() || input.businessAccountId?.trim() || null,
+      waacId: input.waacId?.trim() || null,
+      messagingAccountId: input.messagingAccountId?.trim() || input.businessAccountId?.trim() || null,
+      integrationIdentity: input.integrationIdentity?.trim() || "meta_direct",
+      serviceRoutingPartnerId: input.serviceRoutingPartnerId?.trim() || null,
+      accountModelVersion: input.accountModelVersion?.trim() || "legacy_compatible",
+      onboardingMode: input.onboardingMode ?? "standard",
       accessTokenCiphertext: encryptSecret(normalizedAccessToken),
       accessTokenLastFour: normalizedAccessToken.slice(-4) || null,
       appSecretCiphertext: normalizedAppSecret ? encryptSecret(normalizedAppSecret) : null,
@@ -895,10 +911,12 @@ export async function saveWhatsAppCloudCredentials(input: {
       verifyTokenLastFour: normalizedVerifyToken ? normalizedVerifyToken.slice(-4) : null,
       displayName: sanitizeWhatsAppChannelDisplayName(input.displayName) ?? undefined,
       phoneNumber: input.phoneNumber?.trim() || undefined,
-      connectionStatus: "CONNECTED",
-      connectedAt: new Date(),
+      connectionStatus: "AWAITING_FUNDING",
+      connectedAt: null,
       disconnectedAt: null,
       tokenExpiresAt: input.tokenExpiresAt ?? null,
+      latestHealthCheckAt: null,
+      lastErrorCode: "FUNDING_NOT_VERIFIED",
       lastSeenAt: new Date()
     } as any
   });

@@ -1,5 +1,6 @@
 import axios from "axios";
 import { maskSecret, sanitizeSensitiveText } from "@/lib/crypto";
+import { assertAuthorizedCloudSend, recordCloudSendAccepted } from "@/lib/whatsapp-cloud/billing";
 
 const GRAPH_API_URL = `https://graph.facebook.com/${
   process.env.META_GRAPH_API_VERSION?.trim() || process.env.META_GRAPH_VERSION?.trim() || "v23.0"
@@ -290,15 +291,25 @@ function formatCloudError(error) {
   );
 }
 
-async function postCloudMessage(account, payload) {
+async function postCloudMessage(account, payload, reservationId) {
   try {
+    await assertAuthorizedCloudSend({
+      workspaceId: account.workspaceId,
+      channelId: account.id,
+      reservationId
+    });
     const client = createCloudClient(account);
     const response = await client.post("", {
       messaging_product: "whatsapp",
       ...payload
     });
 
-    return extractProviderMessageId(response.data);
+    const result = extractProviderMessageId(response.data);
+    await recordCloudSendAccepted({
+      reservationId,
+      providerMessageId: result.providerMessageId
+    });
+    return result;
   } catch (error) {
     throw new Error(
       `${formatCloudError(error)} [channel=${account.id ?? "unknown"} token=${maskSecret(
@@ -338,7 +349,7 @@ export async function sendMedia(input, account) {
     payload.document.filename = input.attachmentName.trim();
   }
 
-  return postCloudMessage(account, payload);
+  return postCloudMessage(account, payload, input.usageReservationId);
 }
 
 export async function sendMessage(input, account) {
@@ -382,7 +393,7 @@ export async function sendMessage(input, account) {
     };
   }
 
-  return postCloudMessage(account, payload);
+  return postCloudMessage(account, payload, input.usageReservationId);
 }
 
 export async function sendTemplate(input, account) {
@@ -408,7 +419,7 @@ export async function sendTemplate(input, account) {
     payload.template.components = components;
   }
 
-  return postCloudMessage(account, payload);
+  return postCloudMessage(account, payload, input.usageReservationId);
 }
 
 export async function broadcast(input, account) {

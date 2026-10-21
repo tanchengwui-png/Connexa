@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireApiManager } from "@/lib/auth/current-user";
+import { assertWhatsAppCloudEnabled } from "@/lib/whatsapp-cloud/feature-flags";
 import { decryptSecret, sanitizeSensitiveText } from "@/lib/crypto";
 import { testMetaPhoneNumberConnection } from "@/lib/meta-whatsapp";
 import { prisma } from "@/lib/prisma";
@@ -8,6 +9,7 @@ import { logWhatsAppRuntimeEvent } from "@/lib/whatsapp-runtime-events";
 export async function POST(request: NextRequest) {
   try {
     const manager = await requireApiManager();
+    assertWhatsAppCloudEnabled(manager.workspaceId);
     const body = (await request.json().catch(() => null)) as
       | {
           channelId?: string;

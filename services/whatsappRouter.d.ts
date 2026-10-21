@@ -68,6 +68,7 @@ export type WhatsAppSendMessageInput = {
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
   sendAudioAsVoice?: boolean;
+  usageReservationId?: string | null;
 };
 
 export type WhatsAppSendTemplateInput = {
@@ -82,6 +83,7 @@ export type WhatsAppSendTemplateInput = {
   variables?: Array<string | number | boolean | WhatsAppTemplateComponentParameter> | null;
   bodyVariables?: Array<string | number | boolean | WhatsAppTemplateComponentParameter> | null;
   components?: WhatsAppTemplateComponent[] | null;
+  usageReservationId?: string | null;
 };
 
 export type WhatsAppSendResult = {

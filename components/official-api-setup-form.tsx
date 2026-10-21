@@ -37,6 +37,7 @@ type OfficialApiSetupFormProps = {
   };
   metaEmbeddedSignup?: {
     enabled: boolean;
+    coexistenceEnabled?: boolean;
     appId: string;
     configId: string;
     graphVersion: string;
@@ -53,6 +54,8 @@ type EmbeddedSignupPhoneNumber = {
   verifiedName: string | null;
   codeVerificationStatus: string | null;
   qualityRating: string | null;
+  isOnBizApp: boolean | null;
+  platformType: string | null;
 };
 
 export function OfficialApiSetupForm({
@@ -73,6 +76,8 @@ export function OfficialApiSetupForm({
   const [selectedEmbeddedPhoneNumberId, setSelectedEmbeddedPhoneNumberId] = useState("");
   const [twoStepPin, setTwoStepPin] = useState("");
   const [isFinalizingEmbeddedSignup, setIsFinalizingEmbeddedSignup] = useState(false);
+  const [onboardingMode, setOnboardingMode] = useState<"standard" | "coexistence">("standard");
+  const [registrationConsent, setRegistrationConsent] = useState(false);
   const preferredInitialConnectionName =
     getPreferredWhatsAppChannelLabel({
       displayName: initialValues?.displayName,
@@ -90,13 +95,15 @@ export function OfficialApiSetupForm({
   const [feedback, setFeedback] = useState<string | null>(null);
   const [feedbackTone, setFeedbackTone] = useState<"success" | "error">("success");
   const [hasServerManagedConnection, setHasServerManagedConnection] = useState(Boolean(initialValues?.accessTokenLastFour));
+  const [connectionPhase, setConnectionPhase] = useState(initialValues?.connectionStatus ?? "DISCONNECTED");
 
   const isComplete = Object.values(values).every((value) => value.trim().length > 0);
   const hasSavedAccessToken = Boolean(initialValues?.accessTokenLastFour);
   const hasSavedVerifyToken = Boolean(initialValues?.verifyTokenLastFour);
   const isConnected =
-    (initialValues?.connectionStatus === "CONNECTED" && Boolean(initialValues?.phoneNumberId)) ||
-    Boolean(values.phoneNumberId && values.businessAccountId && hasServerManagedConnection);
+    (["ACTIVE", "CONNECTED"].includes(connectionPhase) && Boolean(initialValues?.phoneNumberId)) ||
+    (connectionPhase === "ACTIVE" && Boolean(values.phoneNumberId && values.businessAccountId && hasServerManagedConnection));
+  const isAwaitingFunding = connectionPhase === "AWAITING_FUNDING";
   const facebookButtonDisabled = isEmbeddedSignupPending;
   const facebookButtonLabel = isEmbeddedSignupPending
     ? "Connecting..."
@@ -107,7 +114,7 @@ export function OfficialApiSetupForm({
   const embeddedSignupStep = isConnected
     ? 4
     : embeddedSetupId
-      ? selectedEmbeddedPhoneNumberId && /^\d{6}$/.test(twoStepPin.trim())
+      ? selectedEmbeddedPhoneNumberId && (onboardingMode === "coexistence" || /^\d{6}$/.test(twoStepPin.trim()))
         ? 3
         : selectedEmbeddedPhoneNumberId
           ? 3
@@ -168,6 +175,7 @@ export function OfficialApiSetupForm({
     phoneNumber?: string | null;
     phoneNumberId?: string | null;
     businessAccountId?: string | null;
+    connectionStatus?: string | null;
   }) {
     setValues((current) => ({
       ...current,
@@ -183,6 +191,9 @@ export function OfficialApiSetupForm({
       accessToken: "",
       webhookVerifyToken: ""
     }));
+    if (channel.connectionStatus) {
+      setConnectionPhase(channel.connectionStatus);
+    }
   }
 
   function handleTestConnection() {
@@ -254,7 +265,16 @@ export function OfficialApiSetupForm({
         })
       });
 
-      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      const payload = (await response.json().catch(() => null)) as {
+        error?: string;
+        channel?: {
+          displayName?: string | null;
+          phoneNumber?: string | null;
+          phoneNumberId?: string | null;
+          businessAccountId?: string | null;
+          connectionStatus?: string | null;
+        };
+      } | null;
 
       if (!response.ok) {
         setFeedbackTone("error");
@@ -265,16 +285,17 @@ export function OfficialApiSetupForm({
       setFeedbackTone("success");
       setFeedback("WhatsApp Cloud credentials saved. Meta webhook traffic can use /api/webhooks/meta/whatsapp.");
       setHasServerManagedConnection(true);
-      applyConnectedChannel({
+      applyConnectedChannel(payload?.channel ?? {
         displayName: values.connectionName,
         phoneNumber: values.phoneNumber,
         phoneNumberId: values.phoneNumberId,
-        businessAccountId: values.businessAccountId
+        businessAccountId: values.businessAccountId,
+        connectionStatus: "AWAITING_FUNDING"
       });
     });
   }
 
-  function handleEmbeddedSignup() {
+  async function handleEmbeddedSignup() {
     if (!metaEmbeddedSignup?.enabled) {
       setFeedbackTone("error");
       setFeedback("Meta Embedded Signup is not configured yet.");
@@ -287,8 +308,29 @@ export function OfficialApiSetupForm({
       return;
     }
 
+    if (onboardingMode === "coexistence" && !metaEmbeddedSignup.coexistenceEnabled) {
+      setFeedbackTone("error");
+      setFeedback("Business App Coexistence is not enabled for this workspace.");
+      return;
+    }
+
     setFeedback(null);
     setIsEmbeddedSignupPending(true);
+    const startResponse = await fetch("/api/integrations/meta/embedded-signup/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channelId, mode: onboardingMode })
+    }).catch(() => null);
+    const startPayload = startResponse
+      ? ((await startResponse.json().catch(() => null)) as { state?: string; error?: string } | null)
+      : null;
+    if (!startResponse?.ok || !startPayload?.state) {
+      setFeedbackTone("error");
+      setFeedback(startPayload?.error ?? "Unable to start a secure Meta signup session.");
+      setIsEmbeddedSignupPending(false);
+      return;
+    }
+    const onboardingState = startPayload.state;
     window.FB.login(
       (response) => {
         const code = response.authResponse?.code?.trim() || "";
@@ -306,6 +348,7 @@ export function OfficialApiSetupForm({
           },
           body: JSON.stringify({
             code,
+            state: onboardingState,
             workspaceId,
             channelId,
             connectionName: values.connectionName
@@ -315,29 +358,32 @@ export function OfficialApiSetupForm({
             const payload = (await signupResponse.json().catch(() => null)) as
               | {
                   error?: string;
-                  setupId?: string;
+                  attemptId?: string;
+                  mode?: "standard" | "coexistence";
                   phoneNumbers?: EmbeddedSignupPhoneNumber[];
                   channel?: {
                     displayName?: string | null;
                     phoneNumber?: string | null;
                     phoneNumberId?: string | null;
                     businessAccountId?: string | null;
+                    connectionStatus?: string | null;
                   };
                 }
               | null;
 
-            if (!signupResponse.ok || !payload?.setupId || !payload?.phoneNumbers?.length) {
+            if (!signupResponse.ok || !payload?.attemptId || !payload?.phoneNumbers?.length) {
               setFeedbackTone("error");
               setFeedback(payload?.error ?? "Unable to finish Meta Embedded Signup.");
               return;
             }
 
-            setEmbeddedSetupId(payload.setupId);
+            setEmbeddedSetupId(payload.attemptId);
+            setOnboardingMode(payload.mode ?? onboardingMode);
             setEmbeddedPhoneNumbers(payload.phoneNumbers);
             setSelectedEmbeddedPhoneNumberId(payload.phoneNumbers[0]?.phoneNumberId ?? "");
             setTwoStepPin("");
             setFeedbackTone("success");
-            setFeedback("Facebook connected. Choose the WhatsApp phone number to activate for this channel.");
+            setFeedback("Meta authorization completed. Choose the verified WhatsApp phone number for this channel.");
           })
           .catch(() => {
             setFeedbackTone("error");
@@ -359,9 +405,17 @@ export function OfficialApiSetupForm({
   }
 
   function handleFinalizeEmbeddedSignup() {
-    if (!embeddedSetupId || !selectedEmbeddedPhoneNumberId || !/^\d{6}$/.test(twoStepPin.trim())) {
+    if (
+      !embeddedSetupId ||
+      !selectedEmbeddedPhoneNumberId ||
+      (onboardingMode === "standard" && (!/^\d{6}$/.test(twoStepPin.trim()) || !registrationConsent))
+    ) {
       setFeedbackTone("error");
-      setFeedback("Choose a phone number and enter a valid 6-digit PIN before completing setup.");
+      setFeedback(
+        onboardingMode === "coexistence"
+          ? "Choose a Meta-verified Business App Coexistence number."
+          : "Choose a number, enter its 6-digit PIN, and confirm API-only registration."
+      );
       return;
     }
 
@@ -373,11 +427,12 @@ export function OfficialApiSetupForm({
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        setupId: embeddedSetupId,
+        attemptId: embeddedSetupId,
         workspaceId,
         channelId,
         phoneNumberId: selectedEmbeddedPhoneNumberId,
         pin: twoStepPin,
+        confirmRegistration: onboardingMode === "standard" ? registrationConsent : false,
         connectionName: values.connectionName
       })
     })
@@ -390,6 +445,7 @@ export function OfficialApiSetupForm({
                 phoneNumber?: string | null;
                 phoneNumberId?: string | null;
                 businessAccountId?: string | null;
+                connectionStatus?: string | null;
               };
             }
           | null;
@@ -406,9 +462,10 @@ export function OfficialApiSetupForm({
         setEmbeddedPhoneNumbers([]);
         setSelectedEmbeddedPhoneNumberId("");
         setTwoStepPin("");
+        setRegistrationConsent(false);
         setFeedbackTone("success");
         setFeedback(
-          `Connected ${payload.channel.phoneNumber || payload.channel.displayName || payload.channel.phoneNumberId || "your Meta WhatsApp sender"} through Facebook.`
+          `${payload.channel.phoneNumber || payload.channel.displayName || payload.channel.phoneNumberId || "Your Meta WhatsApp sender"} is authorized. Outbound messaging remains blocked until funding is verified.`
         );
       })
       .catch(() => {
@@ -429,6 +486,33 @@ export function OfficialApiSetupForm({
             <h2>Connect WhatsApp Business API</h2>
             <p>Use Facebook login to authorize the selected channel and let Connexa save the Cloud API sender automatically.</p>
           </div>
+        </div>
+
+        <div className="wa-form-grid">
+          <label className="control-block">
+            <span className="control-label">Onboarding path</span>
+            <select
+              className="control-select"
+              disabled={Boolean(embeddedSetupId) || isEmbeddedSignupPending}
+              onChange={(event) => {
+                const nextMode = event.target.value === "coexistence" ? "coexistence" : "standard";
+                setOnboardingMode(nextMode);
+                setRegistrationConsent(false);
+                setTwoStepPin("");
+              }}
+              value={onboardingMode}
+            >
+              <option value="standard">New or API-only number</option>
+              {metaEmbeddedSignup?.coexistenceEnabled ? (
+                <option value="coexistence">Keep using WhatsApp Business app (Coexistence)</option>
+              ) : null}
+            </select>
+            <span className="wa-field-helper">
+              {onboardingMode === "coexistence"
+                ? "Meta hosts the eligibility and QR confirmation flow. Connexa will not register, deregister, or migrate the number."
+                : "Use only for a number you intend to register for the Cloud API. This is not the linked-device QR flow."}
+            </span>
+          </label>
         </div>
 
         <div className="wa-facebook-connect-panel">
@@ -490,8 +574,8 @@ export function OfficialApiSetupForm({
           <div className={`wa-cloud-setup-step${embeddedSignupStep >= 3 ? " active" : ""}`}>
             <span>3</span>
             <div>
-              <strong>Enter two-step verification PIN</strong>
-              {embeddedSetupId ? (
+              <strong>{onboardingMode === "coexistence" ? "Confirm Meta eligibility" : "Enter two-step verification PIN"}</strong>
+              {embeddedSetupId && onboardingMode === "standard" ? (
                 <input
                   className="control-input"
                   inputMode="numeric"
@@ -501,9 +585,23 @@ export function OfficialApiSetupForm({
                   type="password"
                   value={twoStepPin}
                 />
+              ) : onboardingMode === "coexistence" ? (
+                <p>
+                  The selected number must be marked by Meta as active in the WhatsApp Business app. Connexa does not generate or scan this QR.
+                </p>
               ) : (
                 <p>Waiting for Step 1 to be completed.</p>
               )}
+              {embeddedSetupId && onboardingMode === "standard" ? (
+                <label className="checkbox-row">
+                  <input
+                    checked={registrationConsent}
+                    onChange={(event) => setRegistrationConsent(event.target.checked)}
+                    type="checkbox"
+                  />
+                  <span>I authorize registration of this API-only number and understand this is not Business App Coexistence.</span>
+                </label>
+              ) : null}
             </div>
           </div>
 
@@ -521,7 +619,12 @@ export function OfficialApiSetupForm({
             </div>
             <button
               className="button button-primary"
-              disabled={!embeddedSetupId || !selectedEmbeddedPhoneNumberId || !/^\d{6}$/.test(twoStepPin.trim()) || isFinalizingEmbeddedSignup}
+              disabled={
+                !embeddedSetupId ||
+                !selectedEmbeddedPhoneNumberId ||
+                (onboardingMode === "standard" && (!/^\d{6}$/.test(twoStepPin.trim()) || !registrationConsent)) ||
+                isFinalizingEmbeddedSignup
+              }
               onClick={handleFinalizeEmbeddedSignup}
               type="button"
             >
@@ -547,8 +650,18 @@ export function OfficialApiSetupForm({
                 {values.businessAccountId ? ` · Business account ${values.businessAccountId}` : ""}
               </p>
             </div>
-            <span className="wa-cloud-status-pill">Connected</span>
+            <span className="wa-cloud-status-pill">
+              {isAwaitingFunding ? "Awaiting funding" : isConnected ? "Active" : "Authorization saved"}
+            </span>
           </div>
+        ) : null}
+
+        {isAwaitingFunding ? (
+          <HelpNotice title="Outbound messaging is blocked" tone="accent">
+            Meta authorization is stored, but Connexa will not send until an authorized funding route,
+            paid subscription, current pricing context, and spend reservation are verified. Inbound webhook
+            verification can continue during this review.
+          </HelpNotice>
         ) : null}
 
         <div className="wa-manual-setup-shell">

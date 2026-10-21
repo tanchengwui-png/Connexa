@@ -14,6 +14,7 @@ import { WebQrSetupPanel } from "@/components/web-qr-setup-panel";
 type WhatsAppConnectionOnboardingProps = {
   metaEmbeddedSignup?: {
     enabled: boolean;
+    coexistenceEnabled?: boolean;
     appId: string;
     configId: string;
     graphVersion: string;
@@ -538,7 +539,7 @@ export function WhatsAppConnectionOnboarding({
                 />
                 <ConnectionMethodCard
                   badge={connectionOptions.api.badge}
-                  disabled={isSavingMethod}
+                  disabled={isSavingMethod || !metaEmbeddedSignup?.enabled}
                   description={connectionOptions.api.description}
                   isSelected={pendingMethod === "api"}
                   onSelect={() => void handleConnectionMethodChange("api")}
@@ -588,7 +589,7 @@ export function WhatsAppConnectionOnboarding({
                     />
                     <ConnectionMethodCard
                       badge={connectionOptions.api.badge}
-                      disabled={isSavingMethod}
+                      disabled={isSavingMethod || !metaEmbeddedSignup?.enabled}
                       description={connectionOptions.api.description}
                       isSelected={pendingMethod === "api"}
                       onSelect={() => void handleConnectionMethodChange("api")}
@@ -626,7 +627,7 @@ export function WhatsAppConnectionOnboarding({
                 </article>
               )}
 
-              {method === "api" ? (
+              {method === "api" && metaEmbeddedSignup?.enabled ? (
                 <>
                 {shouldShowChannelSelector ? (
                   <article className="content-card settings-dark-panel wa-onboarding-followup-card">

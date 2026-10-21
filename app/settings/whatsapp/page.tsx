@@ -43,7 +43,7 @@ export default async function WhatsAppSetupPage({ searchParams }: WhatsAppSetupP
     fallbackChannel: selectedChannel
   });
   const channel = health.channel as WorkspaceWhatsAppChannelStatus | null;
-  const embeddedSignup = await getMetaEmbeddedSignupConfig();
+  const embeddedSignup = await getMetaEmbeddedSignupConfig(manager.workspaceId);
 
   return (
     <DashboardShell currentPath="/settings">
