@@ -1,0 +1,3 @@
+connexa-stg.recurvos.com {
+    reverse_proxy web:3000
+}

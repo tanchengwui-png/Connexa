@@ -1,0 +1,10 @@
+services:
+  sender:
+    image: connexa-stg-sender:candidate-wa-linking-matched-20261029
+    environment:
+      WHATSAPP_WEB_EXECUTABLE_PATH: /opt/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome
+
+  web:
+    image: connexa-stg-web:candidate-wa-linking-matched-20261029
+    environment:
+      WHATSAPP_WEB_EXECUTABLE_PATH: /opt/puppeteer/chrome/linux-146.0.7680.31/chrome-linux64/chrome

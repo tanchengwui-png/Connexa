@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "minimumCompletedSamples": 10,
+  "isolatedMinimumHost": {
+    "cpuCount": 4,
+    "memoryBytes": 7516192768,
+    "availableMemoryBytes": 4294967296,
+    "maximumSwapUsedBytes": 268435456
+  },
+  "variants": {
+    "A": {
+      "description": "Current sender baseline: Chromium 156 and whatsapp-web.js default user-agent",
+      "browserMajor": 156,
+      "userAgentMode": "library-default",
+      "dedicatedSender": false,
+      "minimumMemoryBytes": 3758096384,
+      "maximumSwapUsedBytes": 3221225472
+    },
+    "B": {
+      "description": "Dedicated capacity: Chromium 156 and the same default user-agent",
+      "browserMajor": 156,
+      "userAgentMode": "library-default",
+      "dedicatedSender": true
+    },
+    "C": {
+      "description": "Browser compatibility: Puppeteer-supported Chrome 146 and default user-agent",
+      "browserMajor": 146,
+      "userAgentMode": "library-default",
+      "dedicatedSender": true
+    },
+    "D": {
+      "description": "User-agent compatibility: best validated browser and an aligned user-agent",
+      "browserMajor": 146,
+      "userAgentMode": "aligned",
+      "dedicatedSender": true
+    }
+  },
+  "requiredReliabilityChecks": [
+    "qr_refresh",
+    "text_outbound",
+    "text_inbound",
+    "media_outbound",
+    "media_inbound",
+    "ack_progression",
+    "live_listeners",
+    "reconnect",
+    "session_restore"
+  ],
+  "forbiddenAccountLabels": ["pohmy", "joey", "pohh"]
+}

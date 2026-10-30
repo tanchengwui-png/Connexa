@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "runId": "replace-with-run-id",
+  "variants": {
+    "A": [],
+    "B": [],
+    "C": [],
+    "D": []
+  },
+  "sampleShape": {
+    "attemptId": "opaque-attempt-id",
+    "completed": true,
+    "failure": null,
+    "qrVisibleMs": 0,
+    "authenticatedToReadyMs": 0,
+    "stages": {
+      "chromiumLaunchMs": 0,
+      "navigationMs": 0,
+      "debugModuleMs": 0,
+      "authStoreMs": 0,
+      "webSocketWaitMs": 0,
+      "qrBindingMs": 0,
+      "qrGenerationMs": 0,
+      "helpersMs": 0,
+      "accountMetadataMs": 0,
+      "listenersMs": 0
+    },
+    "resources": {
+      "cpuUserMs": 0,
+      "cpuSystemMs": 0,
+      "peakRssBytes": 0,
+      "swapInPages": 0,
+      "swapOutPages": 0,
+      "majorPageFaults": 0,
+      "minorPageFaults": 0,
+      "browserLongTaskMs": 0,
+      "scriptTransferBytes": 0,
+      "scriptCacheHitCount": 0,
+      "scriptCount": 0
+    },
+    "reliability": {
+      "qr_refresh": "pending",
+      "text_outbound": "pending",
+      "text_inbound": "pending",
+      "media_outbound": "pending",
+      "media_inbound": "pending",
+      "ack_progression": "pending",
+      "live_listeners": "pending",
+      "reconnect": "pending",
+      "session_restore": "pending"
+    }
+  }
+}

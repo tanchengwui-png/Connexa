@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "runId": "replace-with-unique-run-id",
+  "expiresAt": "2099-01-01T00:00:00.000Z",
+  "approvedBy": "replace-with-approver",
+  "operator": "replace-with-phone-operator",
+  "operatorAvailable": false,
+  "explicitlyAuthorized": false,
+  "disposableAccount": false,
+  "customerSession": true,
+  "target": {
+    "accountLabel": "replace-with-disposable-label",
+    "workspaceId": "replace-at-run-time",
+    "channelId": "replace-at-run-time",
+    "primaryPhoneE164": "replace-at-run-time"
+  },
+  "messagingPeer": {
+    "authorized": false,
+    "phoneE164": "replace-at-run-time"
+  },
+  "approvedVariants": [],
+  "approvedFreshPairingAttempts": 0
+}
