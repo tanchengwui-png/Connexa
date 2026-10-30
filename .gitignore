@@ -1,3 +1,22 @@
+# Private environment
+.env
+.env.*
+!.env.example
+
+# Runtime data
+data/wwebjs_auth/
+public/uploads/
+backups/
+
+# Generated files
+node_modules/
+.next/
+*.log
+*.dump
+*.tar.gz
+
+# Local storage reports
+connexa-old-storage.txt
 .next
 node_modules
 dist
