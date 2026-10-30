@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_BILLING_COUNTRY,
   getBillingDetailsErrorMessage,
@@ -8,6 +8,7 @@ import {
   type BillingDetailsErrors,
   validateBillingDetails
 } from "@/lib/billing-details";
+import { findFirstInvalidFormControl } from "@/components/register-form";
 
 export function CheckoutForm({
   selectedPlan,
@@ -24,6 +25,9 @@ export function CheckoutForm({
 }) {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [confirmationWorkspaceName, setConfirmationWorkspaceName] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
   const [billingErrors, setBillingErrors] = useState<BillingDetailsErrors>({});
   const [discountCode, setDiscountCode] = useState("");
   const [discountPending, setDiscountPending] = useState(false);
@@ -39,15 +43,90 @@ export function CheckoutForm({
     formattedDiscountAmount: string;
     formattedFinalAmount: string;
   } | null>(null);
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const canApplyDiscount = selectedPlanPriceAmount !== null;
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPending(true);
-    setError(null);
+  useEffect(() => {
+    if (!confirmationOpen) {
+      return;
+    }
 
-    const formData = new FormData(event.currentTarget);
+    cancelButtonRef.current?.focus();
+  }, [confirmationOpen]);
+
+  useEffect(() => {
+    if (!confirmationOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!isCreating) {
+          event.preventDefault();
+          closeConfirmation();
+        }
+        return;
+      }
+
+      if (event.key !== "Tab" || !dialogRef.current) {
+        return;
+      }
+
+      const focusableElements = getDialogFocusableElements(dialogRef.current);
+      if (!focusableElements.length) {
+        event.preventDefault();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+        return;
+      }
+
+      if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [confirmationOpen, isCreating]);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(null);
+    const form = event.currentTarget;
+    const firstInvalidControl = findFirstInvalidFormControl(form);
+
+    if (firstInvalidControl) {
+      firstInvalidControl.scrollIntoView({
+        behavior: "smooth",
+        block: "center"
+      });
+      firstInvalidControl.focus();
+      firstInvalidControl.reportValidity();
+      return;
+    }
+
+    const formData = new FormData(form);
+    if (!validateCheckoutDetails(formData)) {
+      return;
+    }
+
+    setConfirmationWorkspaceName(String(formData.get("workspace_name") ?? "").trim() || "this workspace");
+    setConfirmationOpen(true);
+  }
+
+  function validateCheckoutDetails(formData: FormData) {
     const password = String(formData.get("password") ?? "");
     const confirmPassword = String(formData.get("confirm_password") ?? "");
     const billingDetails = normalizeBillingDetails({
@@ -67,15 +146,31 @@ export function CheckoutForm({
 
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
-      setPending(false);
-      return;
+      return false;
     }
 
-    if (getBillingDetailsErrorMessage(nextBillingErrors)) {
-      setError(getBillingDetailsErrorMessage(nextBillingErrors));
-      setPending(false);
-      return;
+    const billingError = getBillingDetailsErrorMessage(nextBillingErrors);
+    if (billingError) {
+      setError(billingError);
+      return false;
     }
+
+    return true;
+  }
+
+  async function submitCheckout(formData: FormData) {
+    const password = String(formData.get("password") ?? "");
+    const billingDetails = normalizeBillingDetails({
+      billingName: formData.get("billing_name"),
+      billingPhoneNumber: formData.get("billing_phone_number"),
+      billingAddressLine1: formData.get("billing_address_line_1"),
+      billingAddressLine2: formData.get("billing_address_line_2"),
+      billingCity: formData.get("billing_city"),
+      billingState: formData.get("billing_state"),
+      billingPostcode: formData.get("billing_postcode"),
+      billingCountry: formData.get("billing_country"),
+      billingTaxId: formData.get("billing_tax_id")
+    });
 
     const response = await fetch("/api/public/checkout", {
       method: "POST",
@@ -98,13 +193,46 @@ export function CheckoutForm({
     const data = (await response.json()) as { error?: string; paymentUrl?: string };
 
     if (!response.ok || !data.paymentUrl) {
-      setError(data.error ?? "Unable to start payment.");
-      setPending(false);
-      return;
+      throw new Error(data.error ?? "Unable to start payment.");
     }
 
     setBillingErrors({});
     window.location.href = data.paymentUrl;
+  }
+
+  async function confirmCheckout() {
+    if (isCreating) return;
+    const form = formRef.current;
+    if (!form) return;
+
+    try {
+      setIsCreating(true);
+      setPending(true);
+      setError(null);
+      await submitCheckout(new FormData(form));
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Unable to start payment.");
+      setConfirmationOpen(false);
+      submitButtonRef.current?.focus();
+    } finally {
+      setIsCreating(false);
+      setPending(false);
+    }
+  }
+
+  function closeConfirmation() {
+    if (isCreating) {
+      return;
+    }
+
+    setConfirmationOpen(false);
+    submitButtonRef.current?.focus();
+  }
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Enter") {
+      event.stopPropagation();
+    }
   }
 
   async function applyDiscount() {
@@ -169,7 +297,7 @@ export function CheckoutForm({
   }
 
   return (
-    <form autoComplete="off" className="auth-form" onSubmit={handleSubmit}>
+    <form autoComplete="off" className="auth-form" onSubmit={handleSubmit} ref={formRef}>
       <input name="plan" type="hidden" value={selectedPlan} />
       <input name="billing_period" type="hidden" value={selectedBillingPeriod.toLowerCase()} />
 
@@ -180,12 +308,12 @@ export function CheckoutForm({
 
       <label className="control-block">
         <span className="control-label">Your name</span>
-        <input autoComplete="off" className="control-input" name="name" placeholder="Farid Rahman" type="text" />
+        <input autoComplete="off" className="control-input" name="name" placeholder="Farid Rahman" required type="text" />
       </label>
 
       <label className="control-block">
         <span className="control-label">Work email</span>
-        <input autoComplete="off" className="control-input" name="email" placeholder="you@company.com" type="email" />
+        <input autoComplete="off" className="control-input" name="email" placeholder="you@company.com" required type="email" />
       </label>
 
       <label className="control-block">
@@ -195,6 +323,7 @@ export function CheckoutForm({
           className="control-input"
           name="workspace_name"
           placeholder="Serene Peak Realty"
+          required
           type="text"
         />
       </label>
@@ -206,6 +335,7 @@ export function CheckoutForm({
           className="control-input"
           name="password"
           placeholder="Create a password"
+          required
           type="password"
         />
       </label>
@@ -217,6 +347,7 @@ export function CheckoutForm({
           className="control-input"
           name="confirm_password"
           placeholder="Repeat your password"
+          required
           type="password"
         />
       </label>
@@ -396,9 +527,59 @@ export function CheckoutForm({
 
       {error ? <p className="muted">{error}</p> : null}
 
-      <button className="button button-primary auth-submit" disabled={pending} type="submit">
-        {pending ? "Preparing payment..." : "Continue to payment"}
+      <button className="button button-primary auth-submit" disabled={pending} ref={submitButtonRef} type="submit">
+        {pending ? "Preparing payment…" : "Continue to payment"}
       </button>
+
+      {confirmationOpen ? (
+        <div className="payment-confirmation-overlay" onClick={closeConfirmation}>
+          <div
+            aria-labelledby="checkout-confirmation-title"
+            aria-modal="true"
+            className="payment-confirmation-dialog"
+            onClick={(event) => event.stopPropagation()}
+            onKeyDown={handleDialogKeyDown}
+            ref={dialogRef}
+            role="dialog"
+          >
+            <div className="payment-confirmation-header">
+              <h2 id="checkout-confirmation-title">Continue to payment?</h2>
+              <button
+                aria-label="Close confirmation"
+                className="payment-confirmation-close"
+                disabled={isCreating}
+                onClick={closeConfirmation}
+                type="button"
+              >
+                ×
+              </button>
+            </div>
+            <p className="payment-confirmation-description">
+              You’re about to create {confirmationWorkspaceName} and continue to Billplz payment. Please confirm that
+              your workspace and billing details are correct.
+            </p>
+            <div className="payment-confirmation-actions">
+              <button
+                className="button button-secondary payment-confirmation-secondary"
+                disabled={isCreating}
+                onClick={closeConfirmation}
+                ref={cancelButtonRef}
+                type="button"
+              >
+                Go back
+              </button>
+              <button
+                className="button button-primary payment-confirmation-primary"
+                disabled={isCreating}
+                onClick={confirmCheckout}
+                type="button"
+              >
+                {isCreating ? "Preparing payment…" : "Continue to payment"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </form>
   );
 
@@ -442,4 +623,12 @@ function formatDiscountLabel(percentage: number | null, amountOff: number | null
   }
 
   return "";
+}
+
+function getDialogFocusableElements(dialog: HTMLElement) {
+  return Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("disabled") && element.tabIndex !== -1);
 }

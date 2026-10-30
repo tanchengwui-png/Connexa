@@ -1,14 +1,21 @@
 "use client";
 
-import type { Dispatch, SetStateAction } from "react";
+import type { Dispatch, ReactNode, SetStateAction } from "react";
 import { useState } from "react";
 import { ContactLabelsManager } from "@/components/inbox/contact-labels-manager";
-import { ChevronLeftIcon, LightningIcon, NoteIcon } from "@/components/inbox/icons";
+import { ContactAvatar } from "@/components/inbox/contact-avatar";
+import {
+  AssignIcon,
+  LightningIcon,
+  MoreIcon,
+  NoteIcon,
+  SnoozeIcon,
+  TemplateIcon
+} from "@/components/inbox/icons";
 import { MetadataChip } from "@/components/inbox/metadata-chip";
 import { MetadataRow } from "@/components/inbox/metadata-row";
 import { SidebarCard } from "@/components/inbox/sidebar-card";
 import { SidebarField } from "@/components/inbox/sidebar-field";
-import { Button } from "@/components/ui/button";
 import { formatFinancingTag } from "@/lib/financing-tags";
 import {
   createMalaysiaDate,
@@ -56,20 +63,110 @@ export function InboxDetailPanel({
   const [isSavingAppointment, setIsSavingAppointment] = useState(false);
   const [appointmentError, setAppointmentError] = useState<string | null>(null);
   const [appointmentForm, setAppointmentForm] = useState(() => createDefaultAppointmentForm());
+  const [noteDraft, setNoteDraft] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
+  const [editingNoteBody, setEditingNoteBody] = useState("");
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [pendingNoteAction, setPendingNoteAction] = useState<string | null>(null);
 
   if (!selectedConversation) {
-    return (
-      <aside className="inbox-column inbox-detail-panel">
-        <div className="inbox-empty-state">
-          <p className="muted">Select a conversation to view contact details and activity.</p>
-        </div>
-      </aside>
-    );
+    return <aside className="inbox-column inbox-detail-panel" />;
   }
 
   const latestMessage = selectedConversation.messages[selectedConversation.messages.length - 1];
   const conversation = selectedConversation;
   const profileIdentityField = getProfileIdentityField(selectedConversation);
+  const whatsappPushName = getVisibleWhatsAppPushName(selectedConversation);
+
+  async function saveNewNote() {
+    const body = noteDraft.trim();
+    if (!body) {
+      setNoteError("Write a note before saving.");
+      return;
+    }
+
+    setPendingNoteAction("create");
+    setNoteError(null);
+    try {
+      const response = await fetch(`/api/conversations/${conversation.id}/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ body })
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to save note.");
+      }
+
+      setNoteDraft("");
+      success("Note saved", "Your internal note is now visible to the workspace.");
+      onRefreshConversation();
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : "Unable to save note.");
+    } finally {
+      setPendingNoteAction(null);
+    }
+  }
+
+  async function saveNoteEdit(noteId: string) {
+    const body = editingNoteBody.trim();
+    if (!body) {
+      setNoteError("A note cannot be empty.");
+      return;
+    }
+
+    setPendingNoteAction(noteId);
+    setNoteError(null);
+    try {
+      const response = await fetch(`/api/conversations/${conversation.id}/notes`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ noteId, body })
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to update note.");
+      }
+
+      setEditingNoteId(null);
+      setEditingNoteBody("");
+      success("Note updated", "Your changes have been saved.");
+      onRefreshConversation();
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : "Unable to update note.");
+    } finally {
+      setPendingNoteAction(null);
+    }
+  }
+
+  async function deleteNote(noteId: string) {
+    if (!window.confirm("Delete this internal note?")) {
+      return;
+    }
+
+    setPendingNoteAction(noteId);
+    setNoteError(null);
+    try {
+      const response = await fetch(`/api/conversations/${conversation.id}/notes?noteId=${encodeURIComponent(noteId)}`, {
+        method: "DELETE"
+      });
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Unable to delete note.");
+      }
+
+      if (editingNoteId === noteId) {
+        setEditingNoteId(null);
+        setEditingNoteBody("");
+      }
+      success("Note deleted", "The internal note has been removed.");
+      onRefreshConversation();
+    } catch (error) {
+      setNoteError(error instanceof Error ? error.message : "Unable to delete note.");
+    } finally {
+      setPendingNoteAction(null);
+    }
+  }
 
   async function scheduleAppointment() {
     setIsSavingAppointment(true);
@@ -121,65 +218,60 @@ export function InboxDetailPanel({
               onClick={onHideDetails}
               type="button"
             >
-              <ChevronLeftIcon />
+              <MoreIcon />
             </button>
           </div>
         </div>
 
         <div className="inbox-contact-profile-card">
-          <div className="inbox-contact-profile-avatar">
-            {selectedConversation.photoUrl ? (
-              <img
-                alt=""
-                className="chatbox-avatar-image"
-                src={`/api/conversations/${selectedConversation.id}/avatar`}
-              />
-            ) : (
-              getInitials(selectedConversation.contactName)
-            )}
-          </div>
+          <ContactAvatar
+            className="inbox-contact-profile-avatar"
+            fallback={getInitials(selectedConversation.contactName)}
+            profilePicUrl={selectedConversation.profilePicUrl}
+          />
           <strong className="inbox-contact-profile-name">{selectedConversation.contactName}</strong>
+          {whatsappPushName ? (
+            <span className="inbox-contact-profile-whatsapp-name" title={`~${whatsappPushName}`}>
+              ~{whatsappPushName}
+            </span>
+          ) : null}
           <span className="inbox-contact-profile-subline">
             {selectedConversation.isGroup ? "Group conversation" : selectedConversation.phone}
           </span>
         </div>
 
-        <div className="inbox-contact-quick-actions">
+        <div className="inbox-contact-quick-actions contact-action-buttons">
           <a className="inbox-contact-quick-action" href={`/message-logs?conversationId=${selectedConversation.id}`}>
+            <TemplateIcon />
             <span>Logs</span>
           </a>
-          {selectedConversation.scheduledCount ? (
-            <a className="inbox-contact-quick-action" href={`/scheduled-messages?conversationId=${selectedConversation.id}`}>
-              <span>Scheduled</span>
-            </a>
-          ) : (
-            <button className="inbox-contact-quick-action" onClick={() => setActiveTab("recent")} type="button">
-              <span>Recent</span>
-            </button>
-          )}
+          <DetailNavigationButton
+            active={activeTab === "recent"}
+            icon={<SnoozeIcon />}
+            label="Recent"
+            onClick={() => setActiveTab("recent")}
+          />
           {selectedConversation.lead ? (
             <a className="inbox-contact-quick-action" href={`/leads/${selectedConversation.lead.id}`}>
-              <span>Lead</span>
+              <AssignIcon />
+              <span>Create Lead</span>
             </a>
           ) : (
             <button className="inbox-contact-quick-action" onClick={() => void onCreateLeadRecord()} type="button">
+              <AssignIcon />
               <span>Create Lead</span>
             </button>
           )}
-          <button className="inbox-contact-quick-action" onClick={() => setActiveTab("notes")} type="button">
-            <span>Notes</span>
-          </button>
         </div>
 
-        <div className="inbox-detail-tabs" role="tablist" aria-label="Contact info tabs">
-          <TabButton active={activeTab === "profile"} label="Profile" onClick={() => setActiveTab("profile")} />
-          <TabButton active={activeTab === "notes"} label="Notes" onClick={() => setActiveTab("notes")} />
-          <TabButton active={activeTab === "recent"} label="Recent" onClick={() => setActiveTab("recent")} />
+        <div aria-label="Contact detail view" className="inbox-contact-detail-tabs" role="tablist">
+          <DetailNavigationButton active={activeTab === "profile"} label="Profile" onClick={() => setActiveTab("profile")} />
+          <DetailNavigationButton active={activeTab === "notes"} label="Notes" onClick={() => setActiveTab("notes")} />
         </div>
 
         {activeTab === "profile" ? (
           <>
-            <SidebarCard eyebrow="Profile" title={selectedConversation.contactName}>
+            <SidebarCard eyebrow="About" title="Contact information">
               <div className="inbox-detail-grid">
                 <SidebarField label={profileIdentityField.label} value={profileIdentityField.value} />
                 <SidebarField label="Primary owner" value={selectedConversation.assignee} />
@@ -194,11 +286,6 @@ export function InboxDetailPanel({
                 <a className="inbox-scheduled-link" href={`/message-logs?conversationId=${selectedConversation.id}`}>
                   Open message logs
                 </a>
-                {selectedConversation.scheduledCount ? (
-                  <a className="inbox-scheduled-link" href={`/scheduled-messages?conversationId=${selectedConversation.id}`}>
-                    Open scheduled queue
-                  </a>
-                ) : null}
               </div>
             </SidebarCard>
 
@@ -260,6 +347,27 @@ export function InboxDetailPanel({
 
         {activeTab === "notes" ? (
           <SidebarCard eyebrow="Notes" title="Internal context">
+            <div className="inbox-note-editor">
+              <textarea
+                aria-label="New internal note"
+                className="inbox-detail-input inbox-note-editor-input"
+                disabled={pendingNoteAction !== null}
+                onChange={(event) => setNoteDraft(event.target.value)}
+                placeholder="Add an internal note for your team..."
+                value={noteDraft}
+              />
+              <div className="inbox-note-editor-actions">
+                <button
+                  className="inbox-scheduled-link"
+                  disabled={pendingNoteAction !== null || !noteDraft.trim()}
+                  onClick={() => void saveNewNote()}
+                  type="button"
+                >
+                  {pendingNoteAction === "create" ? "Saving..." : "Add note"}
+                </button>
+              </div>
+            </div>
+            {noteError ? <p className="form-error inbox-note-error">{noteError}</p> : null}
             <div className="inbox-detail-feed">
               {selectedConversation.notes.length ? (
                 selectedConversation.notes.map((note) => (
@@ -268,7 +376,65 @@ export function InboxDetailPanel({
                       <strong>{note.author}</strong>
                       <span>{note.createdAt}</span>
                     </div>
-                    <p>{note.body}</p>
+                    {editingNoteId === note.id ? (
+                      <>
+                        <textarea
+                          aria-label={`Edit note by ${note.author}`}
+                          className="inbox-detail-input inbox-note-editor-input"
+                          disabled={pendingNoteAction !== null}
+                          onChange={(event) => setEditingNoteBody(event.target.value)}
+                          value={editingNoteBody}
+                        />
+                        <div className="inbox-note-editor-actions">
+                          <button
+                            className="inbox-scheduled-link"
+                            disabled={pendingNoteAction !== null || !editingNoteBody.trim()}
+                            onClick={() => void saveNoteEdit(note.id)}
+                            type="button"
+                          >
+                            {pendingNoteAction === note.id ? "Saving..." : "Save"}
+                          </button>
+                          <button
+                            className="inbox-note-text-action"
+                            disabled={pendingNoteAction !== null}
+                            onClick={() => {
+                              setEditingNoteId(null);
+                              setEditingNoteBody("");
+                              setNoteError(null);
+                            }}
+                            type="button"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p>{note.body}</p>
+                        <div className="inbox-note-editor-actions">
+                          <button
+                            className="inbox-note-text-action"
+                            disabled={pendingNoteAction !== null}
+                            onClick={() => {
+                              setEditingNoteId(note.id);
+                              setEditingNoteBody(note.body);
+                              setNoteError(null);
+                            }}
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            className="inbox-note-text-action is-danger"
+                            disabled={pendingNoteAction !== null}
+                            onClick={() => void deleteNote(note.id)}
+                            type="button"
+                          >
+                            {pendingNoteAction === note.id ? "Deleting..." : "Delete"}
+                          </button>
+                        </div>
+                      </>
+                    )}
                   </div>
                 ))
               ) : (
@@ -326,6 +492,24 @@ function getInitials(value: string) {
     .join("");
 }
 
+function getVisibleWhatsAppPushName(
+  selectedConversation: Pick<
+    NonNullable<InboxSelectedConversation>,
+    "contactName" | "isGroup" | "whatsappPushName"
+  >
+) {
+  const whatsappPushName = selectedConversation.whatsappPushName?.trim();
+  if (
+    selectedConversation.isGroup ||
+    !whatsappPushName ||
+    whatsappPushName.toLocaleLowerCase() === selectedConversation.contactName.trim().toLocaleLowerCase()
+  ) {
+    return null;
+  }
+
+  return whatsappPushName;
+}
+
 function getProfileIdentityField(selectedConversation: NonNullable<DetailPanelProps["selectedConversation"]>) {
   if (selectedConversation.isGroup) {
     return {
@@ -340,26 +524,27 @@ function getProfileIdentityField(selectedConversation: NonNullable<DetailPanelPr
   };
 }
 
-function TabButton({
+function DetailNavigationButton({
   active,
+  icon,
   label,
   onClick
 }: {
   active: boolean;
+  icon?: ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
-    <Button
-      aria-selected={active}
-      className={`inbox-detail-tab${active ? " active" : ""}`}
+    <button
+      aria-pressed={active}
+      className={`inbox-contact-quick-action${active ? " active" : ""}`}
       onClick={onClick}
-      role="tab"
-      selected={active}
-      variant="toggle"
+      type="button"
     >
-      {label}
-    </Button>
+      {icon}
+      <span>{label}</span>
+    </button>
   );
 }
 

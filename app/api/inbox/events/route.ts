@@ -5,8 +5,10 @@ import {
   subscribeToInboxRealtime,
   type InboxRealtimeAckEvent,
   type InboxRealtimeConversationEvent,
-  type InboxRealtimeMessageEvent
+  type InboxRealtimeMessageEvent,
+  type WhatsAppConnectionRealtimeEvent
 } from "@/lib/inbox-realtime";
+import { getWorkspaceWhatsAppRuntimeStatus } from "@/lib/whatsapp-runtime";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +17,8 @@ type InboxRealtimeStreamEvent =
   | { event: "inbox:message"; payload: InboxRealtimeMessageEvent }
   | { event: "inbox:ack"; payload: InboxRealtimeAckEvent }
   | { event: "inbox:conversation"; payload: InboxRealtimeConversationEvent }
-  | { event: "inbox:chat-state"; payload: InboxRealtimeChatStateEvent };
+  | { event: "inbox:chat-state"; payload: InboxRealtimeChatStateEvent }
+  | { event: "whatsapp:connection"; payload: WhatsAppConnectionRealtimeEvent };
 
 export async function GET(request: NextRequest) {
   const agent = await requireCurrentApiAgent();
@@ -24,7 +27,9 @@ export async function GET(request: NextRequest) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
+      let closed = false;
       const writeEvent = (input: InboxRealtimeStreamEvent) => {
+        if (closed) return;
         controller.enqueue(
           encoder.encode(`event: ${input.event}\ndata: ${JSON.stringify(input.payload)}\n\n`)
         );
@@ -82,16 +87,82 @@ export async function GET(request: NextRequest) {
         writeEvent({ event: "inbox:chat-state", payload: event });
       });
 
+      const unsubscribeWhatsAppConnection = subscribeToInboxRealtime("whatsapp:connection", (payload) => {
+        const event = payload as WhatsAppConnectionRealtimeEvent;
+        if (event.workspaceId !== agent.workspaceId || (channelId && event.channelId !== channelId)) {
+          return;
+        }
+
+        writeEvent({ event: "whatsapp:connection", payload: event });
+      });
+
+      // Subscribe first, then request the sender's authoritative runtime
+      // snapshot. If a live event races the snapshot, attempt ID + sequence
+      // ordering lets the browser reject whichever state is older. This also
+      // replays a valid QR after refresh without restarting Chromium.
+      if (channelId) {
+        void getWorkspaceWhatsAppRuntimeStatus({
+          workspaceId: agent.workspaceId,
+          agentId: agent.id,
+          channelId
+        }).then((status) => {
+          const channel = status.channel as {
+            id?: string;
+            connectionStatus?: string;
+            displayName?: string | null;
+            phoneNumber?: string | null;
+            connectedAt?: Date | string | null;
+            lastError?: string | null;
+          } | null;
+          if (!channel || channel.id !== channelId) return;
+          const connectedAt = channel.connectedAt
+            ? channel.connectedAt instanceof Date
+              ? channel.connectedAt.toISOString()
+              : new Date(channel.connectedAt).toISOString()
+            : null;
+          writeEvent({
+            event: "whatsapp:connection",
+            payload: {
+              workspaceId: agent.workspaceId,
+              channelId,
+              connectionStatus: status.runtimeStatus ?? channel.connectionStatus ?? "DISCONNECTED",
+              updatedAt: status.connectionUpdatedAt ?? new Date().toISOString(),
+              displayName: channel.displayName ?? null,
+              phoneNumber: channel.phoneNumber ?? null,
+              connectedAt,
+              lastError: status.lastError ?? channel.lastError ?? null,
+              connectionAttemptId: status.connectionAttemptId ?? null,
+              eventSequence: status.connectionEventSequence ?? undefined,
+              qrVersion: status.qrVersion ?? undefined,
+              qrCodeDataUrl: status.qrCodeDataUrl ?? null,
+              qrCodeGeneratedAt: status.qrCodeGeneratedAt ?? null,
+              qrCodeExpiresAt: status.qrCodeExpiresAt ?? null,
+              qrCodeExpired: status.qrCodeExpired ?? false,
+              snapshot: true
+            }
+          });
+        }).catch((error) => {
+          console.warn(
+            `[inbox-events] WhatsApp snapshot replay failed workspace=${agent.workspaceId} channel=${channelId}: ${
+              error instanceof Error ? error.message : "Unknown sender error."
+            }`
+          );
+        });
+      }
+
       const heartbeat = setInterval(() => {
         controller.enqueue(encoder.encode(": keepalive\n\n"));
       }, 25000);
 
       const close = () => {
+        if (closed) return;
+        closed = true;
         clearInterval(heartbeat);
         unsubscribeMessage();
         unsubscribeAck();
         unsubscribeConversation();
         unsubscribeChatState();
+        unsubscribeWhatsAppConnection();
         request.signal.removeEventListener("abort", close);
         try {
           controller.close();
@@ -99,7 +170,7 @@ export async function GET(request: NextRequest) {
       };
 
       request.signal.addEventListener("abort", close);
-      controller.enqueue(encoder.encode(": connected\n\n"));
+      controller.enqueue(encoder.encode("retry: 2000\n: connected\n\n"));
     }
   });
 
@@ -107,7 +178,8 @@ export async function GET(request: NextRequest) {
     headers: {
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-      "Content-Type": "text/event-stream; charset=utf-8"
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no"
     }
   });
 }

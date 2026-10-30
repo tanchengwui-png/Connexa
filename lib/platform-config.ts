@@ -9,6 +9,11 @@ import {
   REMEMBER_ME_SESSION_TIMEOUT_MINUTES,
   normalizeSessionTimeoutMinutes
 } from "@/lib/session-timeout";
+import { decryptStoredSecret, encryptSecretForStorage } from "@/lib/crypto";
+import {
+  normalizeMetaGraphVersion,
+  normalizeMetaRedirectUri
+} from "@/lib/meta-configuration";
 
 export type PlatformConfigInput = {
   smtpHost: string;
@@ -44,7 +49,9 @@ const DEFAULT_FREE_TRIAL_DURATION_DAYS = 14;
 const DEFAULT_EXPIRED_ACCOUNT_CLEANUP_DAYS = 60;
 
 function getMetaGraphVersionFromEnv() {
-  return process.env.META_GRAPH_API_VERSION ?? process.env.META_GRAPH_VERSION ?? "v23.0";
+  return normalizeMetaGraphVersion(
+    process.env.META_GRAPH_API_VERSION ?? process.env.META_GRAPH_VERSION
+  );
 }
 
 function getMetaConfigIdFromEnv() {
@@ -89,7 +96,6 @@ export async function getPlatformConfigForAdmin() {
       (config?.metaAppId ?? process.env.META_APP_ID) &&
         (config?.metaAppSecret ?? process.env.META_APP_SECRET) &&
         (config?.metaConfigId ?? getMetaConfigIdFromEnv()) &&
-        (config?.metaRedirectUri ?? process.env.META_REDIRECT_URI) &&
         (config?.metaWebhookVerifyToken ?? getMetaWebhookVerifyTokenFromEnv())
     ),
     automationWorkflowIdleHours:
@@ -130,8 +136,8 @@ export async function updatePlatformConfig(input: PlatformConfigInput) {
   const metaAppId = input.metaAppId?.trim() ?? "";
   const metaAppSecret = input.metaAppSecret?.trim() ?? "";
   const metaConfigId = input.metaConfigId?.trim() ?? "";
-  const metaGraphVersion = input.metaGraphVersion?.trim() || "v23.0";
-  const metaRedirectUri = input.metaRedirectUri?.trim() ?? "";
+  const requestedMetaGraphVersion = input.metaGraphVersion?.trim() ?? "";
+  const requestedMetaRedirectUri = input.metaRedirectUri?.trim() ?? "";
   const metaWebhookVerifyToken = input.metaWebhookVerifyToken?.trim() ?? "";
 
   if (!smtpHost || !smtpUser || !smtpFrom || !supportEmail || !emailBrandName || !emailBrandTagline) {
@@ -173,6 +179,12 @@ export async function updatePlatformConfig(input: PlatformConfigInput) {
   }
 
   const existing = await getPlatformConfig();
+  const metaGraphVersion = normalizeMetaGraphVersion(
+    requestedMetaGraphVersion || existing?.metaGraphVersion
+  );
+  const metaRedirectUri = normalizeMetaRedirectUri(
+    requestedMetaRedirectUri || existing?.metaRedirectUri
+  );
 
   return upsertPlatformConfig({
     smtpHost,
@@ -189,11 +201,15 @@ export async function updatePlatformConfig(input: PlatformConfigInput) {
     billplzCollectionId: billplzCollectionId || existing?.billplzCollectionId || null,
     billplzSandbox: input.billplzSandbox,
     metaAppId: metaAppId || existing?.metaAppId || null,
-    metaAppSecret: metaAppSecret || existing?.metaAppSecret || null,
+    metaAppSecret: metaAppSecret
+      ? encryptSecretForStorage(metaAppSecret)
+      : existing?.metaAppSecret ?? null,
     metaConfigId: metaConfigId || existing?.metaConfigId || null,
     metaGraphVersion,
-    metaRedirectUri: metaRedirectUri || existing?.metaRedirectUri || null,
-    metaWebhookVerifyToken: metaWebhookVerifyToken || existing?.metaWebhookVerifyToken || null,
+    metaRedirectUri: metaRedirectUri || null,
+    metaWebhookVerifyToken: metaWebhookVerifyToken
+      ? encryptSecretForStorage(metaWebhookVerifyToken)
+      : existing?.metaWebhookVerifyToken ?? null,
     automationWorkflowIdleHours,
     automationWorkflowExpireHours,
     freeTrialDurationDays,
@@ -208,11 +224,19 @@ export async function getResolvedPlatformMetaConfig() {
 
   return {
     appId: config?.metaAppId ?? process.env.META_APP_ID ?? "",
-    appSecret: config?.metaAppSecret ?? process.env.META_APP_SECRET ?? "",
+    appSecret: config?.metaAppSecret
+      ? decryptStoredSecret(config.metaAppSecret)
+      : process.env.META_APP_SECRET ?? "",
     configId: config?.metaConfigId ?? getMetaConfigIdFromEnv(),
-    graphVersion: config?.metaGraphVersion ?? getMetaGraphVersionFromEnv(),
-    redirectUri: config?.metaRedirectUri ?? process.env.META_REDIRECT_URI ?? "",
-    webhookVerifyToken: config?.metaWebhookVerifyToken ?? getMetaWebhookVerifyTokenFromEnv()
+    graphVersion: normalizeMetaGraphVersion(
+      config?.metaGraphVersion ?? getMetaGraphVersionFromEnv()
+    ),
+    redirectUri: normalizeMetaRedirectUri(
+      config?.metaRedirectUri ?? process.env.META_REDIRECT_URI
+    ),
+    webhookVerifyToken: config?.metaWebhookVerifyToken
+      ? decryptStoredSecret(config.metaWebhookVerifyToken)
+      : getMetaWebhookVerifyTokenFromEnv()
   };
 }
 
@@ -225,15 +249,24 @@ export async function updatePlatformMetaConfig(input: {
   metaWebhookVerifyToken?: string;
 }) {
   const current = await getPlatformConfig();
+  const metaGraphVersion = normalizeMetaGraphVersion(
+    input.metaGraphVersion?.trim() || current?.metaGraphVersion
+  );
+  const metaRedirectUri = normalizeMetaRedirectUri(
+    input.metaRedirectUri?.trim() || current?.metaRedirectUri
+  );
 
   return upsertPlatformMetaConfig({
     metaAppId: input.metaAppId?.trim() || current?.metaAppId || null,
-    metaAppSecret: input.metaAppSecret?.trim() || current?.metaAppSecret || null,
+    metaAppSecret: input.metaAppSecret?.trim()
+      ? encryptSecretForStorage(input.metaAppSecret)
+      : current?.metaAppSecret ?? null,
     metaConfigId: input.metaConfigId?.trim() || current?.metaConfigId || null,
-    metaGraphVersion: input.metaGraphVersion?.trim() || current?.metaGraphVersion || "v23.0",
-    metaRedirectUri: input.metaRedirectUri?.trim() || current?.metaRedirectUri || null,
-    metaWebhookVerifyToken:
-      input.metaWebhookVerifyToken?.trim() || current?.metaWebhookVerifyToken || null
+    metaGraphVersion,
+    metaRedirectUri: metaRedirectUri || null,
+    metaWebhookVerifyToken: input.metaWebhookVerifyToken?.trim()
+      ? encryptSecretForStorage(input.metaWebhookVerifyToken)
+      : current?.metaWebhookVerifyToken ?? null
   });
 }
 

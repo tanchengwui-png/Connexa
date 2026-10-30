@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { getMetaWebhookVerifyToken } from "@/lib/meta-whatsapp";
 import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
@@ -20,6 +20,12 @@ function sha256(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function secureTokenEquals(left: string, right: string) {
+  const leftDigest = Buffer.from(sha256(left), "hex");
+  const rightDigest = Buffer.from(sha256(right), "hex");
+  return timingSafeEqual(leftDigest, rightDigest);
+}
+
 async function findChannelByVerifyToken(verifyToken: string) {
   if (!verifyToken.trim()) {
     return null;
@@ -39,7 +45,7 @@ async function findChannelByVerifyToken(verifyToken: string) {
 
 async function isDefaultMetaWebhookVerifyToken(verifyToken: string) {
   const defaultVerifyToken = await getMetaWebhookVerifyToken();
-  return Boolean(defaultVerifyToken && defaultVerifyToken === verifyToken.trim());
+  return Boolean(defaultVerifyToken && secureTokenEquals(defaultVerifyToken, verifyToken.trim()));
 }
 
 async function findChannelByVerifiedContext(input: {

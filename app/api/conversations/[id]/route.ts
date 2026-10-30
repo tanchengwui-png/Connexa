@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireCurrentApiAgent } from "@/lib/auth/current-user";
 import { deleteConversation, updateConversation, updateConversationMute, updateConversationTags } from "@/lib/conversations";
 import { findAgentInWorkspace } from "@/lib/db-contacts";
-import { getInboxData } from "@/lib/inbox";
+import { getInboxConversationData } from "@/lib/inbox";
 import { ConversationStatus } from "@/lib/db-types";
 import { isConversationWhatsAppIncognitoModeEnabled } from "@/lib/whatsapp-channel";
 import { sendWhatsAppChatSeen } from "@/lib/whatsapp-runtime";
@@ -17,8 +17,10 @@ export async function GET(request: NextRequest, context: RouteContext) {
   try {
     const agent = await requireCurrentApiAgent();
     const { id } = await context.params;
-    const channelId = request.nextUrl.searchParams.get("channelId");
-    const { selectedConversation: conversation } = await getInboxData(id, channelId);
+    const conversation = await getInboxConversationData(id, {
+      messageCursor: request.nextUrl.searchParams.get("messageCursor"),
+      messageLimit: Number.parseInt(request.nextUrl.searchParams.get("messageLimit") ?? "50", 10) || 50
+    });
 
     if (!conversation) {
       return NextResponse.json({ error: "Conversation not found." }, { status: 404 });

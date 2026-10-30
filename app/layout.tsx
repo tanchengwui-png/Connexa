@@ -21,8 +21,11 @@ export const metadata: Metadata = {
     telephone: false
   },
   icons: {
-    apple: "/apple-icon",
-    icon: "/icon"
+    apple: "/connexa-favicon-512.png",
+    icon: [
+      { url: "/connexa-favicon-512.png", sizes: "512x512", type: "image/png" }
+    ],
+    shortcut: "/connexa-favicon-512.png"
   }
 };
 

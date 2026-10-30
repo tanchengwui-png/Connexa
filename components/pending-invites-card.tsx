@@ -62,8 +62,8 @@ export function PendingInvitesCard({ invites }: PendingInvitesCardProps) {
   };
 
   return (
-    <section className="content-card pending-invites-card">
-      <div className="card-header">
+    <section className="content-card pending-invites-card team-panel">
+      <div className="card-header team-panel-header">
         <div>
           <h3 className="card-title">Pending invites</h3>
           <p className="muted">Open invitations waiting for account setup.</p>
@@ -72,10 +72,11 @@ export function PendingInvitesCard({ invites }: PendingInvitesCardProps) {
 
       {error ? <div className="form-error">{error}</div> : null}
 
-      <div className="panel-row">
+      <div className="team-pending-content">
         {invites.length === 0 ? (
-          <div className="lead-row">
-            <div className="table-subtle">No pending invites.</div>
+          <div className="team-empty-state">
+            <strong>No pending invitations.</strong>
+            <span>Invitations awaiting account setup will appear here.</span>
           </div>
         ) : (
           invites.map((invite) => (

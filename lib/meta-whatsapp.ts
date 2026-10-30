@@ -2,11 +2,13 @@ import { randomBytes } from "node:crypto";
 import { sanitizeSensitiveText } from "@/lib/crypto";
 import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
 import {
+  isMetaEmbeddedSignupConfigurationComplete,
+  normalizeMetaGraphVersion
+} from "@/lib/meta-configuration";
+import {
   getWhatsAppCloudFeatureFlags,
   isWhatsAppCloudEnabledForWorkspace
 } from "@/lib/whatsapp-cloud/feature-flags";
-
-const DEFAULT_META_GRAPH_VERSION = "v23.0";
 
 type MetaGraphEnvelope<T> = {
   data?: T[];
@@ -48,10 +50,9 @@ export type MetaEmbeddedSignupPhoneNumber = {
 };
 
 export function getMetaGraphVersion() {
-  return (
+  return normalizeMetaGraphVersion(
     process.env.META_GRAPH_API_VERSION?.trim() ||
-    process.env.META_GRAPH_VERSION?.trim() ||
-    DEFAULT_META_GRAPH_VERSION
+      process.env.META_GRAPH_VERSION?.trim()
   );
 }
 
@@ -60,14 +61,20 @@ export async function getMetaEmbeddedSignupConfig(workspaceId?: string) {
   const appId = resolvedConfig.appId.trim();
   const configId = resolvedConfig.configId.trim();
   const flags = getWhatsAppCloudFeatureFlags();
+  const cloudEnabled = workspaceId
+    ? isWhatsAppCloudEnabledForWorkspace(workspaceId, flags)
+    : flags.cloudEnabled;
+  const fullyConfigured = isMetaEmbeddedSignupConfigurationComplete({
+    appId,
+    appSecret: resolvedConfig.appSecret,
+    configId,
+    redirectUri: resolvedConfig.redirectUri,
+    webhookVerifyToken: resolvedConfig.webhookVerifyToken
+  });
 
   return {
-    enabled: Boolean(
-      (workspaceId ? isWhatsAppCloudEnabledForWorkspace(workspaceId, flags) : flags.cloudEnabled) &&
-      appId &&
-      configId
-    ),
-    coexistenceEnabled: Boolean(flags.cloudEnabled && flags.coexistenceEnabled),
+    enabled: cloudEnabled && fullyConfigured,
+    coexistenceEnabled: cloudEnabled && fullyConfigured && flags.coexistenceEnabled,
     appId,
     configId,
     graphVersion: resolvedConfig.graphVersion.trim() || getMetaGraphVersion()
@@ -105,6 +112,24 @@ async function metaGraphGet<T>(path: string, graphVersion: string, params: Recor
     cache: "no-store"
   });
 
+  return parseMetaGraphResponse<T>(response);
+}
+
+async function metaGraphPost<T>(
+  path: string,
+  graphVersion: string,
+  accessToken: string,
+  body: Record<string, unknown>
+) {
+  const response = await fetch(`https://graph.facebook.com/${graphVersion}${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body),
+    cache: "no-store"
+  });
   return parseMetaGraphResponse<T>(response);
 }
 
@@ -203,20 +228,24 @@ export async function exchangeMetaEmbeddedSignupCode(code: string) {
   const redirectUri = resolvedConfig.redirectUri.trim();
   const graphVersion = resolvedConfig.graphVersion.trim() || getMetaGraphVersion();
 
-  if (!appId || !appSecret || !redirectUri) {
+  if (!appId || !appSecret) {
     throw new Error("Meta Embedded Signup is not fully configured on the platform settings screen.");
+  }
+
+  const exchangeParameters: Record<string, string> = {
+    client_id: appId,
+    client_secret: appSecret,
+    code: normalizedCode
+  };
+  if (redirectUri) {
+    exchangeParameters.redirect_uri = redirectUri;
   }
 
   const payload = await metaGraphGet<{
     access_token: string;
     token_type?: string;
     expires_in?: number;
-  }>("/oauth/access_token", graphVersion, {
-    client_id: appId,
-    client_secret: appSecret,
-    redirect_uri: redirectUri,
-    code: normalizedCode
-  });
+  }>("/oauth/access_token", graphVersion, exchangeParameters);
 
   const accessToken = `${payload.access_token ?? ""}`.trim();
   if (!accessToken) {
@@ -380,4 +409,24 @@ export async function testMetaPhoneNumberConnection(input: {
     access_token: accessToken,
     fields: "id,display_phone_number,verified_name,quality_rating,code_verification_status"
   });
+}
+
+export async function subscribeMetaWabaApp(input: {
+  accessToken: string;
+  businessAccountId: string;
+}) {
+  const accessToken = input.accessToken.trim();
+  const businessAccountId = input.businessAccountId.trim();
+  const resolvedConfig = await getResolvedPlatformMetaConfig();
+  const graphVersion = resolvedConfig.graphVersion.trim() || getMetaGraphVersion();
+  if (!accessToken || !businessAccountId) {
+    throw new Error("META_WEBHOOK_SUBSCRIPTION_CONFIGURATION_REQUIRED");
+  }
+
+  return metaGraphPost<{ success?: boolean }>(
+    `/${encodeURIComponent(businessAccountId)}/subscribed_apps`,
+    graphVersion,
+    accessToken,
+    {}
+  );
 }

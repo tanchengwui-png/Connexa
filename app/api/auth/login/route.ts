@@ -1,12 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { loginWithPassword } from "@/lib/auth/login";
 import { getAgentEntryPath } from "@/lib/auth/entry-path";
+import { getSafeReturnTo } from "@/lib/auth/return-to";
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
     email?: string;
     password?: string;
     remember?: boolean;
+    returnTo?: string;
   };
 
   try {
@@ -25,7 +27,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const redirectTo = await getAgentEntryPath(result.agent);
+    const redirectTo = body.returnTo
+      ? getSafeReturnTo(body.returnTo, await getAgentEntryPath(result.agent))
+      : await getAgentEntryPath(result.agent);
 
     return NextResponse.json({ ok: true, redirectTo });
   } catch (error) {

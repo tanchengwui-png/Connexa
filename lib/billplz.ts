@@ -15,6 +15,13 @@ export type BillplzBill = {
   url: string;
 };
 
+export type BillplzBillStatus = {
+  id: string;
+  state: string;
+  paid: boolean;
+  paidAt: Date | null;
+};
+
 export type BillplzCollection = {
   id: string;
   title: string;
@@ -74,6 +81,45 @@ export async function createBillplzBill(
     id: data.id,
     url: data.url
   } satisfies BillplzBill;
+}
+
+export async function getBillplzBill(config: BillplzConfig, billId: string) {
+  const response = await fetch(`${getBillplzBaseUrl(config.sandbox)}/bills/${encodeURIComponent(billId)}`, {
+    method: "GET",
+    headers: { Authorization: getBillplzAuthHeader(config.apiKey) },
+    cache: "no-store"
+  });
+  const data = (await response.json().catch(() => null)) as {
+    id?: string;
+    state?: string;
+    paid?: boolean;
+    paid_at?: string | null;
+    error?: { message?: string };
+  } | null;
+
+  if (!response.ok || !data?.id || typeof data.paid !== "boolean") {
+    throw new Error(data?.error?.message ?? `Unable to retrieve Billplz bill (${response.status}).`);
+  }
+
+  return {
+    id: data.id,
+    state: data.state ?? "unknown",
+    paid: data.paid,
+    paidAt: data.paid_at ? new Date(data.paid_at) : null
+  } satisfies BillplzBillStatus;
+}
+
+export async function deleteBillplzBill(config: BillplzConfig, billId: string) {
+  const response = await fetch(`${getBillplzBaseUrl(config.sandbox)}/bills/${encodeURIComponent(billId)}`, {
+    method: "DELETE",
+    headers: { Authorization: getBillplzAuthHeader(config.apiKey) },
+    cache: "no-store"
+  });
+
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { error?: { message?: string } } | null;
+    throw new Error(data?.error?.message ?? `Unable to delete Billplz bill (${response.status}).`);
+  }
 }
 
 export async function getBillplzCollection(config: BillplzConfig) {

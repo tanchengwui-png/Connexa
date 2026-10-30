@@ -12,7 +12,6 @@ import {
   TemplateIcon
 } from "@/components/inbox/icons";
 import { PortalDropdown } from "@/components/inbox/portal-dropdown";
-import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/toast-provider";
 import {
   formatMalaysiaDateTimeLocalInput,
@@ -128,6 +127,8 @@ export function CampaignsWorkspace({
   const templateButtonRef = useRef<HTMLButtonElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const builderRef = useRef<HTMLDivElement | null>(null);
+  const audiencePanelRef = useRef<HTMLElement | null>(null);
+  const composerPanelRef = useRef<HTMLElement | null>(null);
   const reviewPanelRef = useRef<HTMLElement | null>(null);
   const [campaignDrafts, setCampaignDrafts] = useState<CampaignDraft[]>(initialDrafts);
   const [campaignRuns, setCampaignRuns] = useState<CampaignRun[]>(initialRuns);
@@ -150,7 +151,10 @@ export function CampaignsWorkspace({
   const [isTemplateMenuOpen, setIsTemplateMenuOpen] = useState(false);
   const [isDraftsOpen, setIsDraftsOpen] = useState(false);
   const [isRunsOpen, setIsRunsOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [isLaunching, setIsLaunching] = useState(false);
+  const [isScheduling, setIsScheduling] = useState(Boolean(initialDraft?.scheduleAt));
+  const [mobileStep, setMobileStep] = useState<"audience" | "compose" | "review">("audience");
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -185,12 +189,14 @@ export function CampaignsWorkspace({
 
     setActiveDraftId(initialDraft.id);
     setActiveView("builder");
+    setMobileStep("audience");
     setCampaignName(initialDraft.name);
     setSelectedContactIds(
       initialDraft.selectedContactIds.filter((contactId) => contacts.some((contact) => contact.id === contactId))
     );
     setMessageBody(initialDraft.messageBody);
     setScheduleAt(formatMalaysiaDateTimeLocalInput(initialDraft.scheduleAt ? new Date(initialDraft.scheduleAt) : null));
+    setIsScheduling(Boolean(initialDraft.scheduleAt));
     setSelectedAttachmentIds(
       initialDraft.selectedAttachmentIds.filter((assetId) => mediaAssets.some((asset) => asset.id === assetId))
     );
@@ -286,22 +292,6 @@ export function CampaignsWorkspace({
     );
   }, [assetList, mediaSearch]);
 
-  const ownerBreakdown = useMemo(() => {
-    const counts = new Map<string, number>();
-
-    for (const contact of selectedContacts) {
-      const label = contact.ownerName || "Unassigned";
-      counts.set(label, (counts.get(label) ?? 0) + 1);
-    }
-
-    return Array.from(counts.entries()).sort((left, right) => right[1] - left[1]);
-  }, [selectedContacts]);
-
-  const estimatedReadyCount = useMemo(
-    () => selectedContacts.filter((contact) => Boolean(contact.phone.trim())).length,
-    [selectedContacts]
-  );
-
   const eligibilityReport = useMemo(() => {
     const entries: EligibilityEntry[] = [];
 
@@ -344,13 +334,18 @@ export function CampaignsWorkspace({
   }, [selectedContacts]);
 
   const launchableCount = eligibilityReport.eligible.length + eligibilityReport.caution.length;
-  const activeRunsCount = campaignRuns.filter((run) => run.pendingJobCount > 0 || run.processingJobCount > 0).length;
-  const scheduledRunsCount = campaignRuns.filter((run) => run.queuedJobCount > 0).length;
-
-  const sampleEligibleRecipients = useMemo(
-    () => eligibilityReport.entries.filter((entry) => entry.status !== "excluded").slice(0, 6),
-    [eligibilityReport.entries]
-  );
+  const hasCampaignContent = Boolean(messageBody.trim() || selectedAttachmentIds.length);
+  const readinessItems = [
+    { complete: launchableCount > 0, label: "Select at least one eligible recipient", step: "audience" as const },
+    { complete: hasCampaignContent, label: "Write a message or attach media", step: "compose" as const }
+  ];
+  const isReadyForReview = readinessItems.every((item) => item.complete);
+  const workflowStatuses = {
+    audience: launchableCount > 0 ? "Complete" : "Incomplete",
+    compose: hasCampaignContent ? "Complete" : "Incomplete",
+    review: isReadyForReview ? "Ready" : "Blocked"
+  } as const;
+  const hasVisibleSelection = visibleContacts.some((contact) => selectedContactIds.includes(contact.id));
 
   const insertEmojiAtCursor = (emoji: string) => {
     const textarea = textareaRef.current;
@@ -411,7 +406,9 @@ export function CampaignsWorkspace({
     setSelectedContactIds([]);
     setMessageBody("");
     setScheduleAt("");
+    setIsScheduling(false);
     setSelectedAttachmentIds([]);
+    setMobileStep("audience");
   };
 
   const startNewCampaign = () => {
@@ -425,6 +422,10 @@ export function CampaignsWorkspace({
   };
 
   const saveCurrentDraft = async () => {
+    if (isSaving) {
+      return;
+    }
+
     if (!selectedContacts.length && !messageBody.trim() && !campaignName.trim() && !selectedAttachmentIds.length) {
       showError("Nothing to save", "Add audience, message text, or media before saving a draft.");
       return;
@@ -438,50 +439,59 @@ export function CampaignsWorkspace({
       selectedAttachmentIds
     };
 
-    const response = await fetch(activeDraftId ? `/api/campaigns/${activeDraftId}` : "/api/campaigns", {
-      method: activeDraftId ? "PATCH" : "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
+    setIsSaving(true);
+    try {
+      const response = await fetch(activeDraftId ? `/api/campaigns/${activeDraftId}` : "/api/campaigns", {
+        method: activeDraftId ? "PATCH" : "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
 
-    const result = (await response.json().catch(() => null)) as
-      | {
-          error?: string;
-          draft?: CampaignDraft;
-        }
-      | null;
+      const result = (await response.json().catch(() => null)) as
+        | {
+            error?: string;
+            draft?: CampaignDraft;
+          }
+        | null;
 
-    if (!response.ok || !result?.draft) {
-      showError("Draft not saved", result?.error ?? "Unable to save this campaign draft.");
-      return;
-    }
+      if (!response.ok || !result?.draft) {
+        showError("Draft not saved", result?.error ?? "Unable to save this campaign draft.");
+        return;
+      }
 
-    const nextDraft = result.draft;
-    setCampaignDrafts((current) =>
-      [nextDraft, ...current.filter((draft) => draft.id !== nextDraft.id)].sort(
-        (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
-      )
-    );
-    setActiveDraftId(nextDraft.id);
-    success("Draft saved", `${nextDraft.name} is ready to revisit from Campaigns.`);
+      const nextDraft = result.draft;
+      setCampaignDrafts((current) =>
+        [nextDraft, ...current.filter((draft) => draft.id !== nextDraft.id)].sort(
+          (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+        )
+      );
+      setActiveDraftId(nextDraft.id);
+      success("Draft saved", `${nextDraft.name} is ready to revisit from Campaigns.`);
 
-    if (redirectOnSaveTo) {
-      router.push(redirectOnSaveTo);
-      router.refresh();
+      if (redirectOnSaveTo) {
+        router.push(redirectOnSaveTo);
+        router.refresh();
+      }
+    } catch {
+      showError("Draft not saved", "Unable to reach the campaign service. Your changes are still available to retry.");
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const loadDraft = (draft: CampaignDraft) => {
     setActiveDraftId(draft.id);
     setActiveView("builder");
+    setMobileStep("audience");
     setCampaignName(draft.name);
     setSelectedContactIds(
       draft.selectedContactIds.filter((contactId) => contacts.some((contact) => contact.id === contactId))
     );
     setMessageBody(draft.messageBody);
     setScheduleAt(formatMalaysiaDateTimeLocalInput(draft.scheduleAt ? new Date(draft.scheduleAt) : null));
+    setIsScheduling(Boolean(draft.scheduleAt));
     setSelectedAttachmentIds(
       draft.selectedAttachmentIds.filter((assetId) => assetList.some((asset) => asset.id === assetId))
     );
@@ -521,6 +531,7 @@ export function CampaignsWorkspace({
     }
 
     setActiveView("review");
+    setMobileStep("review");
     success("Campaign ready for review", "Audience checks are complete. Review exclusions and launch readiness next.");
   };
 
@@ -594,32 +605,38 @@ export function CampaignsWorkspace({
       : mode === "edit"
         ? "Update the saved campaign draft, then return to the campaign list."
         : "Build the audience, compose the message, and launch from one guided outbound workspace.";
-  const launchStatusCopy =
-    mode === "workspace"
-      ? "Switch between builder and review below, then check launchability before queueing the outbound jobs."
-      : "Use the same campaign builder and review flow, then save to return to the campaign list.";
+  const focusWorkflowStep = (step: "audience" | "compose") => {
+    setActiveView("builder");
+    setMobileStep(step);
+    window.requestAnimationFrame(() => {
+      (step === "audience" ? audiencePanelRef.current : composerPanelRef.current)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start"
+      });
+    });
+  };
 
   return (
-    <section className="campaigns-workspace">
-      <section className="auth-page-hero">
+    <section className={`campaigns-workspace campaigns-workspace-${mode}`}>
+      <section className="auth-page-hero campaigns-create-hero">
         <div className="auth-page-hero-copy">
           <span className="auth-page-kicker">Broadcast workflow</span>
-          <h2>{heroTitle}</h2>
+          <h1>{heroTitle}</h1>
           <p>{heroDescription}</p>
-          <div className="auth-page-hero-metrics">
-            <span className="auth-page-hero-stat">
-              <strong>{campaignDrafts.length}</strong>
-              <small>drafts</small>
-            </span>
-            <span className="auth-page-hero-stat">
-              <strong>{selectedContacts.length}</strong>
-              <small>selected contacts</small>
-            </span>
-            <span className="auth-page-hero-stat">
-              <strong>{launchableCount}</strong>
-              <small>launchable</small>
-            </span>
-          </div>
+          <dl className="campaigns-hero-summary" aria-label="Campaign status">
+            <div>
+              <dt>Selected</dt>
+              <dd>{selectedContacts.length}</dd>
+            </div>
+            <div>
+              <dt>Launchable</dt>
+              <dd>{launchableCount}</dd>
+            </div>
+            <div>
+              <dt>Status</dt>
+              <dd>{activeDraftId ? "Saved draft" : "Draft"}</dd>
+            </div>
+          </dl>
         </div>
         <div className="auth-page-hero-side">
           <div className="auth-page-hero-actions">
@@ -632,14 +649,15 @@ export function CampaignsWorkspace({
                 Back to campaigns
               </a>
             )}
-            <button className="button button-secondary" onClick={() => void saveCurrentDraft()} type="button">
-              {mode === "edit" ? "Update campaign" : "Save draft"}
+            <button
+              aria-busy={isSaving}
+              className="button button-secondary"
+              disabled={isSaving}
+              onClick={() => void saveCurrentDraft()}
+              type="button"
+            >
+              {isSaving ? "Saving..." : mode === "edit" ? "Update campaign" : "Save draft"}
             </button>
-          </div>
-          <div className="auth-page-hero-panel">
-            <span className="auth-page-hero-panel-label">Launch status</span>
-            <strong>{activeRunsCount} active runs · {scheduledRunsCount} queued</strong>
-            <p>{launchStatusCopy}</p>
           </div>
         </div>
       </section>
@@ -648,43 +666,57 @@ export function CampaignsWorkspace({
         <div className="campaigns-stage-copy">
           <div className="campaigns-stage-title-row">
             <div>
-              <h3 className="card-title">Campaign builder</h3>
+              <h2 className="card-title">Campaign builder</h2>
               <p className="muted">
                 Build the audience, compose the message, then review and launch from one controlled flow.
               </p>
             </div>
-            <div className="campaigns-stage-tabs" role="tablist" aria-label="Campaign workflow">
-              <Button
-                aria-selected={activeView === "builder"}
-                className={`campaigns-stage-tab${activeView === "builder" ? " active" : ""}`}
-                onClick={() => setActiveView("builder")}
-                role="tab"
-                selected={activeView === "builder"}
-                variant="toggle"
-              >
-                Builder
-              </Button>
-              <Button
-                aria-selected={activeView === "review"}
-                className={`campaigns-stage-tab${activeView === "review" ? " active" : ""}`}
-                onClick={handleReviewCampaign}
-                role="tab"
-                selected={activeView === "review"}
-                variant="toggle"
-              >
-                Review
-              </Button>
-            </div>
-          </div>
-          <div className="campaigns-stage-metrics">
-            <span className="campaigns-stage-pill">{campaignDrafts.length} drafts</span>
-            <span className="campaigns-stage-pill">{activeRunsCount} active</span>
-            <span className="campaigns-stage-pill">{scheduledRunsCount} queued</span>
-            <span className="campaigns-stage-pill">{selectedContacts.length} selected</span>
-            <span className="campaigns-stage-pill">{launchableCount} launchable</span>
           </div>
         </div>
-        <div className="campaigns-stage-actions" />
+        <ol className="campaigns-stepper" aria-label="Campaign workflow">
+          <li>
+            <button
+              aria-label={`Audience: ${workflowStatuses.audience}`}
+              className={mobileStep === "audience" ? "is-mobile-current" : ""}
+              onClick={() => focusWorkflowStep("audience")}
+              type="button"
+            >
+              <span>1</span>
+              <span className="campaigns-stepper-copy">
+                <strong>Audience</strong>
+                <small>{workflowStatuses.audience}</small>
+              </span>
+            </button>
+          </li>
+          <li>
+            <button
+              aria-label={`Compose: ${workflowStatuses.compose}`}
+              className={mobileStep === "compose" ? "is-mobile-current" : ""}
+              onClick={() => focusWorkflowStep("compose")}
+              type="button"
+            >
+              <span>2</span>
+              <span className="campaigns-stepper-copy">
+                <strong>Compose</strong>
+                <small>{workflowStatuses.compose}</small>
+              </span>
+            </button>
+          </li>
+          <li>
+            <button
+              aria-label={`Review: ${workflowStatuses.review}`}
+              className={mobileStep === "review" ? "is-mobile-current" : ""}
+              onClick={handleReviewCampaign}
+              type="button"
+            >
+              <span>3</span>
+              <span className="campaigns-stepper-copy">
+                <strong>Review</strong>
+                <small>{workflowStatuses.review}</small>
+              </span>
+            </button>
+          </li>
+        </ol>
       </div>
 
       {showHistory ? (
@@ -783,7 +815,10 @@ export function CampaignsWorkspace({
       ) : null}
 
       <div className="campaigns-main-grid" ref={builderRef}>
-        <section className="content-card campaigns-panel campaigns-audience-panel">
+        <section
+          className={`content-card campaigns-panel campaigns-audience-panel${mobileStep === "audience" ? " is-mobile-active" : ""}`}
+          ref={audiencePanelRef}
+        >
           <div className="campaigns-panel-head">
             <div className="campaigns-panel-heading">
               <div className="campaigns-panel-title-row">
@@ -796,6 +831,7 @@ export function CampaignsWorkspace({
 
           <div className="campaigns-audience-toolbar">
             <label className="campaigns-search-shell">
+              <span className="sr-only">Search campaign contacts</span>
               <SearchIcon />
               <input
                 className="campaigns-search-input"
@@ -805,7 +841,12 @@ export function CampaignsWorkspace({
                 value={searchValue}
               />
             </label>
-            <select className="lead-record-input app-select campaigns-filter-select" onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
+            <select
+              aria-label="Filter contacts by owner"
+              className="lead-record-input app-select campaigns-filter-select"
+              onChange={(event) => setOwnerFilter(event.target.value)}
+              value={ownerFilter}
+            >
               <option value="all">All owners</option>
               {agents.map((agent) => (
                 <option key={agent.id} value={agent.id}>
@@ -813,7 +854,12 @@ export function CampaignsWorkspace({
                 </option>
               ))}
             </select>
-            <select className="lead-record-input app-select campaigns-filter-select" onChange={(event) => setTagFilter(event.target.value)} value={tagFilter}>
+            <select
+              aria-label="Filter contacts by tag"
+              className="lead-record-input app-select campaigns-filter-select"
+              onChange={(event) => setTagFilter(event.target.value)}
+              value={tagFilter}
+            >
               <option value="all">All tags</option>
               {tagOptions.map((tag) => (
                 <option key={tag} value={tag}>
@@ -826,19 +872,26 @@ export function CampaignsWorkspace({
           <div className="campaigns-audience-utility">
             <div className="campaigns-selection-strip">
               <strong>{selectedContacts.length} selected</strong>
-              <div className="campaigns-selection-meta">
-                <span className="campaigns-selection-pill">{visibleContacts.length} in current view</span>
-                <span className="campaigns-selection-pill">{launchableCount} ready to launch</span>
-                {eligibilityReport.excluded.length ? (
-                  <span className="campaigns-selection-pill is-warn">{eligibilityReport.excluded.length} excluded</span>
-                ) : null}
-              </div>
+              <span aria-hidden="true">·</span>
+              <span>
+                {visibleContacts.length} contact{visibleContacts.length === 1 ? "" : "s"} in current view
+              </span>
             </div>
             <div className="campaigns-audience-actions">
-              <button className="inbox-search-tool" onClick={selectVisibleContacts} type="button">
+              <button
+                className="inbox-search-tool"
+                disabled={!visibleContacts.length}
+                onClick={selectVisibleContacts}
+                type="button"
+              >
                 Select visible
               </button>
-              <button className="inbox-search-tool" onClick={clearVisibleContacts} type="button">
+              <button
+                className="inbox-search-tool"
+                disabled={!hasVisibleSelection}
+                onClick={clearVisibleContacts}
+                type="button"
+              >
                 Clear visible
               </button>
             </div>
@@ -848,6 +901,7 @@ export function CampaignsWorkspace({
             {visibleContacts.length ? (
               visibleContacts.map((contact) => {
                 const isSelected = selectedContactIds.includes(contact.id);
+                const showSecondaryPhone = !isSamePhoneIdentity(contact.displayName, contact.phone);
                 const initials = contact.displayName
                   .split(/\s+/)
                   .slice(0, 2)
@@ -856,6 +910,8 @@ export function CampaignsWorkspace({
 
                 return (
                   <button
+                    aria-label={`${isSelected ? "Remove" : "Add"} ${contact.displayName} ${isSelected ? "from" : "to"} campaign audience`}
+                    aria-pressed={isSelected}
                     className={`campaigns-contact-row${isSelected ? " selected" : ""}`}
                     key={contact.id}
                     onClick={() => toggleContactSelection(contact.id)}
@@ -873,15 +929,15 @@ export function CampaignsWorkspace({
                     </div>
                     <div className="campaigns-contact-copy">
                       <div className="campaigns-contact-head">
-                        <strong>{contact.displayName}</strong>
+                        <strong title={contact.displayName}>{contact.displayName}</strong>
                         {contact.isHotLead ? <span className="badge hot-badge">Hot lead</span> : null}
                       </div>
                       <div className="campaigns-contact-meta">
-                        <span>{contact.phone}</span>
+                        {showSecondaryPhone ? <span>{contact.phone}</span> : null}
                         <span>{contact.ownerName || "Unassigned"}</span>
                         <span>{contact.lastInteractionAt}</span>
                       </div>
-                      <p>{contact.lastMessagePreview}</p>
+                      <p title={contact.lastMessagePreview}>{contact.lastMessagePreview}</p>
                       {contact.tags.length ? (
                         <div className="campaigns-contact-tags">
                           {contact.tags.slice(0, 4).map((tag) => (
@@ -894,20 +950,24 @@ export function CampaignsWorkspace({
                           ) : null}
                         </div>
                       ) : null}
+                      <span className="campaigns-contact-channel">WhatsApp</span>
                     </div>
                   </button>
                 );
               })
             ) : (
               <div className="campaigns-empty-state">
-                <strong>No contacts match this filter.</strong>
-                <span>Broaden the search or clear one of the audience filters.</span>
+                <strong>{contacts.length ? "No contacts match the current filters." : "No contacts are available for this campaign."}</strong>
+                {contacts.length ? <span>Broaden the search or clear one of the audience filters.</span> : null}
               </div>
             )}
           </div>
         </section>
 
-        <section className="content-card campaigns-panel campaigns-composer-panel">
+        <section
+          className={`content-card campaigns-panel campaigns-composer-panel${mobileStep === "compose" ? " is-mobile-active" : ""}`}
+          ref={composerPanelRef}
+        >
           <div className="campaigns-panel-head">
             <div className="campaigns-panel-heading">
               <div className="campaigns-panel-title-row">
@@ -923,81 +983,33 @@ export function CampaignsWorkspace({
             <input
               className="lead-record-input"
               onChange={(event) => setCampaignName(event.target.value)}
-              placeholder="April re-engagement wave"
+              placeholder="Enter a campaign name"
               value={campaignName}
             />
           </label>
 
           <div className="campaigns-composer-shell">
-            <div className="campaigns-composer-summary">
-              <div className="campaigns-composer-stat">
-                <span>Body</span>
-                <strong>{messageBody.trim() ? `${messageBody.trim().split(/\r?\n/).length} lines` : "Empty"}</strong>
-              </div>
-              <div className="campaigns-composer-stat">
-                <span>Media</span>
-                <strong>{selectedAttachmentIds.length || "None"}</strong>
-              </div>
-              <div className="campaigns-composer-stat">
-                <span>Recipients</span>
-                <strong>{selectedContacts.length || "0"}</strong>
-              </div>
-            </div>
-
             <div className="inbox-composer-head">
               <div className="inbox-composer-copy">
-                <span className="control-label">Campaign composer</span>
+                <label className="control-label" htmlFor="campaign-message">Message</label>
                 <p className="inbox-composer-helper">
-                  Full composer with emoji, quick replies, media library selection, and inline media upload.
+                  Use emoji, quick replies, and media from the shared library.
                 </p>
               </div>
+              <span className="campaigns-compose-meta">
+                {messageBody.length} characters · {selectedAttachmentIds.length} media
+              </span>
             </div>
 
             <textarea
               className="composer-textarea"
+              id="campaign-message"
               onChange={(event) => setMessageBody(event.target.value)}
               placeholder="Write the WhatsApp campaign message..."
               ref={textareaRef}
               rows={1}
               value={messageBody}
             />
-
-            {selectedMedia.length ? (
-              <div className="inbox-attachment-tray">
-                <div className="inbox-attachment-tray-head">
-                  <div className="inbox-attachment-tray-copy">
-                    <strong>{selectedMedia.length} attachment{selectedMedia.length === 1 ? "" : "s"} selected</strong>
-                    <span>Recipients will receive the same media set with this campaign.</span>
-                  </div>
-                  <button className="inbox-attachment-clear" onClick={() => setSelectedAttachmentIds([])} type="button">
-                    Clear
-                  </button>
-                </div>
-                <div className="inbox-attachment-row">
-                  {selectedMedia.map((asset) => (
-                    <div className="campaigns-attachment-preview-card" key={asset.id}>
-                      <AttachmentPreview
-                        className="attachment-preview-compact"
-                        fileName={asset.title}
-                        fit="cover"
-                        mimeType={asset.mimeType}
-                        openLabel="Open attachment"
-                        sizeLabel={asset.sizeLabel}
-                        url={asset.publicUrl}
-                      />
-                      <button
-                        className="inbox-attachment-clear campaigns-attachment-remove"
-                        onClick={() => toggleMediaSelection(asset.id)}
-                        title={`Remove ${asset.title}`}
-                        type="button"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ) : null}
 
             <div className="inbox-composer-footer whatsapp-composer-footer">
               <div className="whatsapp-composer-actions">
@@ -1043,24 +1055,67 @@ export function CampaignsWorkspace({
               </div>
 
               <div className="campaigns-composer-note">
-                <span>{selectedContacts.length ? `${selectedContacts.length} recipients selected` : "Choose recipients to continue"}</span>
+                <span>{hasCampaignContent ? "Message ready to review" : "Write a message or attach media to continue"}</span>
               </div>
             </div>
 
+            {selectedMedia.length ? (
+              <div className="inbox-attachment-tray">
+                <div className="inbox-attachment-tray-head">
+                  <div className="inbox-attachment-tray-copy">
+                    <strong>{selectedMedia.length} attachment{selectedMedia.length === 1 ? "" : "s"} selected</strong>
+                    <span>Recipients will receive the same media set with this campaign.</span>
+                  </div>
+                  <button className="inbox-attachment-clear" onClick={() => setSelectedAttachmentIds([])} type="button">
+                    Clear
+                  </button>
+                </div>
+                <div className="inbox-attachment-row">
+                  {selectedMedia.map((asset) => (
+                    <div className="campaigns-attachment-preview-card" key={asset.id}>
+                      <AttachmentPreview
+                        className="attachment-preview-compact"
+                        fileName={asset.title}
+                        fit="cover"
+                        mimeType={asset.mimeType}
+                        openLabel="Open attachment"
+                        sizeLabel={asset.sizeLabel}
+                        url={asset.publicUrl}
+                      />
+                      <button
+                        className="inbox-attachment-clear campaigns-attachment-remove"
+                        onClick={() => toggleMediaSelection(asset.id)}
+                        title={`Remove ${asset.title}`}
+                        type="button"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <div className="campaigns-composer-actions">
-              <button className="button button-secondary" onClick={() => void saveCurrentDraft()} type="button">
-                {mode === "edit" ? "Update campaign" : "Save draft"}
+              <button
+                aria-busy={isSaving}
+                className="button button-secondary"
+                disabled={isSaving}
+                onClick={() => void saveCurrentDraft()}
+                type="button"
+              >
+                {isSaving ? "Saving..." : mode === "edit" ? "Update campaign" : "Save draft"}
               </button>
               <button className="button button-primary" onClick={handleReviewCampaign} type="button">
                 <SendIcon />
-                <span>Review campaign</span>
+                <span>Continue to review</span>
               </button>
             </div>
           </div>
         </section>
 
         <aside
-          className={`content-card campaigns-panel campaigns-summary-panel${activeView === "review" ? " is-active" : ""}`}
+          className={`content-card campaigns-panel campaigns-summary-panel${activeView === "review" ? " is-active is-mobile-active" : ""}`}
           ref={reviewPanelRef}
         >
           <div className="campaigns-panel-head">
@@ -1074,105 +1129,101 @@ export function CampaignsWorkspace({
           </div>
 
           <div className="campaigns-summary-stack">
-            <div className="campaigns-launch-hero">
-              <div className="campaigns-launch-hero-copy">
+            <div className="campaigns-review-intro">
+              <div>
                 <span className="campaigns-summary-label">Launch readiness</span>
                 <strong>{campaignName.trim() || "Untitled campaign"}</strong>
-                <span>
-                  {launchableCount
-                    ? `${launchableCount} recipients can receive this campaign now.`
-                    : "Choose recipients and content to make this campaign launchable."}
-                </span>
               </div>
-              <div className={`campaigns-launch-indicator${launchableCount ? " is-ready" : ""}`}>
+              <span className={`campaigns-launch-indicator${isReadyForReview ? " is-ready" : ""}`}>
                 {activeView === "review" ? "In review" : "Draft"}
-              </div>
+              </span>
             </div>
 
-            <div className="campaigns-review-status-grid">
+            <dl className="campaigns-review-status-grid" aria-label="Campaign eligibility summary">
               <div className="campaigns-review-status-card is-eligible">
-                <span className="campaigns-summary-label">Eligible</span>
-                <strong className="campaigns-review-status-value">{eligibilityReport.eligible.length}</strong>
-                <span className="campaigns-review-status-note">Can be launched immediately.</span>
+                <dt>Eligible</dt>
+                <dd>{eligibilityReport.eligible.length}</dd>
               </div>
               <div className="campaigns-review-status-card is-caution">
-                <span className="campaigns-summary-label">Caution</span>
-                <strong className="campaigns-review-status-value">{eligibilityReport.caution.length}</strong>
-                <span className="campaigns-review-status-note">Usable, but worth a quick operator check.</span>
+                <dt>Caution</dt>
+                <dd>{eligibilityReport.caution.length}</dd>
               </div>
               <div className="campaigns-review-status-card is-excluded">
-                <span className="campaigns-summary-label">Excluded</span>
-                <strong className="campaigns-review-status-value">{eligibilityReport.excluded.length}</strong>
-                <span className="campaigns-review-status-note">Blocked until contact data is fixed.</span>
+                <dt>Excluded</dt>
+                <dd>{eligibilityReport.excluded.length}</dd>
               </div>
-            </div>
+            </dl>
 
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Campaign</span>
-              <strong>{campaignName.trim() || "Untitled campaign"}</strong>
-              <span>
-                {messageBody.trim() ? `${messageBody.trim().split(/\r?\n/).length} lines composed` : "No message body yet"}
-              </span>
-            </div>
-
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Schedule</span>
-              <label className="lead-record-field lead-record-field-wide campaigns-schedule-field">
-                <span>Optional send time</span>
-                <input
-                  className="lead-record-input"
-                  onChange={(event) => setScheduleAt(event.target.value)}
-                  type="datetime-local"
-                  value={scheduleAt}
-                />
-              </label>
-            </div>
-
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Recipients ready</span>
-              <strong>{launchableCount}</strong>
-              <span>
-                {eligibilityReport.excluded.length
-                  ? `${eligibilityReport.excluded.length} excluded before launch`
-                  : `${estimatedReadyCount} contacts have usable phone numbers`}
-              </span>
-            </div>
-
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Owner mix</span>
-              {ownerBreakdown.length ? (
-                ownerBreakdown.slice(0, 4).map(([ownerName, count]) => (
-                  <div className="campaigns-owner-row" key={ownerName}>
-                    <span>{ownerName}</span>
-                    <strong>{count}</strong>
-                  </div>
-                ))
-              ) : (
-                <span>No audience selected yet.</span>
-              )}
-            </div>
-
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Recipient preview</span>
-              {sampleEligibleRecipients.length ? (
-                <div className="campaigns-recipient-preview">
-                  {sampleEligibleRecipients.map((entry) => (
-                    <span className={`campaigns-recipient-chip is-${entry.status}`} key={entry.contact.id}>
-                      {entry.contact.displayName}
-                    </span>
+            {!isReadyForReview ? (
+              <section className="campaigns-review-section campaigns-readiness" aria-labelledby="campaign-readiness-heading">
+                <h4 id="campaign-readiness-heading">Before continuing</h4>
+                <ul>
+                  {readinessItems.map((item) => (
+                    <li className={item.complete ? "is-complete" : ""} key={item.label}>
+                      <span aria-hidden="true">{item.complete ? "✓" : "○"}</span>
+                      <span>{item.label}</span>
+                      {!item.complete ? (
+                        <button onClick={() => focusWorkflowStep(item.step)} type="button">
+                          Go to {item.step === "audience" ? "Audience" : "Compose"}
+                        </button>
+                      ) : null}
+                    </li>
                   ))}
-                  {launchableCount > sampleEligibleRecipients.length ? (
-                    <span className="campaigns-recipient-chip">+{launchableCount - sampleEligibleRecipients.length} more</span>
-                  ) : null}
-                </div>
-              ) : (
-                <span>No eligible contacts selected yet.</span>
-              )}
-            </div>
+                </ul>
+              </section>
+            ) : null}
 
-            <div className="campaigns-summary-card">
-              <span className="campaigns-summary-label">Eligibility checks</span>
-              {eligibilityReport.entries.length ? (
+            <section className="campaigns-review-section" aria-labelledby="campaign-audience-summary-heading">
+              <div className="campaigns-review-section-head">
+                <h4 id="campaign-audience-summary-heading">Audience</h4>
+                <strong>{launchableCount} launchable</strong>
+              </div>
+              <p>{selectedContacts.length} selected{eligibilityReport.excluded.length ? ` · ${eligibilityReport.excluded.length} excluded` : ""}</p>
+            </section>
+
+            <section className="campaigns-review-section" aria-labelledby="campaign-timing-heading">
+              <h4 id="campaign-timing-heading">Send timing</h4>
+              <fieldset className="campaigns-timing-options">
+                <legend className="sr-only">Choose when to send this campaign</legend>
+                <label>
+                  <input
+                    checked={!isScheduling}
+                    name="campaign-timing"
+                    onChange={() => {
+                      setIsScheduling(false);
+                      setScheduleAt("");
+                    }}
+                    type="radio"
+                  />
+                  Send immediately
+                </label>
+                <label>
+                  <input
+                    checked={isScheduling}
+                    name="campaign-timing"
+                    onChange={() => setIsScheduling(true)}
+                    type="radio"
+                  />
+                  Schedule for later
+                </label>
+              </fieldset>
+              {isScheduling ? (
+                <label className="lead-record-field lead-record-field-wide campaigns-schedule-field">
+                  <span>Date and time</span>
+                  <input
+                    className="lead-record-input"
+                    onChange={(event) => setScheduleAt(event.target.value)}
+                    type="datetime-local"
+                    value={scheduleAt}
+                  />
+                  <small>Time zone: {MALAYSIA_TIME_ZONE} (GMT+8)</small>
+                </label>
+              ) : null}
+            </section>
+
+            {eligibilityReport.entries.length ? (
+              <details className="campaigns-eligibility-details">
+                <summary>Eligibility details</summary>
                 <div className="campaigns-eligibility-list">
                   {eligibilityReport.entries.slice(0, 6).map((entry) => (
                     <div className="campaigns-eligibility-row" key={entry.contact.id}>
@@ -1187,10 +1238,8 @@ export function CampaignsWorkspace({
                     <span className="table-subtle">+{eligibilityReport.entries.length - 6} more contacts in this review.</span>
                   ) : null}
                 </div>
-              ) : (
-                <span>No audience selected yet.</span>
-              )}
-            </div>
+              </details>
+            ) : null}
 
             <div className="campaigns-preview-shell">
               <div className="campaigns-preview-head">
@@ -1199,7 +1248,9 @@ export function CampaignsWorkspace({
               </div>
               <div className="campaigns-preview-bubble">
                 <div className="campaigns-preview-body">
-                  {renderWhatsAppFormattedText(messageBody.trim() || "Campaign preview appears here.")}
+                  {renderWhatsAppFormattedText(
+                    messageBody.trim() || (selectedMedia.length ? "Media-only campaign" : "Campaign preview appears here.")
+                  )}
                 </div>
                 {selectedMedia.length ? (
                   <div className="campaigns-preview-media-list">
@@ -1221,12 +1272,20 @@ export function CampaignsWorkspace({
             </div>
 
             <div className="campaigns-review-actions">
-              <button className="button button-secondary" onClick={() => setActiveView("builder")} type="button">
+              <button
+                className="button button-secondary"
+                onClick={() => {
+                  setActiveView("builder");
+                  setMobileStep("compose");
+                }}
+                type="button"
+              >
                 Back to edit
               </button>
               <button
+                aria-busy={isLaunching}
                 className="button button-primary campaigns-launch-button"
-                disabled={isLaunching}
+                disabled={isLaunching || !isReadyForReview}
                 onClick={() => void handleLaunchCampaign()}
                 type="button"
               >
@@ -1240,7 +1299,7 @@ export function CampaignsWorkspace({
                       : scheduleAt
                         ? "Schedule campaign"
                         : "Launch campaign"
-                    : "Review campaign"}
+                    : "Continue to final review"}
                 </span>
               </button>
             </div>
@@ -1382,6 +1441,12 @@ function renderWhatsAppFormattedText(text: string) {
 
     return segment;
   });
+}
+
+function isSamePhoneIdentity(displayName: string, phone: string) {
+  const displayDigits = displayName.replace(/\D/g, "");
+  const phoneDigits = phone.replace(/\D/g, "");
+  return Boolean(phoneDigits && displayDigits === phoneDigits);
 }
 
 function formatCampaignDraftTimestamp(value: string) {

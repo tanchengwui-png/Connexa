@@ -4,21 +4,29 @@ import { LoginForm } from "@/components/login-form";
 import { getAgentEntryPath } from "@/lib/auth/entry-path";
 import { getCurrentAgent } from "@/lib/auth/current-user";
 import { resolveAgentAuthState } from "@/lib/auth/session";
+import { getSafeReturnTo } from "@/lib/auth/return-to";
 import { getSessionExpiryMessage } from "@/lib/session-timeout";
 
 export default async function LoginPage(props: {
-  searchParams?: Promise<{ reason?: string | string[] }>;
+  searchParams?: Promise<{
+    reason?: string | string[];
+    returnTo?: string | string[];
+  }>;
 }) {
   const agent = await getCurrentAgent();
   const searchParams = await props.searchParams;
   const authState = await resolveAgentAuthState({ mode: "page" });
+  const rawReturnTo = Array.isArray(searchParams?.returnTo)
+    ? searchParams.returnTo[0]
+    : searchParams?.returnTo;
+  const returnTo = rawReturnTo ? getSafeReturnTo(rawReturnTo) : null;
 
   if (agent) {
-    redirect(await getAgentEntryPath(agent));
+    redirect(returnTo ?? (await getAgentEntryPath(agent)));
   }
 
   if (authState.status === "restore_required") {
-    redirect("/api/auth/session/restore?returnTo=%2Finbox");
+    redirect(`/api/auth/session/restore?returnTo=${encodeURIComponent(returnTo ?? "/inbox")}`);
   }
 
   const sessionMessage = getSessionExpiryMessage(searchParams?.reason);
@@ -85,18 +93,17 @@ export default async function LoginPage(props: {
           </div>
         </aside>
 
-        <section className="metrica-login-card">
+        <section aria-labelledby="login-heading" className="metrica-login-card">
           <div className="metrica-login-card-brand">
             <ConnexaLogo centered />
           </div>
 
           <div className="metrica-login-card-header">
-            <span className="metrica-login-card-kicker metrica-login-card-kicker-workspace">Welcome back</span>
-            <h2>Let&apos;s Get Started</h2>
+            <h2 id="login-heading">Welcome Back</h2>
             <p>Sign in to continue to Connexa.</p>
           </div>
 
-          <LoginForm sessionMessage={sessionMessage} />
+          <LoginForm returnTo={returnTo} sessionMessage={sessionMessage} />
 
           <div className="metrica-login-footer">
             <span className="muted">Don&apos;t have an account?</span>

@@ -158,6 +158,7 @@ async function hydrateContacts(
     id: contact.id,
     displayName: contact.displayName,
     displayNameManualOverride: contact.displayNameManualOverride,
+    whatsappPushName: contact.whatsappPushName,
     phone: formatPhoneForDisplay(contact.phone),
     photoUrl: contact.photoUrl,
     email: contact.email,
@@ -176,7 +177,7 @@ async function hydrateContacts(
     tags: splitTags(contact.tags),
     tagsManualOverride: contact.tagsManualOverride,
     lastInteractionAt: formatAbsoluteDateTime(contact.lastInteractionAt),
-    lastMessagePreview: previewByContactId.get(contact.id)?.lastMessagePreview ?? "No conversation history yet.",
+    lastMessagePreview: previewByContactId.get(contact.id)?.lastMessagePreview ?? "No messages yet",
     conversationStatus: previewByContactId.get(contact.id)?.status ?? null,
     notes: (notesByContactId.get(contact.id) ?? []).map((note) => ({
       id: note.id,

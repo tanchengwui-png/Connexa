@@ -7,10 +7,16 @@ import { getCurrentSubscriptionOverview } from "@/lib/billing-management";
 import { getAgentInboxNotificationSoundsMuted } from "@/lib/inbox-notification-preferences";
 
 type DashboardTopbarProps = {
+  billingReminder?: {
+    href: string;
+    label: string;
+    title: string;
+  } | null;
   currentPath: string;
+  variant?: "default" | "onboarding";
 };
 
-export async function DashboardTopbar({ currentPath }: DashboardTopbarProps) {
+export async function DashboardTopbar({ billingReminder, currentPath, variant = "default" }: DashboardTopbarProps) {
   const [currentAgent, memberships] = await Promise.all([
     getCurrentAgent(),
     getCurrentAgentMemberships()
@@ -27,22 +33,46 @@ export async function DashboardTopbar({ currentPath }: DashboardTopbarProps) {
     : [null, false];
 
   return (
-    <header className="dashboard-topbar">
+    <header className={`dashboard-topbar${variant === "onboarding" ? " dashboard-topbar-onboarding" : ""}`}>
       <div className="dashboard-topbar-main">
         <div className="dashboard-topbar-primary">
-          <div className="dashboard-topbar-brand">
-            <div className="dashboard-topbar-brand-logo">
-              <ConnexaLogo dark href="/" />
+          {variant === "onboarding" ? (
+            <label className="dashboard-onboarding-search">
+              <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeWidth="2" viewBox="0 0 24 24" width="18">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input aria-label="Search workspace" placeholder="Search conversations, contacts, campaigns..." />
+              <kbd>⌘ K</kbd>
+            </label>
+          ) : (
+            <div className="dashboard-topbar-brand">
+              <div className="dashboard-topbar-brand-logo">
+                <ConnexaLogo dark href="/" />
+              </div>
             </div>
-          </div>
+          )}
 
-          <nav aria-label="Global" className="dashboard-topbar-secondary">
-            <DashboardTopbarNav currentPath={currentPath} items={TOPBAR_NAV_ITEMS} />
-          </nav>
+          {variant === "default" ? (
+            <nav aria-label="Global" className="dashboard-topbar-secondary">
+              <DashboardTopbarNav currentPath={currentPath} items={TOPBAR_NAV_ITEMS} />
+            </nav>
+          ) : null}
 
           <div className="dashboard-topbar-session">
             <div className="dashboard-topbar-actions">
-              <span className="dashboard-topbar-online">Online</span>
+              <span className="dashboard-topbar-online">{variant === "onboarding" ? "All Systems Operational" : "Online"}</span>
+              {billingReminder ? (
+                <a
+                  aria-label={billingReminder.title}
+                  className="dashboard-topbar-billing-alert"
+                  href={billingReminder.href}
+                  title={billingReminder.title}
+                >
+                  <span aria-hidden="true" className="dashboard-topbar-billing-alert-dot" />
+                  <span>{billingReminder.label}</span>
+                </a>
+              ) : null}
               <DashboardNotifications
                 agentId={currentAgent?.id ?? null}
                 initialInboxNotificationSoundsMuted={inboxNotificationSoundsMuted}
@@ -105,35 +135,38 @@ function formatPlanDateTime(value: Date) {
 }
 
 const TOPBAR_NAV_ITEMS = [
-  { type: "link", label: "Overview", href: "/workspace" },
-  { type: "link", label: "Inbox", href: "/inbox" },
+  { type: "link", label: "Home", href: "/workspace", icon: "home" },
+  { type: "link", label: "Inbox", href: "/inbox", icon: "inbox" },
   {
     type: "group",
-    label: "Messages",
+    label: "Contacts",
+    icon: "contacts",
     items: [
-      { label: "Scheduled", href: "/scheduled-messages" },
-      { label: "Message Logs", href: "/message-logs" },
-      { label: "Quick Replies", href: "/quick-replies" },
-      { label: "Media Library", href: "/media-library" }
-    ]
-  },
-  {
-    type: "group",
-    label: "CRM",
-    items: [
-      { label: "Contacts", href: "/contacts" },
+      { label: "All Contacts", href: "/contacts" },
       { label: "Leads", href: "/leads" },
-      { label: "Calendar", href: "/calendar" },
       { label: "Team", href: "/team" }
     ]
   },
-  { type: "link", label: "Campaigns", href: "/campaigns" },
+  { type: "link", label: "Automations", href: "/automation-rules", icon: "automation" },
+  { type: "link", label: "Campaigns", href: "/campaigns", icon: "campaigns" },
   {
     type: "group",
-    label: "More",
+    label: "Analytics",
+    icon: "analytics",
     items: [
-      { label: "Automation", href: "/automation-rules" },
-      { label: "Account Setting", href: "/account-settings" }
+      { label: "Message Logs", href: "/message-logs" },
+      { label: "Scheduled Messages", href: "/scheduled-messages" }
+    ]
+  },
+  {
+    type: "group",
+    label: "Settings",
+    icon: "settings",
+    items: [
+      { label: "Account Settings", href: "/account-settings" },
+      { label: "Quick Replies", href: "/quick-replies" },
+      { label: "Media Library", href: "/media-library" },
+      { label: "Calendar", href: "/calendar" }
     ]
   }
 ] as const;

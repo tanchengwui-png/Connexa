@@ -6,6 +6,8 @@ type MessageLogsPageProps = {
   searchParams?: Promise<{
     conversationId?: string;
     filter?: string;
+    direction?: string;
+    status?: string;
     page?: string;
     pageSize?: string;
   }>;
@@ -24,12 +26,24 @@ const VALID_FILTERS = new Set<MessageLogsFilter>([
 
 export default async function MessageLogsPage({ searchParams }: MessageLogsPageProps) {
   const params = searchParams ? await searchParams : undefined;
-  const filter = VALID_FILTERS.has((params?.filter as MessageLogsFilter | undefined) ?? "all")
+  const legacyFilter = VALID_FILTERS.has((params?.filter as MessageLogsFilter | undefined) ?? "all")
     ? ((params?.filter as MessageLogsFilter | undefined) ?? "all")
     : "all";
+  const direction: "all" | "inbound" | "outbound" = params?.direction === "inbound" || params?.direction === "outbound"
+    ? params.direction
+    : legacyFilter === "inbound" || legacyFilter === "outbound"
+      ? legacyFilter
+      : "all";
+  const status: "all" | "canceled" | "failed" | "processing" | "queued" | "received" | "sent" = ["sent", "queued", "processing", "failed", "canceled", "received"].includes(params?.status ?? "")
+    ? (params!.status as "canceled" | "failed" | "processing" | "queued" | "received" | "sent")
+    : ["sent", "queued", "processing", "failed", "canceled"].includes(legacyFilter)
+      ? (legacyFilter as "canceled" | "failed" | "processing" | "queued" | "sent")
+      : "all";
 
   const data = await getMessageLogsData({
-    filter,
+    filter: legacyFilter,
+    direction,
+    status,
     conversationId: params?.conversationId,
     page: params?.page ? Number.parseInt(params.page, 10) : undefined,
     pageSize: params?.pageSize ? Number.parseInt(params.pageSize, 10) : undefined
@@ -39,11 +53,12 @@ export default async function MessageLogsPage({ searchParams }: MessageLogsPageP
     <DashboardShell currentPath="/message-logs">
       <MessageLogsBoard
         conversationId={data.conversationId}
-        filter={data.filter}
+        direction={data.direction}
         hasLinkedWhatsAppNumbers={data.hasLinkedWhatsAppNumbers}
         pagination={data.pagination}
         rows={data.rows}
         summary={data.summary}
+        status={data.status}
       />
     </DashboardShell>
   );

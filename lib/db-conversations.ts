@@ -54,6 +54,7 @@ export type ConversationHeaderRow = {
   channelLabel: string | null;
   contactId: string;
   contactName: string;
+  whatsappPushName: string | null;
   photoUrl: string | null;
   phone: string;
   isGroup: boolean;
@@ -104,6 +105,16 @@ export type ConversationMessageRow = {
   replyToSender: string | null;
   sender: string;
   sentAt: Date;
+};
+
+export type ConversationListCursor = {
+  lastMessageAt: Date;
+  id: string;
+};
+
+export type ConversationMessageCursor = {
+  sentAt: Date;
+  id: string;
 };
 
 export type ConversationNoteRow = {
@@ -245,6 +256,101 @@ export async function listConversationRows(workspaceId: string) {
   }
 }
 
+export async function listConversationRowsPage(input: {
+  workspaceId: string;
+  channelId?: string | null;
+  cursor?: ConversationListCursor | null;
+  limit: number;
+}) {
+  const values: unknown[] = [input.workspaceId];
+  const conditions = [`conv."workspaceId" = $1`, INBOX_ROW_CONDITION];
+
+  if (input.channelId) {
+    values.push(input.channelId);
+    conditions.push(`conv."channelId" = $${values.length}`);
+  }
+  if (input.cursor) {
+    values.push(input.cursor.lastMessageAt, input.cursor.id);
+    conditions.push(
+      `(conv."lastMessageAt" < $${values.length - 1} OR (conv."lastMessageAt" = $${values.length - 1} AND conv.id < $${values.length}))`
+    );
+  }
+  values.push(Math.max(1, Math.min(101, input.limit)));
+
+  return queryMany<ConversationListRow>(
+    `SELECT
+        conv.id,
+        conv."channelId",
+        COALESCE(wac."displayName", wac."phoneNumber") AS "channelLabel",
+        CASE
+          WHEN conv."whatsAppRemoteId" LIKE '%@g.us'
+            THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
+          ELSE c."displayName"
+        END AS "contactName",
+        c."photoUrl" AS "photoUrl",
+        c.phone,
+        (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
+        c.tags,
+        conv.status,
+        conv."snoozedUntil",
+        conv."snoozeReason",
+        conv."snoozeStatus",
+        conv."snoozedById",
+        sb.name AS "snoozedByName",
+        conv."isMuted",
+        conv."muteExpiration",
+        conv."isArchived",
+        conv."isPinned",
+        conv."unreadCount",
+        a.id AS "assigneeId",
+        a.name AS "assigneeName",
+        (conv."isHotLead" OR c."isHotLead") AS "isHotLead",
+        conv."lastMessagePreview",
+        lm.direction AS "lastMessageDirection",
+        conv."lastMessageAt"
+      FROM "Conversation" conv
+      JOIN "Contact" c ON c.id = conv."contactId"
+      LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+      LEFT JOIN "Agent" a ON a.id = conv."assigneeId"
+      LEFT JOIN "Agent" sb ON sb.id = conv."snoozedById"
+      LEFT JOIN LATERAL (
+        SELECT m.direction
+        FROM "Message" m
+        WHERE m."conversationId" = conv.id
+        ORDER BY m."sentAt" DESC, m."createdAt" DESC, m.id DESC
+        LIMIT 1
+      ) lm ON TRUE
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY conv."lastMessageAt" DESC, conv.id DESC
+      LIMIT $${values.length}`,
+    values
+  );
+}
+
+export async function countConversationRows(input: {
+  workspaceId: string;
+  channelId?: string | null;
+}) {
+  const values: unknown[] = [input.workspaceId];
+  const conditions = [`conv."workspaceId" = $1`, INBOX_ROW_CONDITION];
+
+  if (input.channelId) {
+    values.push(input.channelId);
+    conditions.push(`conv."channelId" = $${values.length}`);
+  }
+
+  const row = await queryOne<{ count: number }>(
+    `SELECT COUNT(*)::int AS count
+      FROM "Conversation" conv
+      JOIN "Contact" c ON c.id = conv."contactId"
+      LEFT JOIN "WhatsAppChannel" wac ON wac.id = conv."channelId"
+      WHERE ${conditions.join(" AND ")}`,
+    values
+  );
+
+  return row?.count ?? 0;
+}
+
 export async function findConversationHeader(conversationId: string, workspaceId: string, includeTest = false) {
   try {
     return await queryOne<ConversationHeaderRow>(
@@ -259,6 +365,10 @@ export async function findConversationHeader(conversationId: string, workspaceId
               THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
             ELSE c."displayName"
           END AS "contactName",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us' THEN NULL
+            ELSE c."whatsappPushName"
+          END AS "whatsappPushName",
           c."photoUrl" AS "photoUrl",
           c.phone,
           (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
@@ -303,6 +413,10 @@ export async function findConversationHeader(conversationId: string, workspaceId
               THEN COALESCE(NULLIF(conv.subject, ''), NULLIF(c."syncedDisplayName", ''), c."displayName")
             ELSE c."displayName"
           END AS "contactName",
+          CASE
+            WHEN conv."whatsAppRemoteId" LIKE '%@g.us' THEN NULL
+            ELSE c."whatsappPushName"
+          END AS "whatsappPushName",
           c."photoUrl" AS "photoUrl",
           c.phone,
           (conv."whatsAppRemoteId" LIKE '%@g.us') AS "isGroup",
@@ -333,8 +447,20 @@ export async function findConversationHeader(conversationId: string, workspaceId
   }
 }
 
-export async function listConversationMessages(conversationId: string) {
-  return queryMany<ConversationMessageRow>(
+export async function listConversationMessages(
+  conversationId: string,
+  options: { cursor?: ConversationMessageCursor | null; limit?: number } = {}
+) {
+  const values: unknown[] = [conversationId];
+  const cursorCondition = options.cursor
+    ? (() => {
+        values.push(options.cursor!.sentAt, options.cursor!.id);
+        return `AND (m."sentAt" < $2 OR (m."sentAt" = $2 AND m.id < $3))`;
+      })()
+    : "";
+  const limit = Math.max(1, Math.min(200, options.limit ?? 50));
+  values.push(limit);
+  const rows = await queryMany<ConversationMessageRow>(
     `SELECT
         m.id,
         m."attachmentMimeType",
@@ -398,9 +524,12 @@ export async function listConversationMessages(conversationId: string) {
       LEFT JOIN "Agent" qa ON qa.id = qrm."senderId"
       LEFT JOIN "OutboundMessageJob" oj ON oj."messageId" = m.id
       WHERE m."conversationId" = $1
-      ORDER BY m."sentAt" ASC`,
-    [conversationId]
+        ${cursorCondition}
+      ORDER BY m."sentAt" DESC, m.id DESC
+      LIMIT $${values.length}`,
+    values
   );
+  return rows.reverse();
 }
 
 export async function listConversationTeammatesByWorkspace(workspaceId: string) {
@@ -415,6 +544,19 @@ export async function listConversationTeammatesByWorkspace(workspaceId: string) 
       WHERE conv."workspaceId" = $1
       ORDER BY a."createdAt" ASC, a.name ASC`,
     [workspaceId]
+  );
+}
+
+export async function listConversationTeammatesByConversationIds(workspaceId: string, conversationIds: string[]) {
+  if (!conversationIds.length) return [] as ConversationTeammateRow[];
+  return queryMany<ConversationTeammateRow>(
+    `SELECT ct."conversationId", ct."agentId", a.name AS "agentName"
+     FROM "ConversationTeammate" ct
+     JOIN "Conversation" conv ON conv.id = ct."conversationId"
+     JOIN "Agent" a ON a.id = ct."agentId"
+     WHERE conv."workspaceId" = $1 AND ct."conversationId" = ANY($2::text[])
+     ORDER BY a."createdAt" ASC, a.name ASC`,
+    [workspaceId, conversationIds]
   );
 }
 
@@ -629,6 +771,39 @@ export async function createConversationNoteRecord(input: {
      FROM inserted i
      JOIN "Agent" a ON a.id = i."authorId"`,
     [noteId, input.workspaceId, input.contactId, input.conversationId, input.authorId, input.body]
+  );
+}
+
+export async function updateConversationNoteRecord(input: {
+  workspaceId: string;
+  conversationId: string;
+  noteId: string;
+  body: string;
+}) {
+  return queryOne<ConversationNoteRow>(
+    `WITH updated AS (
+       UPDATE "Note"
+       SET body = $4
+       WHERE id = $1 AND "conversationId" = $2 AND "workspaceId" = $3
+       RETURNING id, body, "createdAt", "authorId"
+     )
+     SELECT u.id, u.body, a.name AS author, u."createdAt"
+     FROM updated u
+     JOIN "Agent" a ON a.id = u."authorId"`,
+    [input.noteId, input.conversationId, input.workspaceId, input.body]
+  );
+}
+
+export async function deleteConversationNoteRecord(input: {
+  workspaceId: string;
+  conversationId: string;
+  noteId: string;
+}) {
+  return queryOne<{ id: string }>(
+    `DELETE FROM "Note"
+     WHERE id = $1 AND "conversationId" = $2 AND "workspaceId" = $3
+     RETURNING id`,
+    [input.noteId, input.conversationId, input.workspaceId]
   );
 }
 

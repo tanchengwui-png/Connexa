@@ -14,11 +14,11 @@ export default async function TeamPage() {
 
   return (
     <DashboardShell currentPath="/team">
-      <div className="more-page-stack">
-        <section className="workspace-crm-header workspace-overview-hero workspace-overview-hero-compact">
+      <div className="more-page-stack team-page">
+        <section className="workspace-crm-header workspace-overview-hero workspace-overview-hero-compact team-hero">
           <div>
             <span className="badge">Team</span>
-            <h2>Keep staffing, availability, and invites on one operating page.</h2>
+            <h1>Keep staffing, availability, and invites on one operating page.</h1>
             <p className="muted">
               Review response load, today&apos;s availability, open escalations, and team-seat capacity
               without jumping between separate admin screens.
@@ -29,7 +29,7 @@ export default async function TeamPage() {
             <span className="product-catalog-count team-capacity-pill">
               {teamCapacity.memberLimit === null
                 ? `${teamCapacity.activeMembers} members`
-                : `${teamCapacity.seatsUsed} / ${teamCapacity.memberLimit} seats`}
+                : `${teamCapacity.seatsUsed} of ${teamCapacity.memberLimit} seats used`}
             </span>
             <a className="button button-secondary" href="#invite-teammates">
               Invite teammate
@@ -37,9 +37,9 @@ export default async function TeamPage() {
           </div>
         </section>
 
-        <section className="lower-grid">
-          <article className="table-card">
-            <div className="card-header">
+        <section className="lower-grid team-dashboard">
+          <article className="table-card team-panel">
+            <div className="card-header team-panel-header">
               <div>
                 <h3 className="card-title">Agent board</h3>
                 <p className="muted">Response time and conversation load are the first team metrics to expose.</p>
@@ -63,8 +63,8 @@ export default async function TeamPage() {
             ))}
           </article>
 
-          <article className="timeline-card">
-            <div className="card-header">
+          <article className="timeline-card team-panel">
+            <div className="card-header team-panel-header">
               <div>
                 <h3 className="card-title">Escalations</h3>
                 <p className="muted">The first manager automations should focus on overdue conversations and missed ownership.</p>
@@ -85,9 +85,9 @@ export default async function TeamPage() {
           </article>
         </section>
 
-        <section className="lower-grid">
-          <article className="content-card">
-            <div className="card-header">
+        <section className="lower-grid team-dashboard">
+          <article className="content-card team-panel">
+            <div className="card-header team-panel-header">
               <div>
                 <h3 className="card-title">Today&apos;s availability</h3>
                 <p className="muted">Read-only view of each teammate&apos;s working calendar and temporary blocks.</p>
@@ -104,8 +104,8 @@ export default async function TeamPage() {
             </div>
           </article>
 
-          <article className="content-card" id="invite-teammates">
-            <div className="card-header">
+          <article className="content-card team-panel" id="invite-teammates">
+            <div className="card-header team-panel-header">
               <div>
                 <h3 className="card-title">Invite teammates</h3>
                 <p className="muted">Send a branded invite email to join {workspaceName}.</p>
@@ -113,12 +113,11 @@ export default async function TeamPage() {
               <span className="product-catalog-count team-capacity-pill">
                 {teamCapacity.memberLimit === null
                   ? `${teamCapacity.activeMembers} members`
-                  : `${teamCapacity.seatsUsed} / ${teamCapacity.memberLimit} seats`}
+                  : `${Math.max(teamCapacity.memberLimit - teamCapacity.seatsUsed, 0)} seats available`}
               </span>
             </div>
 
             <div className="team-capacity-note">
-              <strong>{teamCapacity.planLabel} plan</strong>
               <span>
                 {teamCapacity.memberLimit === null
                   ? `${teamCapacity.activeMembers} active members, unlimited team seats.`
@@ -133,8 +132,9 @@ export default async function TeamPage() {
             />
           </article>
 
-          <PendingInvitesCard invites={invites} />
         </section>
+
+        <PendingInvitesCard invites={invites} />
 
         <TeamMembersCard members={agents} workspaceName={workspaceName} />
       </div>

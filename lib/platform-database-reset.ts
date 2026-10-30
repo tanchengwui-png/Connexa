@@ -119,6 +119,7 @@ export async function reseedDemoDatabase() {
   await prisma.product.deleteMany();
   await prisma.agentAvailabilityOverride.deleteMany();
   await prisma.agentAvailabilityRule.deleteMany();
+  await prisma.deletionRequest.deleteMany();
   await prisma.agent.deleteMany();
   if (prisma.account) {
     await prisma.account.deleteMany();

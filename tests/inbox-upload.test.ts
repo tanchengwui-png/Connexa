@@ -89,3 +89,7 @@ test("voice mime detection only flags ogg or opus payloads", () => {
 test("uploaded file names are sanitized", () => {
   assert.equal(sanitizeUploadedFileName("../../voice note!!.mp3"), "voice note.mp3");
 });
+
+test("uploaded file names preserve readable Unicode characters", () => {
+  assert.equal(sanitizeUploadedFileName("孟婆嫌我烦.mp3"), "孟婆嫌我烦.mp3");
+});

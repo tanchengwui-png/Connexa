@@ -3,53 +3,41 @@ import { ConnexaLogo } from "@/components/connexa-logo";
 import { VerifyEmailPanel } from "@/components/verify-email-panel";
 import { getAgentEntryPath } from "@/lib/auth/entry-path";
 import { getCurrentAgent } from "@/lib/auth/current-user";
-import { clearSession, createSession } from "@/lib/auth/session";
-import { verifyEmailToken } from "@/lib/auth/verification";
 
 type VerifyEmailPageProps = {
   searchParams?: Promise<{
     token?: string;
+    verification?: string;
   }>;
+};
+
+const VERIFICATION_ERRORS: Record<string, string> = {
+  expired: "This verification link has expired.",
+  invalid: "Invalid verification link.",
+  failed: "Unable to verify email. Please request a new verification link."
 };
 
 export default async function VerifyEmailPage({ searchParams }: VerifyEmailPageProps) {
   const params = searchParams ? await searchParams : undefined;
-  const agent = await getCurrentAgent();
-
-  let verified = Boolean(agent?.emailVerifiedAt);
-  let tokenError: string | null = null;
-  let email = agent?.email ?? "your inbox owner email";
-  let continueHref = agent ? await getAgentEntryPath(agent) : "/login";
-  let continueLabel = continueHref === "/onboarding" ? "Continue to onboarding" : "Go to inbox";
 
   if (params?.token) {
-    try {
-      const verifiedAgent = await verifyEmailToken(params.token);
-      await clearSession();
-      await createSession({
-        agentId: verifiedAgent.id,
-        workspaceId: verifiedAgent.workspaceId,
-        remember: false
-      });
-      verified = true;
-      email = verifiedAgent.email;
-      continueHref = await getAgentEntryPath({
-        id: verifiedAgent.id,
-        workspaceId: verifiedAgent.workspaceId,
-        emailVerifiedAt: new Date(),
-        role: verifiedAgent.role
-      });
-      continueLabel = continueHref === "/onboarding" ? "Continue to onboarding" : "Go to inbox";
-    } catch (error) {
-      tokenError = error instanceof Error ? error.message : "Unable to verify email.";
-    }
+    redirect(`/api/auth/verify-email?token=${encodeURIComponent(params.token)}`);
   }
 
-  if (!agent && !params?.token) {
+  const agent = await getCurrentAgent();
+  const verificationStatus = params?.verification ?? "";
+
+  const verified = Boolean(agent?.emailVerifiedAt);
+  const tokenError = VERIFICATION_ERRORS[verificationStatus] ?? null;
+  const email = agent?.email ?? "your inbox owner email";
+  const continueHref = agent ? await getAgentEntryPath(agent) : "/login";
+  const continueLabel = continueHref === "/onboarding" ? "Continue to onboarding" : "Go to inbox";
+
+  if (!agent && !verificationStatus) {
     redirect("/login");
   }
 
-  if (verified && agent?.emailVerifiedAt && !params?.token) {
+  if (verified && agent?.emailVerifiedAt && verificationStatus !== "success") {
     redirect(await getAgentEntryPath(agent));
   }
 
@@ -86,7 +74,7 @@ export default async function VerifyEmailPage({ searchParams }: VerifyEmailPageP
           continueHref={continueHref}
           continueLabel={continueLabel}
           email={email}
-          verificationAttempted={Boolean(params?.token)}
+          verificationAttempted={verificationStatus === "success"}
           tokenError={tokenError}
           verified={verified}
         />

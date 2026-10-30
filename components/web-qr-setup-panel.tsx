@@ -5,11 +5,15 @@ import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useConfirmation } from "@/components/confirmation-provider";
 import { HelpNotice } from "@/components/help-notice";
+import {
+  isStaleWhatsAppConnectionEvent,
+  wouldRegressActiveWhatsAppConnection
+} from "@/lib/whatsapp-connection-ordering";
 
 type WebQrSetupPanelProps = {
   channelId?: string | null;
+  channelLabel?: string | null;
   channelSelectionBasePath?: string;
-  channelSelectionHref?: string | null;
   initialValues: {
     id?: string;
     connectionStatus: string;
@@ -22,6 +26,17 @@ type WebQrSetupPanelProps = {
   };
   health?: {
     runtimeStatus: string;
+    runtimePresent?: boolean;
+    senderReachable?: boolean;
+    senderError?: string | null;
+    userConnectionState?: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+    lastHealthCheckAt?: string | null;
+    lastHealthyAt?: string | null;
+    nextRecoveryAt?: string | null;
+    qrCodeDataUrl?: string | null;
+    qrCodeGeneratedAt?: string | null;
+    qrCodeExpiresAt?: string | null;
+    qrCodeExpired?: boolean;
     isInboxReady: boolean;
     isHistoryStabilizing: boolean;
     isHistoryStuck: boolean;
@@ -31,23 +46,86 @@ type WebQrSetupPanelProps = {
     lastSyncError: string | null;
   };
   onBack?: () => void;
+  connectedViaPhonePairing?: boolean;
   skipHref?: string;
   onboardingMode?: "guided" | "settings";
+  onConnectionStateChange?: (state: {
+    connectionStatus: string;
+    phoneNumber: string;
+    connectedAt: string | null;
+    userConnectionState: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+  }) => void;
 };
 
 function buildSettingsWhatsAppUrl(channelId?: string | null) {
   return channelId ? `/api/settings/whatsapp?channelId=${encodeURIComponent(channelId)}` : "/api/settings/whatsapp";
 }
 
+function buildConnectionStatusUrl(channelId?: string | null) {
+  return channelId
+    ? `/api/settings/whatsapp/status?channelId=${encodeURIComponent(channelId)}`
+    : "/api/settings/whatsapp/status";
+}
+
+type ConnectionStatusSnapshot = {
+  channelId: string;
+  connectionStatus: string;
+  displayName: string | null;
+  phoneNumber: string | null;
+  lastError: string | null;
+  connectedAt: string | null;
+  updatedAt: string;
+  userConnectionState: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+  lastHealthCheckAt: string | null;
+  lastHealthyAt: string | null;
+  nextRecoveryAt: string | null;
+  qrCodeDataUrl: string | null;
+  qrCodeGeneratedAt: string | null;
+  qrCodeExpiresAt: string | null;
+  qrCodeExpired: boolean;
+};
+
+type ConnectionStatusRealtimeEvent = {
+  workspaceId: string;
+  channelId: string;
+  connectionStatus: string;
+  updatedAt: string;
+  displayName?: string | null;
+  phoneNumber?: string | null;
+  connectedAt?: string | null;
+  lastError?: string | null;
+  connectionAttemptId?: string | null;
+  eventSequence?: number;
+  qrVersion?: number;
+  qrCodeDataUrl?: string | null;
+  qrCodeGeneratedAt?: string | null;
+  qrCodeExpiresAt?: string | null;
+  qrCodeExpired?: boolean;
+  snapshot?: boolean;
+};
+
+function formatConnectionTimestamp(value: string | null) {
+  if (!value) return "Not available";
+  const timestamp = new Date(value);
+  if (Number.isNaN(timestamp.getTime())) return "Not available";
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return `${new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium"
+  }).format(timestamp)}${timezone ? ` (${timezone})` : ""}`;
+}
+
 export function WebQrSetupPanel({
   channelId = null,
+  channelLabel = null,
   channelSelectionBasePath = "/settings/whatsapp",
-  channelSelectionHref = null,
   initialValues,
   health,
   onBack,
+  connectedViaPhonePairing = false,
   skipHref,
-  onboardingMode = "settings"
+  onboardingMode = "settings",
+  onConnectionStateChange
 }: WebQrSetupPanelProps) {
   const router = useRouter();
   const { confirm } = useConfirmation();
@@ -55,10 +133,9 @@ export function WebQrSetupPanel({
   const [connectionName, setConnectionName] = useState("Primary WhatsApp connection");
   const [success, setSuccess] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [finalizeRetryToken, setFinalizeRetryToken] = useState(0);
   const [clearChatsAndContacts, setClearChatsAndContacts] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
-  const lastLinkedRefreshKeyRef = useRef<string | null>(null);
+  const [hasLoadedRuntimeStatus, setHasLoadedRuntimeStatus] = useState(false);
   const [status, setStatus] = useState({
     connectionStatus: initialValues.connectionStatus,
     connectedByAgentName: initialValues.connectedByAgentName,
@@ -66,12 +143,48 @@ export function WebQrSetupPanel({
     phoneNumber: initialValues.phoneNumber,
     lastError: initialValues.lastError,
     connectedAt: initialValues.connectedAt,
-    qrCodeDataUrl: initialValues.qrCodeDataUrl,
+    qrCodeDataUrl: health?.qrCodeDataUrl ?? initialValues.qrCodeDataUrl,
+    qrCodeGeneratedAt: health?.qrCodeGeneratedAt ?? null,
+    qrCodeExpiresAt: health?.qrCodeExpiresAt ?? null,
+    qrCodeExpired: health?.qrCodeExpired ?? false,
+    runtimePresent: health?.runtimePresent ?? false,
+    senderReachable: health?.senderReachable ?? true,
+    senderError: health?.senderError ?? null,
+    userConnectionState: health?.userConnectionState ?? "unknown",
+    lastHealthCheckAt: health?.lastHealthCheckAt ?? null,
+    lastHealthyAt: health?.lastHealthyAt ?? null,
+    nextRecoveryAt: health?.nextRecoveryAt ?? null,
     isSyncingHistory: false
   });
+  const statusRef = useRef(status);
+  const activeStatusRequestRef = useRef<AbortController | null>(null);
+  const statusRefreshPendingRef = useRef(false);
+  const latestStatusVersionRef = useRef(0);
+  const connectedTimingReportedRef = useRef(false);
+  const connectionAttemptIdRef = useRef<string | null>(null);
+  const latestConnectionEventSequenceRef = useRef(0);
+  const latestQrVersionRef = useRef(0);
+  const guidedQrStartRequestedRef = useRef(false);
+  const qrRequestStartedAtRef = useRef<string | null>(null);
+  const qrDisplayedTimingKeyRef = useRef<string | null>(null);
   const channelScopedUrl = buildSettingsWhatsAppUrl(channelId);
+  const connectionStatusUrl = buildConnectionStatusUrl(channelId);
   const hasSelectedChannel = Boolean(channelId?.trim());
-  const isRelinkableError = status.connectionStatus === "ERROR";
+  const isRelinkableError =
+    status.connectionStatus === "ERROR" ||
+    status.connectionStatus === "REAUTH_REQUIRED" ||
+    status.userConnectionState === "reconnection_required";
+  const hasDeferredHistory = Boolean(
+    health?.lastSyncError?.toLowerCase().includes("historical chat import has been deferred")
+  );
+  const isRuntimeImportingHistory =
+    status.isSyncingHistory ||
+    status.connectionStatus === "SYNCING_HISTORY" ||
+    status.connectionStatus === "CONNECTED";
+  // Health is server-rendered while runtime status is polled every three
+  // seconds. Never retain an old warning after the live runtime reaches READY.
+  const showHistoryStuck = Boolean(health?.isHistoryStuck && isRuntimeImportingHistory);
+  const showHistoryStabilizing = Boolean(health?.isHistoryStabilizing && isRuntimeImportingHistory);
 
   const hasActiveSession =
     status.connectionStatus !== "DISCONNECTED" &&
@@ -82,6 +195,7 @@ export function WebQrSetupPanel({
     !isPending &&
     (status.connectionStatus === "DISCONNECTED" ||
       status.connectionStatus === "AUTH_FAILED" ||
+      status.connectionStatus === "REAUTH_REQUIRED" ||
       isRelinkableError ||
       status.connectionStatus === "QR_READY" ||
       status.connectionStatus === "INITIALIZING");
@@ -95,16 +209,17 @@ export function WebQrSetupPanel({
     (hasActiveSession || Boolean(status.phoneNumber) || Boolean(status.lastError) || Boolean(status.connectedAt));
   const showsConnectedSummary =
     !isRelinkableError &&
-    (Boolean(status.connectedAt) ||
+    ((connectedViaPhonePairing && !hasLoadedRuntimeStatus) ||
+      Boolean(status.connectedAt) ||
       ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus));
-  const shouldRefreshParentForLinkedState =
-    hasSelectedChannel &&
-    !isRelinkableError &&
-    (Boolean(status.connectedAt) ||
-      Boolean(status.phoneNumber) ||
-      ["AUTHENTICATED", "CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus));
-
+  const isAuthenticatedHandoff = !isRelinkableError && status.connectionStatus === "AUTHENTICATED";
   const statusLabel = useMemo(() => {
+    if (status.connectionStatus === "AUTHENTICATED") return "Authenticating";
+    if (["CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus)) return "Connected";
+    if (status.userConnectionState === "connected") return "Connected";
+    if (status.userConnectionState === "recovering") return "Recovering connection...";
+    if (status.userConnectionState === "reconnection_required") return "Reconnection required";
+    if (status.userConnectionState === "disconnected") return "Not connected";
     if (status.isSyncingHistory || status.connectionStatus === "SYNCING_HISTORY") {
       return "Importing chats";
     }
@@ -118,11 +233,7 @@ export function WebQrSetupPanel({
     }
 
     if (status.connectionStatus === "QR_READY") {
-      return "QR ready to scan";
-    }
-
-    if (status.connectionStatus === "AUTHENTICATED") {
-      return "Authenticated";
+      return status.qrCodeExpired ? "QR expired" : "QR ready to scan";
     }
 
     if (status.connectionStatus === "INITIALIZING") {
@@ -130,7 +241,7 @@ export function WebQrSetupPanel({
     }
 
     return status.connectionStatus === "DISCONNECTED" ? "Not connected" : status.connectionStatus;
-  }, [status.connectionStatus, status.isSyncingHistory]);
+  }, [status.connectionStatus, status.isSyncingHistory, status.qrCodeExpired, status.userConnectionState]);
 
   const visibleStatusError = getVisibleStatusError(
     status.connectionStatus,
@@ -139,106 +250,263 @@ export function WebQrSetupPanel({
   );
 
   useEffect(() => {
-    lastLinkedRefreshKeyRef.current = null;
-  }, [channelId]);
+    onConnectionStateChange?.({
+      connectionStatus: status.connectionStatus,
+      phoneNumber: status.phoneNumber,
+      connectedAt: status.connectedAt,
+      userConnectionState: status.userConnectionState
+    });
+  }, [
+    onConnectionStateChange,
+    status.connectedAt,
+    status.connectionStatus,
+    status.phoneNumber,
+    status.userConnectionState
+  ]);
 
   useEffect(() => {
-    setStatus({
+    const nextStatus = {
       connectionStatus: initialValues.connectionStatus,
       connectedByAgentName: initialValues.connectedByAgentName,
       displayName: initialValues.displayName,
       phoneNumber: initialValues.phoneNumber,
       lastError: initialValues.lastError,
       connectedAt: initialValues.connectedAt,
-      qrCodeDataUrl: initialValues.qrCodeDataUrl,
+      qrCodeDataUrl: health?.qrCodeDataUrl ?? initialValues.qrCodeDataUrl,
+      qrCodeGeneratedAt: health?.qrCodeGeneratedAt ?? null,
+      qrCodeExpiresAt: health?.qrCodeExpiresAt ?? null,
+      qrCodeExpired: health?.qrCodeExpired ?? false,
+      runtimePresent: health?.runtimePresent ?? false,
+      senderReachable: health?.senderReachable ?? true,
+      senderError: health?.senderError ?? null,
+      userConnectionState: health?.userConnectionState ?? "unknown",
+      lastHealthCheckAt: health?.lastHealthCheckAt ?? null,
+      lastHealthyAt: health?.lastHealthyAt ?? null,
+      nextRecoveryAt: health?.nextRecoveryAt ?? null,
       isSyncingHistory: false
-    });
+    };
+    setStatus(nextStatus);
+    statusRef.current = nextStatus;
+    latestStatusVersionRef.current = 0;
+    connectedTimingReportedRef.current = false;
+    connectionAttemptIdRef.current = null;
+    latestConnectionEventSequenceRef.current = 0;
+    latestQrVersionRef.current = 0;
+    guidedQrStartRequestedRef.current = false;
+    qrRequestStartedAtRef.current = null;
+    qrDisplayedTimingKeyRef.current = null;
     setSuccess(null);
     setError(null);
-    setFinalizeRetryToken(0);
     setClearChatsAndContacts(false);
     setIsDisconnecting(false);
-  }, [channelId, initialValues]);
+    setHasLoadedRuntimeStatus(false);
+  }, [channelId, health, initialValues]);
 
-  useEffect(() => {
-    if (shouldRefreshParentForLinkedState) {
-      return;
+  function applyConnectionSnapshot(snapshot: ConnectionStatusSnapshot) {
+    const snapshotVersion = new Date(snapshot.updatedAt).getTime();
+    if (!Number.isFinite(snapshotVersion) || snapshotVersion < latestStatusVersionRef.current) {
+      return false;
+    }
+    if (wouldRegressActiveWhatsAppConnection(statusRef.current.connectionStatus, snapshot.connectionStatus)) {
+      return false;
     }
 
-    lastLinkedRefreshKeyRef.current = null;
-  }, [shouldRefreshParentForLinkedState]);
+    latestStatusVersionRef.current = snapshotVersion;
+    setStatus((current) => {
+      const nextStatus = {
+        ...current,
+        connectionStatus: snapshot.connectionStatus,
+        displayName: snapshot.displayName ?? "",
+        phoneNumber: snapshot.phoneNumber ?? "",
+        lastError: snapshot.lastError ?? "",
+        connectedAt: snapshot.connectedAt,
+        qrCodeDataUrl: snapshot.qrCodeDataUrl,
+        qrCodeGeneratedAt: snapshot.qrCodeGeneratedAt,
+        qrCodeExpiresAt: snapshot.qrCodeExpiresAt,
+        qrCodeExpired: snapshot.qrCodeExpired,
+        runtimePresent: snapshot.connectionStatus !== "DISCONNECTED",
+        senderReachable: true,
+        senderError: null,
+        userConnectionState: snapshot.userConnectionState,
+        lastHealthCheckAt: snapshot.lastHealthCheckAt,
+        lastHealthyAt: snapshot.lastHealthyAt,
+        nextRecoveryAt: snapshot.nextRecoveryAt,
+        isSyncingHistory: snapshot.connectionStatus === "SYNCING_HISTORY"
+      };
+      statusRef.current = nextStatus;
+      return nextStatus;
+    });
+    setHasLoadedRuntimeStatus(true);
 
-  useEffect(() => {
-    if (!shouldRefreshParentForLinkedState) {
-      return;
+    if (snapshot.connectionStatus === "AUTHENTICATED") {
+      setSuccess("QR scanned. WhatsApp is authenticating and preparing the live session.");
+    } else if (["CONNECTED", "READY", "SYNCING_HISTORY"].includes(snapshot.connectionStatus)) {
+      setSuccess("WhatsApp connected. You can open Inbox while chat history imports in the background.");
+    }
+    return true;
+  }
+
+  function applyConnectionEvent(event: ConnectionStatusRealtimeEvent) {
+    if (event.channelId !== channelId) return false;
+    const eventVersion = new Date(event.updatedAt).getTime();
+    if (!Number.isFinite(eventVersion) || eventVersion < latestStatusVersionRef.current) return false;
+
+    const currentAttemptId = connectionAttemptIdRef.current;
+    const isCurrentAttempt = Boolean(
+      event.connectionAttemptId && currentAttemptId && event.connectionAttemptId === currentAttemptId
+    );
+    if (isStaleWhatsAppConnectionEvent({
+      currentAttemptId,
+      eventAttemptId: event.connectionAttemptId,
+      currentSequence: latestConnectionEventSequenceRef.current,
+      eventSequence: event.eventSequence,
+      currentQrVersion: latestQrVersionRef.current,
+      eventQrVersion: event.qrVersion,
+      eventStatus: event.connectionStatus
+    })) {
+      return false;
+    }
+    if (
+      (!event.connectionAttemptId || isCurrentAttempt) &&
+      wouldRegressActiveWhatsAppConnection(statusRef.current.connectionStatus, event.connectionStatus)
+    ) {
+      return false;
     }
 
-    const refreshKey = [
-      channelId ?? "",
-      status.connectionStatus,
-      status.phoneNumber,
-      status.connectedAt
-    ].join("|");
-
-    if (lastLinkedRefreshKeyRef.current === refreshKey) {
-      return;
+    latestStatusVersionRef.current = eventVersion;
+    if (event.connectionAttemptId && event.connectionAttemptId !== currentAttemptId) {
+      connectionAttemptIdRef.current = event.connectionAttemptId;
+      latestConnectionEventSequenceRef.current = 0;
+      latestQrVersionRef.current = 0;
     }
+    if (typeof event.eventSequence === "number") {
+      latestConnectionEventSequenceRef.current = event.eventSequence;
+    }
+    if (typeof event.qrVersion === "number") {
+      latestQrVersionRef.current = Math.max(latestQrVersionRef.current, event.qrVersion);
+    }
+    setStatus((current) => {
+      const clearsQr = ["AUTHENTICATED", "CONNECTED", "READY", "SYNCING_HISTORY"].includes(
+        event.connectionStatus
+      );
+      const hasQrPayload = event.connectionStatus === "QR_READY" && Boolean(event.qrCodeDataUrl);
+      const nextStatus = {
+        ...current,
+        connectionStatus: event.connectionStatus,
+        displayName: event.displayName === undefined ? current.displayName : event.displayName ?? "",
+        phoneNumber: event.phoneNumber === undefined ? current.phoneNumber : event.phoneNumber ?? "",
+        connectedAt: event.connectedAt === undefined ? current.connectedAt : event.connectedAt,
+        lastError: event.lastError === undefined ? current.lastError : event.lastError ?? "",
+        qrCodeDataUrl: clearsQr ? null : hasQrPayload ? event.qrCodeDataUrl ?? null : current.qrCodeDataUrl,
+        qrCodeGeneratedAt: clearsQr
+          ? null
+          : event.qrCodeGeneratedAt === undefined
+            ? current.qrCodeGeneratedAt
+            : event.qrCodeGeneratedAt,
+        qrCodeExpiresAt: clearsQr
+          ? null
+          : event.qrCodeExpiresAt === undefined
+            ? current.qrCodeExpiresAt
+            : event.qrCodeExpiresAt,
+        qrCodeExpired: clearsQr ? false : event.qrCodeExpired ?? current.qrCodeExpired,
+        runtimePresent: event.connectionStatus !== "DISCONNECTED",
+        senderReachable: true,
+        senderError: null,
+        userConnectionState: ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(event.connectionStatus)
+          ? ("connected" as const)
+          : event.connectionStatus === "DISCONNECTED"
+            ? ("disconnected" as const)
+            : event.connectionStatus === "REAUTH_REQUIRED"
+              ? ("reconnection_required" as const)
+              : current.userConnectionState,
+        isSyncingHistory: event.connectionStatus === "SYNCING_HISTORY"
+      };
+      statusRef.current = nextStatus;
+      return nextStatus;
+    });
+    setHasLoadedRuntimeStatus(true);
+    if (event.connectionStatus === "AUTHENTICATED") {
+      setSuccess("QR accepted. WhatsApp is finalizing the live session; you can open Inbox now.");
+    } else if (["CONNECTED", "READY", "SYNCING_HISTORY"].includes(event.connectionStatus)) {
+      setSuccess("WhatsApp connected. You can open Inbox while chat history imports in the background.");
+    }
+    return true;
+  }
 
-    lastLinkedRefreshKeyRef.current = refreshKey;
-    router.refresh();
-  }, [
-    channelId,
-    router,
-    shouldRefreshParentForLinkedState,
-    status.connectedAt,
-    status.connectionStatus,
-    status.phoneNumber
-  ]);
+  function beginQrRequestOptimistically() {
+    const requestedAt = new Date().toISOString();
+    qrRequestStartedAtRef.current = requestedAt;
+    qrDisplayedTimingKeyRef.current = null;
+    latestStatusVersionRef.current = Date.now();
+    setStatus((current) => {
+      const nextStatus = {
+        ...current,
+        connectionStatus: "INITIALIZING",
+        qrCodeDataUrl: null,
+        qrCodeGeneratedAt: null,
+        qrCodeExpiresAt: null,
+        qrCodeExpired: false,
+        runtimePresent: true,
+        senderReachable: true,
+        senderError: null,
+        lastError: ""
+      };
+      statusRef.current = nextStatus;
+      return nextStatus;
+    });
+    return requestedAt;
+  }
 
   async function refreshStatus() {
     if (!hasSelectedChannel) {
-      return;
+      return null;
     }
 
-    const response = await fetch(channelScopedUrl, {
-      method: "GET"
-    });
-
-    if (!response.ok) {
-      return;
+    if (activeStatusRequestRef.current) {
+      statusRefreshPendingRef.current = true;
+      return null;
     }
 
-    const payload = (await response.json()) as {
-      status: {
-        channel?: {
-          connectionStatus?: string;
-          connectedByAgentName?: string | null;
-          displayName?: string | null;
-          phoneNumber?: string | null;
-          lastError?: string | null;
-          connectedAt?: string | null;
-        } | null;
-        qrCodeDataUrl?: string | null;
-        runtimeStatus?: string;
-        lastError?: string | null;
-        isSyncingHistory?: boolean;
-      };
-    };
+    const controller = new AbortController();
+    activeStatusRequestRef.current = controller;
+    try {
+      const response = await fetch(connectionStatusUrl, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal
+      });
 
-    setStatus({
-      connectionStatus:
-        payload.status.runtimeStatus ??
-        payload.status.channel?.connectionStatus ??
-        "DISCONNECTED",
-      connectedByAgentName:
-        payload.status.channel?.connectedByAgentName ?? initialValues.connectedByAgentName,
-      displayName: payload.status.channel?.displayName ?? "",
-      phoneNumber: payload.status.channel?.phoneNumber ?? "",
-      lastError: payload.status.lastError ?? payload.status.channel?.lastError ?? "",
-      connectedAt: payload.status.channel?.connectedAt ?? null,
-      qrCodeDataUrl: payload.status.qrCodeDataUrl ?? null,
-      isSyncingHistory: payload.status.isSyncingHistory ?? false
-    });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        setStatus((current) => ({
+          ...current,
+          senderReachable: false,
+          senderError: payload?.error ?? "Connexa cannot load the saved WhatsApp connection state."
+        }));
+        return null;
+      }
+
+      const payload = (await response.json()) as { status: ConnectionStatusSnapshot };
+      applyConnectionSnapshot(payload.status);
+      return payload.status;
+    } catch (requestError) {
+      if (!(requestError instanceof Error && requestError.name === "AbortError")) {
+        setStatus((current) => ({
+          ...current,
+          senderReachable: false,
+          senderError: "Connexa cannot load the saved WhatsApp connection state."
+        }));
+      }
+      return null;
+    } finally {
+      if (activeStatusRequestRef.current === controller) {
+        activeStatusRequestRef.current = null;
+      }
+      if (statusRefreshPendingRef.current) {
+        statusRefreshPendingRef.current = false;
+        window.setTimeout(() => void refreshStatus(), 0);
+      }
+    }
   }
 
   async function waitForQrReady(attempts = 8) {
@@ -247,53 +515,12 @@ export function WebQrSetupPanel({
     }
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const response = await fetch(channelScopedUrl, {
-        method: "GET"
-      });
-
-      if (!response.ok) {
-        return false;
-      }
-
-      const payload = (await response.json()) as {
-        status: {
-          channel?: {
-            connectionStatus?: string;
-            connectedByAgentName?: string | null;
-            displayName?: string | null;
-            phoneNumber?: string | null;
-            lastError?: string | null;
-            connectedAt?: string | null;
-          } | null;
-          qrCodeDataUrl?: string | null;
-          runtimeStatus?: string;
-          lastError?: string | null;
-          isSyncingHistory?: boolean;
-        };
-      };
-
-      const nextStatus =
-        payload.status.runtimeStatus ??
-        payload.status.channel?.connectionStatus ??
-        "DISCONNECTED";
-
-      setStatus({
-        connectionStatus: nextStatus,
-        connectedByAgentName:
-          payload.status.channel?.connectedByAgentName ?? initialValues.connectedByAgentName,
-        displayName: payload.status.channel?.displayName ?? "",
-        phoneNumber: payload.status.channel?.phoneNumber ?? "",
-        lastError: payload.status.lastError ?? payload.status.channel?.lastError ?? "",
-        connectedAt: payload.status.channel?.connectedAt ?? null,
-        qrCodeDataUrl: payload.status.qrCodeDataUrl ?? null,
-        isSyncingHistory: payload.status.isSyncingHistory ?? false
-      });
-
-      if (payload.status.qrCodeDataUrl || nextStatus === "QR_READY") {
+      const snapshot = await refreshStatus();
+      if (snapshot?.qrCodeDataUrl && snapshot.qrCodeExpired !== true) {
         return true;
       }
 
-      if (["AUTH_FAILED", "ERROR", "DISCONNECTED"].includes(nextStatus)) {
+      if (snapshot && ["AUTH_FAILED", "ERROR", "DISCONNECTED"].includes(snapshot.connectionStatus)) {
         return false;
       }
 
@@ -308,98 +535,152 @@ export function WebQrSetupPanel({
       return;
     }
 
-    void refreshStatus();
-    const interval = window.setInterval(() => {
-      void refreshStatus();
-    }, 3000);
+    let disposed = false;
+    let timer: number | null = null;
+    const schedule = () => {
+      if (disposed) return;
+      const currentStatus = statusRef.current.connectionStatus;
+      const delay = document.visibilityState !== "visible"
+        ? 15_000
+        : ["INITIALIZING", "QR_READY", "AUTHENTICATED"].includes(currentStatus)
+          ? 750
+          : ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(currentStatus)
+            ? 15_000
+            : 3_000;
+      timer = window.setTimeout(run, delay);
+    };
+    const run = async () => {
+      if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+      await refreshStatus();
+      schedule();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      if (timer !== null) window.clearTimeout(timer);
+      void run();
+    };
 
-    return () => window.clearInterval(interval);
-  }, [channelScopedUrl, hasSelectedChannel]);
+    void run();
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    return () => {
+      disposed = true;
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      activeStatusRequestRef.current?.abort();
+      activeStatusRequestRef.current = null;
+    };
+  }, [connectionStatusUrl, hasSelectedChannel]);
+
+  useEffect(() => {
+    if (!hasSelectedChannel || !channelId) return;
+    const eventSource = new EventSource(`/api/inbox/events?channelId=${encodeURIComponent(channelId)}`);
+    const requestSnapshot = () => void refreshStatus();
+    const applyRealtimeStatus = (message: Event) => {
+      try {
+        applyConnectionEvent(JSON.parse((message as MessageEvent<string>).data) as ConnectionStatusRealtimeEvent);
+      } catch {
+        void refreshStatus();
+      }
+    };
+    eventSource.addEventListener("open", requestSnapshot);
+    eventSource.addEventListener("whatsapp:connection", applyRealtimeStatus);
+
+    return () => {
+      eventSource.removeEventListener("open", requestSnapshot);
+      eventSource.removeEventListener("whatsapp:connection", applyRealtimeStatus);
+      eventSource.close();
+    };
+  }, [channelId, hasSelectedChannel]);
 
   useEffect(() => {
     if (
+      onboardingMode !== "guided" ||
       !hasSelectedChannel ||
-      !connectionName.trim() ||
-      isPending ||
-      status.isSyncingHistory ||
-      status.connectionStatus === "READY" ||
-      status.connectionStatus === "SYNCING_HISTORY" ||
-      status.connectionStatus !== "CONNECTED"
+      guidedQrStartRequestedRef.current ||
+      statusRef.current.connectionStatus !== "DISCONNECTED" ||
+      Boolean(statusRef.current.connectedAt) ||
+      Boolean(statusRef.current.phoneNumber)
     ) {
       return;
     }
 
-    let isCancelled = false;
-    let retryTimer: number | null = null;
-
+    guidedQrStartRequestedRef.current = true;
+    beginQrRequestOptimistically();
     setError(null);
-    setSuccess("Phone linked. Connexa is finishing the connection automatically.");
+    setSuccess("Preparing a secure QR code. Keep this page open; it will appear automatically.");
+    void fetch(channelScopedUrl, { method: "POST" }).then(async (response) => {
+      if (response.ok) return;
+      const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+      setError(getFriendlySetupError(payload?.error ?? "Unable to start WhatsApp QR login."));
+    }).catch(() => {
+      setError("Connexa could not reach the WhatsApp sender. It will retry when the connection status refreshes.");
+    });
+  }, [channelScopedUrl, hasSelectedChannel, onboardingMode]);
 
-    const finalizeTimer = window.setTimeout(() => {
-      startTransition(async () => {
-        const response = await fetch(channelScopedUrl, {
-          method: "PATCH"
-        });
-        const payload = (await response.json().catch(() => null)) as
-          | {
-              error?: string;
-              result?: {
-                importedChats?: number;
-                importedMessages?: number;
-              };
-            }
-          | null;
-
-        if (!response.ok) {
-          const message = payload?.error ?? "Unable to finalize the WhatsApp connection.";
-
-          if (isTransientSetupErrorMessage(message)) {
-            if (isCancelled) {
-              return;
-            }
-
-            setError(null);
-            setSuccess("Phone linked. Connexa is still syncing with WhatsApp.");
-            await refreshStatus();
-
-            retryTimer = window.setTimeout(() => {
-              if (!isCancelled) {
-                setFinalizeRetryToken((value) => value + 1);
-              }
-            }, 4000);
-            return;
-          }
-
-          setError(getFriendlySetupError(message));
-          return;
-        }
-
-        await refreshStatus();
-        setSuccess(
-          `Connection is live. Imported ${payload?.result?.importedChats ?? 0} chats and ${
-            payload?.result?.importedMessages ?? 0
-          } messages.`
-        );
-      });
-    }, 1200);
-
-    return () => {
-      isCancelled = true;
-      window.clearTimeout(finalizeTimer);
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
+  function reportQrDisplayed(qrCodeDataUrl: string) {
+    if (!channelId || status.qrCodeExpired) return;
+    const timingKey = `${connectionAttemptIdRef.current ?? "snapshot"}:${latestQrVersionRef.current}:${
+      status.qrCodeGeneratedAt ?? "unknown"
+    }`;
+    if (qrDisplayedTimingKeyRef.current === timingKey) return;
+    // The image load event confirms decoding; two animation frames ensure the
+    // QR has reached a browser paint before recording it as visible.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      const current = statusRef.current;
+      if (
+        current.connectionStatus !== "QR_READY" ||
+        current.qrCodeExpired ||
+        current.qrCodeDataUrl !== qrCodeDataUrl ||
+        qrDisplayedTimingKeyRef.current === timingKey
+      ) {
+        return;
       }
-    };
-  }, [
-    channelScopedUrl,
-    connectionName,
-    finalizeRetryToken,
-    isPending,
-    startTransition,
-    status.connectionStatus,
-    status.isSyncingHistory,
-    hasSelectedChannel
-  ]);
+      qrDisplayedTimingKeyRef.current = timingKey;
+      void fetch("/api/settings/whatsapp/timing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          channelId,
+          eventType: "QR_DISPLAYED",
+          observedAt: new Date().toISOString(),
+          requestedAt: qrRequestStartedAtRef.current,
+          connectionAttemptId: connectionAttemptIdRef.current,
+          qrVersion: latestQrVersionRef.current || null
+        }),
+        keepalive: true
+      }).catch(() => null);
+    }));
+  }
+
+  useEffect(() => {
+    if (
+      !channelId ||
+      connectedTimingReportedRef.current ||
+      !["CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.connectionStatus)
+    ) {
+      return;
+    }
+
+    connectedTimingReportedRef.current = true;
+    const timingKey = `connexa:whatsapp-ui-connected:${channelId}:${status.connectedAt ?? "unknown"}`;
+    if (window.sessionStorage.getItem(timingKey)) return;
+    window.sessionStorage.setItem(timingKey, "1");
+    void fetch("/api/settings/whatsapp/timing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channelId,
+        eventType: "UI_CONNECTED",
+        observedAt: new Date().toISOString(),
+        connectionAttemptId: connectionAttemptIdRef.current
+      }),
+      keepalive: true
+    }).catch(() => null);
+  }, [channelId, status.connectedAt, status.connectionStatus]);
 
   function handleRefreshQr() {
     if (!hasSelectedChannel) {
@@ -409,6 +690,7 @@ export function WebQrSetupPanel({
 
     setError(null);
     setSuccess(null);
+    beginQrRequestOptimistically();
 
     startTransition(async () => {
       const response = await fetch(channelScopedUrl, {
@@ -453,6 +735,7 @@ export function WebQrSetupPanel({
 
     setError(null);
     setSuccess(null);
+    beginQrRequestOptimistically();
 
     startTransition(async () => {
       const response = await fetch(channelScopedUrl, {
@@ -545,9 +828,18 @@ export function WebQrSetupPanel({
           lastError: "",
           connectedAt: null,
           qrCodeDataUrl: null,
+          qrCodeGeneratedAt: null,
+          qrCodeExpiresAt: null,
+          qrCodeExpired: false,
+          runtimePresent: false,
+          senderReachable: true,
+          senderError: null,
+          userConnectionState: "reconnection_required",
+          lastHealthCheckAt: null,
+          lastHealthyAt: null,
+          nextRecoveryAt: null,
           isSyncingHistory: false
         });
-        setFinalizeRetryToken(0);
         setClearChatsAndContacts(false);
         setSuccess(
           clearChatsAndContacts
@@ -575,17 +867,31 @@ export function WebQrSetupPanel({
       <article className="content-card settings-dark-panel wa-setup-card">
         <div className="wa-step-header">
           <div>
-            <span className="wa-step-kicker">{onboardingMode === "guided" ? "First login" : showsConnectedSummary ? "Connected number" : "Step 2"}</span>
+            <span className="wa-step-kicker">
+              {isAuthenticatedHandoff
+                ? "Scan accepted"
+                : onboardingMode === "guided"
+                  ? "First login"
+                  : showsConnectedSummary
+                    ? "Connected number"
+                    : "Step 2"}
+            </span>
             <h2>
-              {showsConnectedSummary
+              {isAuthenticatedHandoff
+                ? "WhatsApp is authenticating"
+                : showsConnectedSummary
                 ? status.phoneNumber || "WhatsApp connected"
                 : onboardingMode === "guided"
                   ? "Connect your business WhatsApp"
                   : "Setup Connection"}
             </h2>
             <p>
-              {showsConnectedSummary
-                ? "This number is already connected. Disconnect it here when you need to relink the phone or clear the imported inbox data for this channel."
+              {isAuthenticatedHandoff
+                ? "Your QR scan succeeded. WhatsApp is completing its secure live-session setup; you can continue to Inbox now."
+                : showsConnectedSummary
+                ? status.userConnectionState === "connected"
+                  ? "This number is connected and verified by the live sender. Disconnect it here when you need to relink the phone or clear imported inbox data."
+                  : "This number has a saved linked session. Connexa is checking whether the live sender can currently use it."
                 : onboardingMode === "guided"
                 ? "Scan the QR code from the phone that owns your business WhatsApp so the shared inbox can go live."
                 : "Use QR-based WhatsApp Web onboarding for a fast connection that your team can activate today."}
@@ -593,8 +899,64 @@ export function WebQrSetupPanel({
           </div>
         </div>
 
-        {showsConnectedSummary ? (
+        {showsConnectedSummary || isAuthenticatedHandoff || isRelinkableError ? (
+          <div
+            className={`wa-connection-health wa-connection-health-${status.senderReachable ? status.userConnectionState : "unknown"}`}
+            role="status"
+          >
+            <strong>{status.senderReachable ? statusLabel : "Connection status unavailable"}</strong>
+            <span>
+              {isAuthenticatedHandoff
+                ? "Scan accepted. WhatsApp is finishing the live connection in the background."
+                : !status.senderReachable
+                  ? "Connexa cannot verify the live sender right now."
+                  : status.userConnectionState === "connected"
+                    ? `Verified by the runtime watchdog${status.lastHealthCheckAt ? ` at ${status.lastHealthCheckAt}` : ""}.`
+                    : status.userConnectionState === "recovering"
+                      ? `Connexa is retrying automatically${status.nextRecoveryAt ? ` after ${status.nextRecoveryAt}` : ""}.`
+                      : status.userConnectionState === "reconnection_required"
+                        ? "The saved session needs attention. Open troubleshooting to relink the phone."
+                        : "Connexa is finalizing the linked session."
+              }
+            </span>
+          </div>
+        ) : null}
+
+        {isAuthenticatedHandoff ? (
+          <div className="wa-connected-summary" role="status">
+            <div className="form-success">
+              <strong>QR accepted.</strong>{" "}
+              The phone is linked and WhatsApp is finalizing the live connection. This page will update automatically.
+            </div>
+            <div className="wa-runtime-meta">
+              <div>
+                <span>Connection stage</span>
+                <strong>Authenticating</strong>
+              </div>
+              <div>
+                <span>What happens next</span>
+                <strong>WhatsApp confirms the live session</strong>
+              </div>
+            </div>
+            <HelpNotice title="You do not need to wait here">
+              You can enter Inbox now. Live sending becomes available as soon as WhatsApp emits its genuine ready event,
+              while chat history continues separately in the background.
+            </HelpNotice>
+          </div>
+        ) : showsConnectedSummary ? (
           <div className="wa-connected-summary">
+            <div className="form-success" role="status">
+              <strong>WhatsApp connected.</strong>{" "}
+              New messages are live now. Existing chat history continues importing in the background.
+            </div>
+            {connectedViaPhonePairing ? (
+              <div className="form-success" role="status">
+                <strong>Pairing successful.</strong>{" "}
+                {status.userConnectionState === "connected"
+                  ? "Your phone is linked. Recent chats will appear while older history imports in the background."
+                  : "Your phone is linked and Connexa is verifying the live session."}
+              </div>
+            ) : null}
             <div className="wa-runtime-meta">
               <div>
                 <span>Connected number</span>
@@ -602,7 +964,7 @@ export function WebQrSetupPanel({
               </div>
               <div>
                 <span>Channel</span>
-                <strong>{channelSelectionHref || channelId || "Not available"}</strong>
+                <strong>{channelLabel || status.phoneNumber || channelId || "Not available"}</strong>
               </div>
               <div>
                 <span>Profile name</span>
@@ -614,7 +976,7 @@ export function WebQrSetupPanel({
               </div>
               <div>
                 <span>Connected at</span>
-                <strong>{status.connectedAt || "Not available"}</strong>
+                <strong>{formatConnectionTimestamp(status.connectedAt)}</strong>
               </div>
             </div>
 
@@ -665,14 +1027,25 @@ export function WebQrSetupPanel({
                 </div>
 
                 {status.qrCodeDataUrl ? (
-                  <img alt="WhatsApp QR code" className="wa-qr-image" src={status.qrCodeDataUrl} />
+                  <img
+                    alt="WhatsApp QR code"
+                    className="wa-qr-image"
+                    onLoad={() => reportQrDisplayed(status.qrCodeDataUrl!)}
+                    src={status.qrCodeDataUrl}
+                  />
                 ) : (
                   <div className="wa-qr-placeholder">
                     <span className="wa-qr-placeholder-icon" aria-hidden="true">
                       #
                     </span>
-                    <strong>QR code will appear here</strong>
-                    <p>Generate or refresh the QR session to start linking a phone.</p>
+                    <strong>{status.qrCodeExpired ? "QR code expired" : "QR code will appear here"}</strong>
+                    <p>
+                      {status.qrCodeExpired
+                        ? status.runtimePresent
+                          ? "Connexa is waiting for WhatsApp to issue the next QR code automatically."
+                          : "The sender restarted during pairing. Generate a new session to receive a current QR code."
+                        : "Generate or refresh the QR session to start linking a phone."}
+                    </p>
                   </div>
                 )}
 
@@ -709,37 +1082,48 @@ export function WebQrSetupPanel({
                   onClick={handleRefreshQr}
                   type="button"
                 >
-                  {isPending ? "Preparing..." : status.connectionStatus === "DISCONNECTED" ? "Generate QR" : "Refresh QR"}
+                  {isPending
+                    ? "Preparing..."
+                    : status.userConnectionState === "reconnection_required"
+                      ? "Reconnect WhatsApp"
+                      : status.connectionStatus === "DISCONNECTED"
+                        ? "Generate QR"
+                        : "Refresh QR"}
                 </button>
 
                 <div className="table-subtle">
                   {isLinkingInProgress
                     ? "Linking is already in progress. Refresh stays locked so the current QR handoff can finish."
-                    : "Refreshing generates a new QR code and replaces any previous code still on screen."}
+                    : "Connexa waits for the active WhatsApp runtime to issue a current QR code."}
                 </div>
 
-                <button className="button button-secondary" disabled={isPending} onClick={handleFreshStart} type="button">
-                  {isPending ? "Preparing..." : "Start fresh session"}
-                </button>
+                <details className="wa-troubleshooting-panel">
+                  <summary>Advanced troubleshooting</summary>
+                  <div className="wa-troubleshooting-actions">
+                    <button className="button button-secondary" disabled={isPending} onClick={handleFreshStart} type="button">
+                      {isPending ? "Preparing..." : "Start fresh session"}
+                    </button>
 
-                <div className="table-subtle">
-                  Use this after the phone logged out, the linked-device session broke, or the QR flow needs a clean restart.
-                </div>
+                    <div className="table-subtle">
+                      Use this only after the phone logged out or the linked-device session cannot recover. It clears the saved browser session after confirmation.
+                    </div>
 
-                <button
-                  className="button button-secondary"
-                  disabled={!canManageConnection || isDisconnecting}
-                  onClick={handleRemoveConnection}
-                  type="button"
-                >
-                  {isDisconnecting ? "Disconnecting..." : "Disconnect"}
-                </button>
+                    <button
+                      className="button button-secondary"
+                      disabled={!canManageConnection || isDisconnecting}
+                      onClick={handleRemoveConnection}
+                      type="button"
+                    >
+                      {isDisconnecting ? "Disconnecting..." : "Disconnect"}
+                    </button>
 
-                <div className="table-subtle">
-                  {canManageConnection
-                    ? "Use this if the current linked number is stuck or failed. A confirmation modal opens before Connexa disconnects it."
-                    : "Disconnect will appear once this WhatsApp channel has a linked session or saved phone details."}
-                </div>
+                    <div className="table-subtle">
+                      {canManageConnection
+                        ? "Disconnect opens a confirmation step before changing the active session."
+                        : "Disconnect becomes available after this channel has session data."}
+                    </div>
+                  </div>
+                </details>
               </div>
             </div>
           </>
@@ -756,23 +1140,29 @@ export function WebQrSetupPanel({
           )}
         </HelpNotice>
 
-        {health?.isLiveOnlyMode ? (
-          <HelpNotice title="Live only mode is active">
-            WhatsApp is now treated as live for new inbound and outbound traffic. Historical import has been deferred
-            because the earlier sync stalled. You can keep using the inbox for new conversations while deciding whether
-            to relink the number later for another history import attempt.
+        {!status.senderReachable ? (
+          <HelpNotice title="WhatsApp sender temporarily unreachable">
+            Connexa is showing the last saved WhatsApp connection state. This does not mean the linked WhatsApp
+            session is disconnected. {status.senderError || "The sender status check will retry automatically."}
           </HelpNotice>
         ) : null}
 
-        {health?.isHistoryStuck ? (
+        {hasDeferredHistory ? (
+          <HelpNotice title="Historical import is paused">
+            WhatsApp remains available for new inbound and outbound traffic. Historical import was deferred after it
+            stalled and Connexa will retry it in the background. You can keep using Inbox; relink the number only if
+            the import does not recover later.
+          </HelpNotice>
+        ) : null}
+
+        {showHistoryStuck ? (
           <HelpNotice title="Historical import looks stuck">
-            WhatsApp is connected, but historical chat import has taken too long without producing inbox data.
-            New live inbound and outbound traffic should still work. If the imported counts stay at zero, remove and
-            relink the number to start a fresh session.
+            WhatsApp is connected, but no historical-import progress has been recorded for several minutes. New live
+            traffic remains available, and Connexa will quarantine a problematic chat and continue automatically.
           </HelpNotice>
         ) : null}
 
-        {health?.isHistoryStabilizing ? (
+        {showHistoryStabilizing && health ? (
           <HelpNotice title="Connection is live, history is still stabilizing">
             WhatsApp is connected. Historical chat import is still stabilizing in the background, but new live
             messages should still appear in the inbox. Imported {health.importedConversationCount} conversations and{" "}
@@ -800,11 +1190,20 @@ export function WebQrSetupPanel({
               Skip for now
             </Link>
           ) : null}
+          {showsConnectedSummary || isAuthenticatedHandoff ? (
+            <Link className="button button-primary" href="/inbox">
+              {isAuthenticatedHandoff ? "Continue to Inbox" : "Go to Inbox"}
+            </Link>
+          ) : null}
           <div className="table-subtle">
-            {status.connectionStatus === "CONNECTED" || status.connectionStatus === "SYNCING_HISTORY"
+            {status.userConnectionState === "recovering"
+              ? "Connexa is recovering the saved session automatically."
+              : status.userConnectionState === "connected"
+                ? "WhatsApp is connected and verified."
+                : status.connectionStatus === "CONNECTED" || status.connectionStatus === "SYNCING_HISTORY"
               ? "Connexa is finishing the connection automatically."
               : status.connectionStatus === "READY"
-                ? "WhatsApp is connected and ready."
+                ? "Connexa is checking the live WhatsApp session."
                 : hasActiveSession
                   ? "Finish linking on the phone and Connexa will continue automatically."
                   : "Generate a QR code and link the phone to continue."}

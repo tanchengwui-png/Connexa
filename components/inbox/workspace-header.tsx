@@ -20,6 +20,7 @@ type WorkspaceHeaderProps = {
 const FILTER_COPY: Record<InboxBuiltInFilterKey, string> = {
   all: "All live conversations across the shared inbox.",
   "assigned-others": "Threads currently owned by other teammates.",
+  groups: "WhatsApp group conversations in the shared inbox.",
   hot: "Priority conversations that need operator attention now.",
   mine: "Threads currently assigned to you.",
   snoozed: "Conversations temporarily removed from the live queue until they return.",

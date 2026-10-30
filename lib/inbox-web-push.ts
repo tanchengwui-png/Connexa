@@ -234,6 +234,8 @@ export async function dispatchInboxWebPushForMessageEvent(input: {
     select: {
       id: true,
       workspaceId: true,
+      isMuted: true,
+      muteExpiration: true,
       lastMessagePreview: true,
       contact: {
         select: {
@@ -245,6 +247,13 @@ export async function dispatchInboxWebPushForMessageEvent(input: {
   });
 
   if (!conversation) {
+    return;
+  }
+
+  const isConversationMuteActive =
+    conversation.isMuted &&
+    (conversation.muteExpiration === null || conversation.muteExpiration.getTime() > Date.now());
+  if (isConversationMuteActive) {
     return;
   }
 
@@ -264,10 +273,31 @@ export async function dispatchInboxWebPushForMessageEvent(input: {
       title,
       body,
       url: `/inbox?conversationId=${encodeURIComponent(conversation.id)}`,
-      icon: `${getAppUrl()}/icon`,
+      icon: `${getAppUrl()}/connexa-favicon-512.png`,
       createdAt: input.timestamp
     }
   });
+}
+
+export async function dispatchInboxWebPushForHistoricalUnreadSummary(input: {
+  workspaceId: string;
+  conversationId: string;
+  unreadCount: number;
+  timestamp: string;
+}) {
+  if (!isInboxWebPushConfigured() || input.unreadCount < 1) return;
+  const conversation = await prisma.conversation.findFirst({
+    where: { id: input.conversationId, workspaceId: input.workspaceId },
+    select: { id: true, isMuted: true, muteExpiration: true, contact: { select: { displayName: true, phone: true } } }
+  });
+  if (!conversation || (conversation.isMuted && (conversation.muteExpiration === null || conversation.muteExpiration.getTime() > Date.now()))) return;
+  const title = conversation.contact.displayName?.trim() || conversation.contact.phone || "Unread Inbox messages";
+  const eventId = `historical-unread:${conversation.id}:${input.unreadCount}:${input.timestamp}`;
+  await dispatchInboxWebPushToWorkspace({ workspaceId: input.workspaceId, payload: {
+    notificationId: eventId, eventId, workspaceId: input.workspaceId, conversationId: conversation.id,
+    title, body: `${input.unreadCount} unread message${input.unreadCount === 1 ? "" : "s"} from ${title}`,
+    url: `/inbox?conversationId=${encodeURIComponent(conversation.id)}`, icon: `${getAppUrl()}/connexa-favicon-512.png`, createdAt: input.timestamp
+  }});
 }
 
 export async function dispatchInboxWebPushForConversationEvent(input: {
@@ -324,7 +354,7 @@ export async function dispatchInboxWebPushForConversationEvent(input: {
       title,
       body,
       url: `/inbox?conversationId=${encodeURIComponent(conversation.id)}`,
-      icon: `${getAppUrl()}/icon`,
+      icon: `${getAppUrl()}/connexa-favicon-512.png`,
       createdAt: input.timestamp
     }
   });

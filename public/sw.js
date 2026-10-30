@@ -2,7 +2,7 @@ const CACHE_VERSION = "connexa-pwa-v2";
 const APP_SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const PUSH_META_CACHE = `${CACHE_VERSION}-push-meta`;
-const APP_SHELL_URLS = ["/", "/manifest.webmanifest", "/icon", "/apple-icon"];
+const APP_SHELL_URLS = ["/", "/manifest.webmanifest", "/connexa-favicon-512.png"];
 const MUTE_STATE_REQUEST = "/__connexa/push-mute-state";
 const SEEN_NOTIFICATION_PREFIX = "/__connexa/push-seen/";
 
@@ -20,7 +20,7 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((key) => key !== APP_SHELL_CACHE && key !== STATIC_CACHE)
+            .filter((key) => key !== APP_SHELL_CACHE && key !== STATIC_CACHE && key !== PUSH_META_CACHE)
             .map((key) => caches.delete(key))
         )
       )
@@ -184,8 +184,8 @@ async function showInboxNotification(payload) {
 
   await self.registration.showNotification(payload.title, {
     body: payload.body,
-    icon: payload.icon || "/icon",
-    badge: "/icon",
+    icon: payload.icon || "/connexa-favicon-512.png",
+    badge: "/connexa-favicon-512.png",
     tag: dedupeKey || payload.workspaceId,
     timestamp: Date.parse(payload.createdAt) || Date.now(),
     data: {
@@ -236,7 +236,7 @@ function sanitizePushPayload(candidate) {
       typeof candidate.conversationId === "string" && candidate.conversationId ? candidate.conversationId : null,
     title: candidate.title,
     body: candidate.body,
-    icon: typeof candidate.icon === "string" && candidate.icon ? candidate.icon : "/icon",
+    icon: typeof candidate.icon === "string" && candidate.icon ? candidate.icon : "/connexa-favicon-512.png",
     url: candidate.url,
     createdAt: candidate.createdAt
   };

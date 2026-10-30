@@ -26,6 +26,7 @@ type IncomingMessageBubbleProps = {
   }>;
   sender: string;
   sentAt: string;
+  showSender?: boolean;
 };
 
 export function IncomingMessageBubble({
@@ -44,7 +45,8 @@ export function IncomingMessageBubble({
   reactions = [],
   replyToMessage,
   sender,
-  sentAt
+  sentAt,
+  showSender = true
 }: IncomingMessageBubbleProps) {
   const normalizedBody = normalizeBubbleText(body);
   const normalizedReplyBody = normalizeNullableBubbleText(replyToMessage?.body);
@@ -63,9 +65,9 @@ export function IncomingMessageBubble({
   const reactionSummary = summarizeReactions(reactions);
 
   return (
-    <div className={`chat-bubble-row ${direction}`}>
+    <article className={`chat-bubble-row ${direction}${showSender ? " group-start" : " grouped"}`}>
       <div className={`chat-bubble ${direction} ${outboundClassName}`.trim()}>
-        <div className="chat-bubble-sender">{normalizedSender}</div>
+        {showSender ? <div className="chat-bubble-sender">{normalizedSender}</div> : null}
         {!isDeleted && replyToMessage ? (
           <div className="chat-bubble-reply-context">
             <span>{replyToMessage.sender ?? "Previous message"}</span>
@@ -132,7 +134,12 @@ export function IncomingMessageBubble({
         {!isDeleted && (onReply || (onDelete && canDelete)) ? (
           <div className="chat-bubble-actions">
             {onReply ? (
-              <button className="chat-bubble-action" onClick={() => onReply(id)} type="button">
+              <button
+                aria-label={`Reply to ${normalizedSender}'s message`}
+                className="chat-bubble-action"
+                onClick={() => onReply(id)}
+                type="button"
+              >
                 Reply
               </button>
             ) : null}
@@ -144,7 +151,7 @@ export function IncomingMessageBubble({
           </div>
         ) : null}
       </div>
-    </div>
+    </article>
   );
 }
 

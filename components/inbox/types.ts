@@ -4,6 +4,7 @@ export type InboxConversation = {
   channelLabel: string | null;
   contactName: string;
   photoUrl: string | null;
+  profilePicUrl: string | null;
   phone: string;
   isGroup: boolean;
   status: string;
@@ -39,9 +40,16 @@ export type InboxConversation = {
   lastMessageAtIso: string;
 };
 
+export type InboxConversationPage = {
+  hasMore: boolean;
+  nextCursor: string | null;
+  totalCount: number;
+};
+
 export const BUILT_IN_INBOX_FILTER_KEYS = [
   "all",
   "mine",
+  "groups",
   "assigned-others",
   "unassigned",
   "unread",
@@ -88,8 +96,22 @@ export type InboxWhatsAppStatus = {
   }>;
   updatedAt: string | null;
   runtimeStatus: string;
+  senderReachable: boolean;
+  senderError: string | null;
   isInboxReady: boolean;
   isHistoryStabilizing: boolean;
+  historySyncFullyCaughtUp: boolean;
+  historySyncProcessedChats: number;
+  historySyncTotalChats: number | null;
+  historySyncPhase: "fast_bootstrap" | "incremental_sync" | "media_enrichment" | "initial_import" | "catch_up" | "reconcile" | "idle" | "deferred" | "error" | "disconnected";
+  historySyncActive: boolean;
+  historySyncStartedAt: string | null;
+  historySyncProgressAt: string | null;
+  historySyncLastSuccessfulAt: string | null;
+  historySyncNextReconciliationAt: string | null;
+  historySyncRemainingChats: number;
+  historySyncDeferredChats: number;
+  historySyncNewMessages: number;
   isHistoryStuck: boolean;
   isLiveOnlyMode: boolean;
   importedConversationCount: number;
@@ -181,6 +203,7 @@ export type InboxMessage = {
   body: string;
   deletedAt: string | null;
   direction: "inbound" | "outbound";
+  isSystemEvent: boolean;
   isConnexaOutbound: boolean;
   outboundJobAvailableAt: string | null;
   outboundJobLastError: string | null;
@@ -212,7 +235,13 @@ export type InboxSelectedConversation = {
   channelId: string | null;
   channelLabel: string | null;
   contactName: string;
+  whatsappPushName: string | null;
   photoUrl: string | null;
+  profilePicUrl: string | null;
+  messagePage: {
+    hasMore: boolean;
+    nextCursor: string | null;
+  };
   lead: {
     id: string;
     product: {

@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "incremental": false,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "next-env.d.ts",
+    "lib/basic-whatsapp-qr-test.ts",
+    "app/api/test/whatsapp-basic/route.ts",
+    "components/basic-whatsapp-qr-test.tsx",
+    "app/whatsapp-basic-test/page.tsx"
+  ]
+}

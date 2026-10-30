@@ -4,11 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   buildInboxDesktopNotificationsNotNowKey,
   clearInboxDesktopNotificationsNotNow,
+  clearInboxDesktopNotificationsDisabled,
   disableInboxBrowserPushSubscription,
   ensureInboxBrowserPushSubscription,
   getBrowserPushPermissionState,
   persistInboxDesktopNotificationsNotNow,
+  persistInboxDesktopNotificationsDisabled,
   readInboxDesktopNotificationsNotNow,
+  readInboxDesktopNotificationsDisabled,
   requestBrowserPushPermission,
   syncInboxNotificationMuteStateToServiceWorker
 } from "@/lib/inbox-browser-notifications-client";
@@ -44,11 +47,15 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
   const [error, setError] = useState<string | null>(null);
   const [promptDismissedAt, setPromptDismissedAt] = useState(input.initialPromptDismissedAt);
   const [hasLocalNotNow, setHasLocalNotNow] = useState(() => readInboxDesktopNotificationsNotNow(scope));
+  const [isLocallyDisabled, setIsLocallyDisabled] = useState(() =>
+    readInboxDesktopNotificationsDisabled(scope)
+  );
   const [muted, setMuted] = useState(input.initialMuted);
   const mutationSequenceRef = useRef(0);
 
   useEffect(() => {
     setHasLocalNotNow(readInboxDesktopNotificationsNotNow(scope));
+    setIsLocallyDisabled(readInboxDesktopNotificationsDisabled(scope));
   }, [scope]);
 
   useEffect(() => {
@@ -64,6 +71,7 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
 
   const refreshStatus = useCallback(async () => {
     setPermissionState(getBrowserPushPermissionState());
+    setIsLocallyDisabled(readInboxDesktopNotificationsDisabled(scope));
 
     const response = await fetch("/api/inbox/push/status", {
       method: "GET",
@@ -79,14 +87,14 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
     setSubscriptionCount(typeof payload?.pushSubscriptionCount === "number" ? payload.pushSubscriptionCount : 0);
     setVapidPublicKey(payload?.vapidPublicKey ?? null);
     setPromptDismissedAt(payload?.inboxDesktopNotificationsPromptDismissedAt ?? input.initialPromptDismissedAt);
-  }, [input.initialPromptDismissedAt]);
+  }, [input.initialPromptDismissedAt, scope]);
 
   useEffect(() => {
     void refreshStatus();
   }, [refreshStatus]);
 
   useEffect(() => {
-    if (permissionState !== "granted" || !pushEnabled || !vapidPublicKey) {
+    if (permissionState !== "granted" || isLocallyDisabled || !pushEnabled || !vapidPublicKey) {
       return;
     }
 
@@ -110,7 +118,7 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
     return () => {
       cancelled = true;
     };
-  }, [permissionState, pushEnabled, scope, vapidPublicKey]);
+  }, [isLocallyDisabled, permissionState, pushEnabled, scope, vapidPublicKey]);
 
   useEffect(() => {
     if (
@@ -158,6 +166,8 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
 
       clearInboxDesktopNotificationsNotNow(scope);
       setHasLocalNotNow(false);
+      clearInboxDesktopNotificationsDisabled(scope);
+      setIsLocallyDisabled(false);
 
       if (!pushEnabled || !vapidPublicKey) {
         setSubscriptionCount(0);
@@ -181,6 +191,30 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
       }
     }
   }, [pushEnabled, scope, vapidPublicKey]);
+
+  const disableDesktopNotifications = useCallback(async () => {
+    const requestSequence = ++mutationSequenceRef.current;
+    setIsPending(true);
+    setError(null);
+
+    persistInboxDesktopNotificationsDisabled(scope);
+    setIsLocallyDisabled(true);
+
+    try {
+      await disableInboxBrowserPushSubscription();
+      setSubscriptionCount(0);
+      return true;
+    } catch (nextError) {
+      if (requestSequence === mutationSequenceRef.current) {
+        setError(nextError instanceof Error ? nextError.message : "Unable to disable desktop notifications.");
+      }
+      return false;
+    } finally {
+      if (requestSequence === mutationSequenceRef.current) {
+        setIsPending(false);
+      }
+    }
+  }, [scope]);
 
   const dismissDesktopNotificationsForNow = useCallback(() => {
     persistInboxDesktopNotificationsNotNow(scope);
@@ -221,6 +255,7 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
     permissionState,
     pushEnabled,
     subscriptionCount,
+    isLocallyDisabled,
     isPending,
     error,
     shouldShowPrompt:
@@ -233,6 +268,7 @@ export function useInboxBrowserNotifications(input: UseInboxBrowserNotifications
     setMuted,
     refreshStatus,
     enableDesktopNotifications,
+    disableDesktopNotifications,
     dismissDesktopNotificationsForNow,
     dismissDesktopNotificationsPromptPermanently,
     clearCurrentDesktopNotificationSubscription

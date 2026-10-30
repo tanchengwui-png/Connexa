@@ -137,8 +137,8 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
   };
 
   return (
-    <section className="content-card team-members-card">
-      <div className="card-header">
+    <section className="content-card team-members-card team-panel">
+      <div className="card-header team-panel-header">
         <div>
           <h3 className="card-title">Workspace members</h3>
           <p className="muted">Current roles and statuses for {workspaceName}.</p>
@@ -153,8 +153,7 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
             <div className="team-member-identity">
               <strong>{member.name}</strong>
               <span className="table-subtle">{member.email}</span>
-              <span className="table-subtle">{member.phone ? `WhatsApp: ${member.phone}` : "WhatsApp not set"}</span>
-              <span className={`team-availability-pill ${member.availabilityTone}`}>{member.availabilityLabel}</span>
+              <span className="table-subtle">{member.isCurrentManager ? "Current session" : `Current: ${member.role} | ${member.status}`}</span>
             </div>
             <div className="team-member-controls">
               <label className="contact-assignment-label">
@@ -192,8 +191,12 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
                 />
               </label>
             </div>
+            <div className="team-member-availability">
+              <span className={`team-availability-pill ${member.availabilityTone}`}>{member.availabilityLabel}</span>
+            </div>
             <div className="team-member-actions">
               <button
+                aria-label={`Save ${member.name}`}
                 className="inbox-search-tool team-member-save"
                 disabled={
                   isPending ||
@@ -207,6 +210,7 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
                 Save
               </button>
               <button
+                aria-label={`Remove ${member.name}`}
                 className="inbox-search-tool product-delete-button team-member-remove"
                 disabled={isPending || member.isCurrentManager}
                 onClick={() => removeMember(member)}
@@ -215,9 +219,6 @@ export function TeamMembersCard({ members, workspaceName }: TeamMembersCardProps
                 Remove
               </button>
             </div>
-            <span className="table-subtle">
-              {member.isCurrentManager ? "Current session" : `Current: ${member.role} | ${member.status}`}
-            </span>
           </article>
         ))}
       </div>

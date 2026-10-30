@@ -561,7 +561,7 @@ function QuickReplyMediaSelector({
             >
               <div
                 aria-modal="true"
-                className="inbox-dialog automation-media-dialog"
+                className="inbox-dialog automation-media-dialog quick-replies-media-dialog"
                 onClick={(event) => event.stopPropagation()}
                 role="dialog"
                 style={{ zIndex: INBOX_LAYERS.modal + 1 }}

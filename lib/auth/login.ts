@@ -43,7 +43,7 @@ export async function loginWithPassword(input: {
 
   const agents = await findAgentsByEmail(email);
   const matchingAgents = agents.filter(
-    (agent) => agent.effectivePasswordHash && verifyPassword(password, agent.effectivePasswordHash)
+    (agent) => !agent.accountDeactivatedAt && agent.effectivePasswordHash && verifyPassword(password, agent.effectivePasswordHash)
   );
 
   if (!matchingAgents.length) {
@@ -120,6 +120,10 @@ export async function loginWithWorkspaceSelection(input: {
 
   if (!agent?.effectivePasswordHash) {
     throw new Error("This workspace login is no longer available. Sign in again.");
+  }
+
+  if (agent.accountDeactivatedAt) {
+    throw new Error("This account has been deleted.");
   }
 
   if (!agent.effectiveEmailVerifiedAt) {

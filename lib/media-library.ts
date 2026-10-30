@@ -615,7 +615,10 @@ async function writePreparedUploadFile(upload: PreparedUpload): Promise<StoredPr
   return {
     ...upload,
     storagePath,
-    publicUrl: `/uploads/media-library/${fileName}`
+    // Runtime-created files in `public/uploads` are not reliably served by
+    // Next's static route once middleware is active. Route media through the
+    // upload handler, which reads the same file safely and supports streaming.
+    publicUrl: `/api/uploads/media-library/${fileName}`
   };
 }
 

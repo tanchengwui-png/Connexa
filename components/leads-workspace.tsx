@@ -88,18 +88,6 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
     });
   }, [leads, ownerFilter, query, stageFilter]);
 
-  const stageSummary = useMemo(() => {
-    const counts = new Map<string, number>();
-
-    for (const lead of filteredLeads) {
-      counts.set(lead.stageLabel, (counts.get(lead.stageLabel) ?? 0) + 1);
-    }
-
-    return Array.from(counts.entries())
-      .sort((left, right) => right[1] - left[1])
-      .slice(0, 3);
-  }, [filteredLeads]);
-
   const handleQuickUpdate = (
     lead: LeadSummary,
     patch: Partial<Pick<LeadSummary, "ownerId" | "priority" | "stage">>
@@ -129,75 +117,58 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
   };
 
   const unassignedCount = filteredLeads.filter((lead) => !lead.ownerId).length;
+  const newLeadCount = filteredLeads.filter((lead) => lead.stage === "NEW_LEAD").length;
+  const hasActiveFilters = Boolean(query.trim() || stageFilter !== "ALL" || ownerFilter !== "ALL");
 
   return (
-    <section className="auth-page-stack">
-      <section className="auth-page-hero auth-page-hero-compact">
+    <section className="auth-page-stack leads-page">
+      <section className="auth-page-hero auth-page-hero-compact leads-hero">
         <div className="auth-page-hero-copy">
           <span className="auth-page-kicker">Pipeline management</span>
-          <h2>Leads</h2>
+          <h1>Leads</h1>
           <p>Qualify, assign, and advance active opportunities from a faster list-first workspace.</p>
           <div className="auth-page-hero-metrics">
             <span className="auth-page-hero-stat">
               <strong>{filteredLeads.length}</strong>
-              <small>visible leads</small>
+              <small>{filteredLeads.length === 1 ? "visible lead" : "visible leads"}</small>
             </span>
             <span className="auth-page-hero-stat">
-              <strong>{stageSummary[0]?.[1] ?? 0}</strong>
-              <small>{stageSummary[0]?.[0] ?? "top stage"}</small>
+              <strong>{newLeadCount}</strong>
+              <small>{newLeadCount === 1 ? "New lead" : "New leads"}</small>
             </span>
             <span className="auth-page-hero-stat">
               <strong>{unassignedCount}</strong>
               <small>unassigned</small>
             </span>
-            <span className="auth-page-hero-panel">
-              <span className="auth-page-hero-panel-label">List status</span>
-              <strong>
-                {query.trim() || stageFilter !== "ALL" || ownerFilter !== "ALL"
-                  ? "Filters are active"
-                  : "Viewing all active leads"}
-              </strong>
-              <p>
-                {filteredLeads.length} visible leads, {stageSummary[0]?.[1] ?? 0} in{" "}
-                {stageSummary[0]?.[0] ?? "top stage"}, and {unassignedCount} unassigned.
-              </p>
-            </span>
           </div>
         </div>
       </section>
 
-      <section className="content-card leads-workspace-card">
+      <section className="content-card leads-workspace-card leads-panel">
       <div className="card-header leads-workspace-head">
         <div>
           <h3 className="card-title">Pipeline view</h3>
           <p className="muted">Manage active opportunities directly from the list, then open the full record when needed.</p>
         </div>
-        <div className="scheduled-inline-stats">
-          <span>{filteredLeads.length} shown</span>
-          {stageSummary.map(([label, count]) => (
-            <span key={label}>
-              {count} {label}
-            </span>
-          ))}
-        </div>
       </div>
 
       <div className="leads-toolbar">
         <input
+          aria-label="Search leads"
           className="search-input"
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search lead, phone, source, or custom fields..."
           type="search"
           value={query}
         />
-        <select className="lead-record-input app-select" onChange={(event) => setStageFilter(event.target.value)} value={stageFilter}>
+        <select aria-label="Filter leads by stage" className="lead-record-input app-select" onChange={(event) => setStageFilter(event.target.value)} value={stageFilter}>
           {STAGE_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
           ))}
         </select>
-        <select className="lead-record-input app-select" onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
+        <select aria-label="Filter leads by owner" className="lead-record-input app-select" onChange={(event) => setOwnerFilter(event.target.value)} value={ownerFilter}>
           <option value="ALL">All owners</option>
           <option value="UNASSIGNED">Unassigned</option>
           {agents.map((agent) => (
@@ -208,6 +179,8 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
         </select>
       </div>
 
+      <p className="leads-result-summary">{hasActiveFilters ? `Showing ${filteredLeads.length} filtered active lead${filteredLeads.length === 1 ? "" : "s"}` : `Showing ${filteredLeads.length} active lead${filteredLeads.length === 1 ? "" : "s"}`}</p>
+
       {error ? <div className="form-error">{error}</div> : null}
 
       <div className="lead-workspace-list">
@@ -217,25 +190,15 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
               <div className="lead-workspace-main">
                 <div className="lead-workspace-top">
                   <div>
-                    <strong>{lead.name}</strong>
-                    <p className="muted">{lead.phone}</p>
+                    <strong title={lead.name || lead.phone}>{lead.name || lead.phone}</strong>
+                    <p className="muted">{lead.name ? lead.phone : "No contact name"}</p>
                   </div>
-                  <span className="timeline-time">{lead.lastActivityLabel}</span>
                 </div>
+              </div>
 
-                <div className="lead-workspace-project">
-                  <span className="lead-chip">{lead.stageLabel}</span>
-                  <span className="lead-chip">{lead.priorityLabel}</span>
-                  {lead.value ? <span className="lead-chip">{lead.currency} {lead.value.toLocaleString()}</span> : null}
-                  {lead.productName ? <span className="lead-chip">{lead.productName}</span> : null}
-                </div>
-
-                <div className="lead-workspace-copy">
-                  <strong>{lead.title}</strong>
-                  <span>{lead.customSummary || "No custom fields captured"}</span>
-                  <span>{lead.nextActionLabel} • {lead.sourceDetail}</span>
-                  <p>{lead.signal}</p>
-                </div>
+              <div className="lead-workspace-activity">
+                <strong>{lead.lastActivityLabel || "No activity yet"}</strong>
+                <span>Next action: {lead.nextActionLabel || "Not set"}</span>
               </div>
 
               <div className="lead-workspace-side">
@@ -243,6 +206,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
                   <span>Owner</span>
                   <select
                     className="lead-record-input app-select contact-assignment-select"
+                    aria-label={`Owner for ${lead.name || lead.phone}`}
                     defaultValue={lead.ownerId ?? ""}
                     disabled={isPending}
                     onChange={(event) =>
@@ -262,6 +226,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
                   <span>Stage</span>
                   <select
                     className="lead-record-input app-select contact-assignment-select"
+                    aria-label={`Stage for ${lead.name || lead.phone}`}
                     defaultValue={lead.stage}
                     disabled={isPending}
                     onChange={(event) => handleQuickUpdate(lead, { stage: event.target.value })}
@@ -278,6 +243,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
                   <span>Priority</span>
                   <select
                     className="lead-record-input app-select contact-assignment-select"
+                    aria-label={`Priority for ${lead.name || lead.phone}`}
                     defaultValue={lead.priority}
                     disabled={isPending}
                     onChange={(event) => handleQuickUpdate(lead, { priority: event.target.value })}
@@ -290,7 +256,7 @@ export function LeadsWorkspace({ agents, leads }: LeadsWorkspaceProps) {
                   </select>
                 </label>
 
-                <a className="button button-secondary lead-workspace-open" href={`/leads/${lead.id}`}>
+                <a aria-label={`Open lead record for ${lead.name || lead.phone}`} className="button button-secondary lead-workspace-open" href={`/leads/${lead.id}`}>
                   Open lead record
                 </a>
               </div>

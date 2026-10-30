@@ -102,13 +102,15 @@ export function DashboardTopbarControls({
             <span>{roleLabel}</span>
           </div>
 
-          <div className="dashboard-topbar-workspace-section">
-            <div className="dashboard-topbar-workspace-head">
-              <strong>Workspace</strong>
-              <span>Switch active workspace</span>
+          {memberships.length > 1 ? (
+            <div className="dashboard-topbar-workspace-section">
+              <div className="dashboard-topbar-workspace-head">
+                <strong>Workspace</strong>
+                <span>Switch active workspace</span>
+              </div>
+              <WorkspaceSwitcher memberships={memberships} variant="menu" />
             </div>
-            <WorkspaceSwitcher memberships={memberships} variant="menu" />
-          </div>
+          ) : null}
 
           {planStatus ? (
             <div className={`dashboard-topbar-plan-status dashboard-topbar-menu-plan-status is-${planStatus.tone}`}>

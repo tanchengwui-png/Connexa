@@ -33,7 +33,6 @@ export async function PUT(request: NextRequest) {
       automationWorkflowIdleHours?: number;
       automationWorkflowExpireHours?: number;
       freeTrialDurationDays?: number;
-      expiredAccountCleanupDays?: number;
       sessionTimeoutMinutes?: number;
       rememberMeTimeoutMinutes?: number;
     };
@@ -55,7 +54,9 @@ export async function PUT(request: NextRequest) {
       automationWorkflowIdleHours: Number(body.automationWorkflowIdleHours ?? 24),
       automationWorkflowExpireHours: Number(body.automationWorkflowExpireHours ?? 72),
       freeTrialDurationDays: Number(body.freeTrialDurationDays ?? 14),
-      expiredAccountCleanupDays: Number(body.expiredAccountCleanupDays ?? 60),
+      // Compatibility for the persisted platform-config shape. This value is
+      // no longer exposed or consumed by any expiry/deletion workflow.
+      expiredAccountCleanupDays: 60,
       sessionTimeoutMinutes: Number(body.sessionTimeoutMinutes ?? 60),
       rememberMeTimeoutMinutes: Number(body.rememberMeTimeoutMinutes ?? 43_200)
     });

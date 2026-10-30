@@ -256,7 +256,8 @@ function platformTransactionCte() {
         u."workspaceId",
         CASE
           WHEN u.status = 'PAID' THEN 'PAID'
-          WHEN u.status IN ('PAYMENT_FAILED') THEN 'FAILED'
+          WHEN u.status IN ('PAYMENT_FAILED', 'PAYMENT_EXPIRED') THEN 'FAILED'
+          WHEN u.status = 'PAYMENT_REVIEW_REQUIRED' THEN 'PENDING'
           WHEN u.status IN ('CANCELLED', 'SUPERSEDED') THEN 'CANCELLED'
           WHEN u.status = 'EXPIRED' THEN 'EXPIRED'
           ELSE 'PENDING'

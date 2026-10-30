@@ -20,9 +20,22 @@ const SENDER_SERVICE_RUNTIME_TIMEOUT_MS = Math.max(
   Number.parseInt(process.env.SENDER_SERVICE_RUNTIME_TIMEOUT_MS ?? "30000", 10) || 30000
 );
 
+// Pairing can take longer than a normal runtime status request while WhatsApp
+// loads its alternate-device linking module. Keep this isolated from message
+// send timeouts and allow the sender process to return the actual code.
+const SENDER_SERVICE_PAIRING_TIMEOUT_MS = Math.max(
+  SENDER_SERVICE_RUNTIME_TIMEOUT_MS,
+  Number.parseInt(process.env.SENDER_SERVICE_PAIRING_TIMEOUT_MS ?? "60000", 10) || 60_000
+);
+
 type RemoteChannelPayload = {
   connectedAt?: string | Date | null;
   lastSeenAt?: string | Date | null;
+  latestHealthCheckAt?: string | Date | null;
+  lastHealthyAt?: string | Date | null;
+  runtimeDegradedAt?: string | Date | null;
+  nextRecoveryAt?: string | Date | null;
+  reauthRequiredAt?: string | Date | null;
   updatedAt?: string | Date | null;
   [key: string]: unknown;
 };
@@ -61,6 +74,11 @@ function normalizeRemoteChannel<T extends RemoteChannelPayload | null | undefine
     ...channel,
     connectedAt: toDate(channel.connectedAt),
     lastSeenAt: toDate(channel.lastSeenAt),
+    latestHealthCheckAt: toDate(channel.latestHealthCheckAt),
+    lastHealthyAt: toDate(channel.lastHealthyAt),
+    runtimeDegradedAt: toDate(channel.runtimeDegradedAt),
+    nextRecoveryAt: toDate(channel.nextRecoveryAt),
+    reauthRequiredAt: toDate(channel.reauthRequiredAt),
     updatedAt: toDate(channel.updatedAt)
   };
 }
@@ -154,10 +172,52 @@ export async function getRemoteWhatsAppRuntimeStatus(input: {
     status: {
       channel?: unknown;
       qrCodeDataUrl?: string | null;
+      qrCodeGeneratedAt?: string | null;
+      qrCodeExpiresAt?: string | null;
+      qrCodeExpired?: boolean;
       runtimeStatus?: string;
+      runtimePresent?: boolean;
+      connectionAttemptId?: string | null;
+      connectionEventSequence?: number | null;
+      connectionUpdatedAt?: string | null;
+      qrVersion?: number | null;
+      userConnectionState?: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+      runtimeHealthStatus?: string;
+      lastHealthCheckAt?: string | null;
+      lastHealthyAt?: string | null;
+      nextRecoveryAt?: string | null;
+      senderReachable?: boolean;
+      senderError?: string | null;
       lastError?: string | null;
       connectedByCurrentAgent?: boolean;
       isSyncingHistory?: boolean;
+      historySyncFullyCaughtUp?: boolean;
+      historySyncCompletedAt?: string | null;
+      historySyncCursor?: number;
+      historySyncTotal?: number | null;
+      historySyncProgressAt?: string | null;
+      historySync?: {
+        phase: "fast_bootstrap" | "incremental_sync" | "media_enrichment" | "initial_import" | "catch_up" | "reconcile" | "idle" | "deferred" | "error" | "disconnected";
+        active: boolean;
+        startedAt: string | null;
+        progressAt: string | null;
+        completedAt: string | null;
+        lastSuccessfulSyncAt: string | null;
+        nextReconciliationAt: string | null;
+        totalChats: number | null;
+        processedChats: number;
+        remainingChats: number;
+        deferredChats: number;
+        newMessages: number;
+        knownMessages: number;
+        updatedMessages: number;
+        skippedMessages: number;
+        mediaDownloadsAvoided: number;
+        mediaBytesDownloaded: number;
+        databaseWritesAvoided: number;
+        lastError: string | null;
+        generation: number;
+      };
       supervisor?: {
         requiresManualAttention?: boolean;
         stateLabel?: string;
@@ -190,6 +250,10 @@ export async function getRemoteSenderServiceMetrics() {
         heapUsedMb: number;
         heapTotalMb: number;
         externalMb: number;
+        cpuUserMs: number;
+        cpuSystemMs: number;
+        eventLoopLagMeanMs: number;
+        eventLoopLagP95Ms: number;
       };
       runtimes: {
         totalTracked: number;
@@ -201,6 +265,7 @@ export async function getRemoteSenderServiceMetrics() {
         authenticated: number;
         supervisorPaused: number;
         runtimeCreates24h: number;
+        activeChromiumProcesses: number;
       };
       latencies: {
         restoreReadyAvgMs: number | null;
@@ -242,6 +307,33 @@ export async function ensureRemoteWorkspaceWhatsAppClient(input: {
   });
 }
 
+export async function freshStartRemoteWorkspaceWhatsAppClient(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId: string;
+}) {
+  await callSenderService<{ ok: true }>("/whatsapp/runtime/fresh-start", {
+    method: "POST",
+    body: input,
+    timeoutMs: SENDER_SERVICE_RUNTIME_TIMEOUT_MS
+  });
+}
+
+export async function requestRemoteWhatsAppWebPairingCode(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId: string;
+  phoneNumber: string;
+}) {
+  const payload = await callSenderService<{ pairingCode: string }>("/whatsapp/pairing", {
+    method: "POST",
+    body: input,
+    timeoutMs: SENDER_SERVICE_PAIRING_TIMEOUT_MS
+  });
+
+  return payload.pairingCode;
+}
+
 export async function disconnectRemoteWorkspaceWhatsAppClient(workspaceId: string, channelId?: string | null) {
   const searchParams = new URLSearchParams({ workspaceId });
   if (channelId) {
@@ -268,8 +360,8 @@ export async function deleteRemoteWorkspaceWhatsAppClientSession(workspaceId: st
 
 export async function syncRemoteWorkspaceHistory(
   workspaceId: string,
-  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background" } | null,
-  options: { triggeredBy?: "manual" | "background" } = {}
+  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background"; priority?: "bootstrap" | "incremental" | "routine" | "media" } | null,
+  options: { triggeredBy?: "manual" | "background"; priority?: "bootstrap" | "incremental" | "routine" | "media" } = {}
 ) {
   const channelId = typeof channelIdOrOptions === "string" ? channelIdOrOptions : null;
   const resolvedOptions =
@@ -285,7 +377,8 @@ export async function syncRemoteWorkspaceHistory(
     body: {
       workspaceId,
       channelId,
-      triggeredBy: resolvedOptions.triggeredBy
+      triggeredBy: resolvedOptions.triggeredBy,
+      priority: resolvedOptions.priority
     }
   });
 
@@ -357,7 +450,7 @@ export async function sendRemoteWhatsAppMessage(input: {
 }) {
   const payload = await callSenderService<{
     result: {
-      providerMessageId: string;
+      providerMessageId: string | null;
       status: "accepted";
     };
   }>("/messages/send", {

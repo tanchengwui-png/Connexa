@@ -39,7 +39,10 @@ type ThreadPanelProps = {
   onMediaAssetsChange: (assets: InboxMediaAsset[]) => void;
   onDeleteMessage: (messageId: string) => void;
   onInsertQuickReply: (quickReply: InboxQuickReply) => void;
+  onInternalNoteChange: (isInternalNote: boolean) => void;
   onMessageBodyChange: (value: string) => void;
+  onLoadOlderMessages: () => Promise<void>;
+  onRecordedVoiceNoteChange: (file: File | null) => void;
   onSetMute: (duration: "8h" | "1w" | "always" | null) => void;
   onSelectedMentionsChange: (mentions: InboxSelectedMention[]) => void;
   replyingToMessage: {
@@ -48,12 +51,12 @@ type ThreadPanelProps = {
     body: string | null;
     attachmentName: string | null;
   } | null;
+  recordedVoiceNote: File | null;
   onReplyToMessage: (messageId: string) => void;
   onScheduleMessage: (value: string) => void;
   onSendMessage: () => void;
   onSnoozeConversation: () => void;
   onTakeOverConversation: () => void;
-  onToggleInternalNote: () => void;
   onUpdateConversation: (updates: {
     status?: "OPEN" | "PENDING" | "CLOSED";
     assigneeId?: string | null;
@@ -78,6 +81,7 @@ type TimelineItem =
       deletedAt: string | null;
       id: string;
       isConnexaOutbound: boolean;
+      showSender: boolean;
       isScheduledEvent?: boolean;
       deliveryStatus: InboxMessage["deliveryStatus"];
       replyToMessage: {
@@ -126,16 +130,19 @@ export function InboxThreadPanel({
   onMediaAssetsChange,
   onDeleteMessage,
   onInsertQuickReply,
+  onInternalNoteChange,
   onMessageBodyChange,
+  onLoadOlderMessages,
+  onRecordedVoiceNoteChange,
   onSetMute,
   onSelectedMentionsChange,
   replyingToMessage,
+  recordedVoiceNote,
   onReplyToMessage,
   onScheduleMessage,
   onSendMessage,
   onSnoozeConversation,
   onTakeOverConversation,
-  onToggleInternalNote,
   onUpdateConversation,
   quickReplies,
   requiresTakeOverForPublicReply,
@@ -145,8 +152,25 @@ export function InboxThreadPanel({
 }: ThreadPanelProps) {
   const resizeHostRef = useRef<HTMLDivElement | null>(null);
   const threadBodyRef = useRef<HTMLDivElement | null>(null);
-  const [composerHeight, setComposerHeight] = useState(220);
+  const [composerHeight, setComposerHeight] = useState(245);
   const [isResizing, setIsResizing] = useState(false);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+
+  const loadOlderMessages = async () => {
+    if (isLoadingOlder || !selectedConversation?.messagePage.hasMore) return;
+    const beforeHeight = threadBodyRef.current?.scrollHeight ?? 0;
+    const beforeTop = threadBodyRef.current?.scrollTop ?? 0;
+    setIsLoadingOlder(true);
+    try {
+      await onLoadOlderMessages();
+      window.requestAnimationFrame(() => {
+        const threadBody = threadBodyRef.current;
+        if (threadBody) threadBody.scrollTop = beforeTop + (threadBody.scrollHeight - beforeHeight);
+      });
+    } finally {
+      setIsLoadingOlder(false);
+    }
+  };
 
   useEffect(() => {
     if (!isResizing) {
@@ -195,17 +219,7 @@ export function InboxThreadPanel({
   }, [hasHydrated, selectedConversation?.id]);
 
   if (!selectedConversation) {
-    return (
-      <article className="inbox-column inbox-thread-panel">
-        <div className="inbox-empty-state inbox-thread-empty">
-          <div className="whatsapp-empty-state">
-            <div className="whatsapp-empty-icon" aria-hidden="true" />
-            <strong>No conversation selected</strong>
-            <p className="muted">Choose a chat from the queue to review the full thread and reply.</p>
-          </div>
-        </div>
-      </article>
-    );
+    return <article className="inbox-column inbox-thread-panel" />;
   }
 
   const normalizedConversation = normalizeInboxSelectedConversation(selectedConversation)!;
@@ -241,41 +255,54 @@ export function InboxThreadPanel({
         style={{ gridTemplateRows: `minmax(0, 1fr) 12px minmax(150px, ${composerHeight}px)` }}
       >
         <div className="chat-thread inbox-chat-thread whatsapp-thread-body" ref={threadBodyRef}>
-          {timeline ? (
-            timeline.map((item) => {
-              if (item.type === "separator") {
-                return <TimelineDivider key={item.id} label={item.label} />;
-              }
+          <div className="inbox-thread-content">
+            {selectedConversation.messagePage.hasMore ? (
+              <button
+                className="button button-secondary inbox-load-older-messages"
+                disabled={isLoadingOlder}
+                onClick={() => void loadOlderMessages()}
+                type="button"
+              >
+                {isLoadingOlder ? "Loading…" : "Load older messages"}
+              </button>
+            ) : null}
+            {timeline ? (
+              timeline.map((item) => {
+                if (item.type === "separator") {
+                  return <TimelineDivider key={item.id} label={item.label} />;
+                }
 
-              if (item.type === "event") {
-                return <SystemEventCard key={item.id} label={item.label} meta={item.meta} href={item.href} />;
-              }
+                if (item.type === "event") {
+                  return <SystemEventCard key={item.id} label={item.label} meta={item.meta} href={item.href} />;
+                }
 
-              return (
-                <IncomingMessageBubble
-                  attachmentMimeType={item.attachmentMimeType}
-                  attachmentName={item.attachmentName}
-                  attachmentUrl={item.attachmentUrl}
-                  body={item.body}
-                  canDelete={item.canDelete}
-                  direction={item.direction}
-                  id={item.id}
-                  isConnexaOutbound={item.isConnexaOutbound}
-                  isDeleted={Boolean(item.deletedAt)}
-                  key={item.id}
-                  deliveryStatus={item.deliveryStatus}
-                  onDelete={onDeleteMessage}
-                  onReply={onReplyToMessage}
-                  reactions={item.reactions}
-                  replyToMessage={item.replyToMessage}
-                  sender={item.sender}
-                  sentAt={item.sentAt}
-                />
-              );
-            })
-          ) : (
-            <SystemEventCard label="Loading conversation" meta="Preparing message history." />
-          )}
+                return (
+                  <IncomingMessageBubble
+                    attachmentMimeType={item.attachmentMimeType}
+                    attachmentName={item.attachmentName}
+                    attachmentUrl={item.attachmentUrl}
+                    body={item.body}
+                    canDelete={item.canDelete}
+                    direction={item.direction}
+                    id={item.id}
+                    isConnexaOutbound={item.isConnexaOutbound}
+                    isDeleted={Boolean(item.deletedAt)}
+                    key={item.id}
+                    deliveryStatus={item.deliveryStatus}
+                    onDelete={onDeleteMessage}
+                    onReply={onReplyToMessage}
+                    reactions={item.reactions}
+                    replyToMessage={item.replyToMessage}
+                    sender={item.sender}
+                    sentAt={item.sentAt}
+                    showSender={item.showSender}
+                  />
+                );
+              })
+            ) : (
+              <SystemEventCard label="Loading conversation" meta="Preparing message history." />
+            )}
+          </div>
         </div>
 
         <div
@@ -298,6 +325,7 @@ export function InboxThreadPanel({
           messageBody={messageBody}
           mentionCandidates={mentionCandidates}
           replyingToMessage={replyingToMessage}
+          recordedVoiceNote={recordedVoiceNote}
           selectedMentions={selectedMentions}
           selectedAttachments={selectedAttachments}
           whatsappMode={whatsappMode}
@@ -305,12 +333,13 @@ export function InboxThreadPanel({
           onMediaAssetsChange={onMediaAssetsChange}
           onClearReply={() => onReplyToMessage("")}
           onInsertQuickReply={onInsertQuickReply}
+          onInternalNoteChange={onInternalNoteChange}
           onMessageBodyChange={onMessageBodyChange}
+          onRecordedVoiceNoteChange={onRecordedVoiceNoteChange}
           onSelectedMentionsChange={onSelectedMentionsChange}
           onScheduleMessage={onScheduleMessage}
           onSendMessage={onSendMessage}
           onTakeOverConversation={onTakeOverConversation}
-          onToggleInternalNote={onToggleInternalNote}
           quickReplies={quickReplies}
           requiresTakeOverForPublicReply={requiresTakeOverForPublicReply}
           takeoverOwnerName={selectedConversation.assigneeId ? selectedConversation.assignee : null}
@@ -336,6 +365,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
 
   const items: TimelineItem[] = [];
   let lastDayLabel: string | null = null;
+  let previousMessageGroup: { direction: "inbound" | "outbound"; sender: string } | null = null;
 
   if (!entries.length) {
     items.push({
@@ -358,6 +388,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
         label: dayLabel
       });
       lastDayLabel = dayLabel;
+      previousMessageGroup = null;
     }
 
     if (index === 0) {
@@ -367,6 +398,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
         label: "Conversation opened",
         meta: `${selectedConversation.contactName} started a WhatsApp conversation`
       });
+      previousMessageGroup = null;
     }
 
     if (entry.kind === "audit") {
@@ -377,10 +409,23 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
         meta: formatAuditEventMeta(entry.event),
         occurredAtIso: entry.event.createdAtIso
       });
+      previousMessageGroup = null;
       return;
     }
 
     const { message } = entry;
+
+    if (message.isSystemEvent) {
+      items.push({
+        id: `event-message-${message.id}`,
+        type: "event",
+        label: message.body,
+        meta: message.sentAt,
+        occurredAtIso: message.sentAtIso
+      });
+      previousMessageGroup = null;
+      return;
+    }
 
     if (message.direction === "outbound" && message.isConnexaOutbound && !message.providerMessageId && message.outboundJobStatus) {
       items.push({
@@ -390,8 +435,12 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
         meta: formatPendingMessageMeta(message),
         href: buildScheduledMessageHref(selectedConversation.id, message.outboundJobStatus, message.outboundJobAvailableAt)
       });
+      previousMessageGroup = null;
       return;
     }
+
+    const showSender =
+      previousMessageGroup?.direction !== message.direction || previousMessageGroup.sender !== message.sender;
 
     items.push({
       attachmentMimeType: message.attachmentMimeType,
@@ -401,6 +450,7 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
       deletedAt: message.deletedAt,
       id: message.id,
       isConnexaOutbound: message.isConnexaOutbound,
+      showSender,
       deliveryStatus: message.deliveryStatus,
       reactions: message.reactions,
       replyToMessage: message.replyToMessage,
@@ -410,6 +460,10 @@ function buildTimeline(selectedConversation: NonNullable<InboxSelectedConversati
       sender: message.sender,
       sentAt: message.sentAt
     });
+    previousMessageGroup = {
+      direction: message.direction,
+      sender: message.sender
+    };
   });
 
   return items;

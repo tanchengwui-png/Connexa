@@ -3,11 +3,13 @@ import {
   deleteRemoteWhatsAppMessageForEveryone,
   disconnectRemoteWorkspaceWhatsAppClient,
   ensureRemoteWorkspaceWhatsAppClient,
+  freshStartRemoteWorkspaceWhatsAppClient,
   getRemoteSenderServiceMetrics,
   getRemoteWhatsAppRuntimeStatus,
   isRemoteSenderServiceEnabled,
   listRemoteWhatsAppMentionCandidates,
   resolveRemoteWhatsAppContacts,
+  requestRemoteWhatsAppWebPairingCode,
   setRemoteWhatsAppChatMute,
   sendRemoteWhatsAppChatSeen,
   sendRemoteWhatsAppMessage,
@@ -18,10 +20,12 @@ import {
   deleteWorkspaceWhatsAppClientSession as deleteEmbeddedWorkspaceWhatsAppClientSession,
   disconnectWorkspaceWhatsAppClient as disconnectEmbeddedWorkspaceWhatsAppClient,
   ensureWorkspaceWhatsAppClient as ensureEmbeddedWorkspaceWhatsAppClient,
+  freshStartWorkspaceWhatsAppClient as freshStartEmbeddedWorkspaceWhatsAppClient,
   getWhatsAppSenderNodeMetrics as getEmbeddedWhatsAppSenderNodeMetrics,
   getWorkspaceWhatsAppRuntimeStatus as getEmbeddedWhatsAppRuntimeStatus,
   listWhatsAppMentionCandidates as listEmbeddedWhatsAppMentionCandidates,
   resolveWhatsAppContacts as resolveEmbeddedWhatsAppContacts,
+  requestWhatsAppWebClientPairingCode as requestEmbeddedWhatsAppWebPairingCode,
   setWhatsAppWebChatMute as setEmbeddedWhatsAppWebChatMute,
   sendWhatsAppWebChatSeen as sendEmbeddedWhatsAppWebChatSeen,
   sendWhatsAppWebMessage as sendEmbeddedWhatsAppWebMessage,
@@ -64,6 +68,31 @@ export async function ensureWorkspaceWhatsAppClient(input: {
   return ensureEmbeddedWorkspaceWhatsAppClient(input);
 }
 
+export async function freshStartWorkspaceWhatsAppClient(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId: string;
+}) {
+  if (isRemoteSenderServiceEnabled()) {
+    return freshStartRemoteWorkspaceWhatsAppClient(input);
+  }
+
+  return freshStartEmbeddedWorkspaceWhatsAppClient(input);
+}
+
+export async function requestWhatsAppWebPairingCode(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId: string;
+  phoneNumber: string;
+}) {
+  if (isRemoteSenderServiceEnabled()) {
+    return requestRemoteWhatsAppWebPairingCode(input);
+  }
+
+  return requestEmbeddedWhatsAppWebPairingCode(input);
+}
+
 export async function disconnectWorkspaceWhatsAppClient(workspaceId: string, channelId?: string | null) {
   if (isRemoteSenderServiceEnabled()) {
     return disconnectRemoteWorkspaceWhatsAppClient(workspaceId, channelId);
@@ -82,8 +111,8 @@ export async function deleteWorkspaceWhatsAppClientSession(workspaceId: string, 
 
 export async function syncWorkspaceHistory(
   workspaceId: string,
-  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background" } | null,
-  options: { triggeredBy?: "manual" | "background" } = {}
+  channelIdOrOptions?: string | { triggeredBy?: "manual" | "background"; priority?: "bootstrap" | "incremental" | "routine" | "media" } | null,
+  options: { triggeredBy?: "manual" | "background"; priority?: "bootstrap" | "incremental" | "routine" | "media" } = {}
 ) {
   if (isRemoteSenderServiceEnabled()) {
     return syncRemoteWorkspaceHistory(workspaceId, channelIdOrOptions, options);

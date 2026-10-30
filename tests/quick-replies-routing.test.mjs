@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
-const repoRoot = "/srv/recurvos/staging/connexa/repo";
+const repoRoot = process.cwd();
 
 function readRepoFile(relativePath) {
   return readFileSync(path.join(repoRoot, relativePath), "utf8");
@@ -36,11 +36,11 @@ test("quick reply edit route loads a single record and reuses the shared editor"
 test("quick reply list component includes search, empty state, edit, and delete actions", () => {
   const source = readRepoFile("components/quick-reply-list.tsx");
 
-  assert.match(source, /Search title, shortcut, category, or reply body/);
+  assert.match(source, /Search by title, shortcut, category, or reply content/);
   assert.match(source, /No quick replies yet\./);
   assert.match(source, /href="\/quick-replies\/new"/);
   assert.match(source, /href=\{`\/quick-replies\/\$\{item\.id\}\/edit`\}/);
-  assert.match(source, /Delete quick reply\?/);
+  assert.match(source, /title: `Delete “\$\{reply\.title\}”\?`/);
   assert.match(source, /Deleting\.\.\./);
 });
 

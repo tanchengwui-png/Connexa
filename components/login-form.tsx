@@ -17,7 +17,13 @@ type WorkspaceSelectionState = {
   options: LoginWorkspaceOption[];
 };
 
-export function LoginForm({ sessionMessage = null }: { sessionMessage?: string | null }) {
+export function LoginForm({
+  returnTo = null,
+  sessionMessage = null
+}: {
+  returnTo?: string | null;
+  sessionMessage?: string | null;
+}) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -39,7 +45,8 @@ export function LoginForm({ sessionMessage = null }: { sessionMessage?: string |
         },
         body: JSON.stringify({
           challengeToken: selectionState.challengeToken,
-          agentId: selectedAgentId
+          agentId: selectedAgentId,
+          returnTo
         })
       });
 
@@ -64,7 +71,8 @@ export function LoginForm({ sessionMessage = null }: { sessionMessage?: string |
       body: JSON.stringify({
         email: String(formData.get("email") ?? ""),
         password: String(formData.get("password") ?? ""),
-        remember: formData.get("remember") === "on"
+        remember: formData.get("remember") === "on",
+        returnTo
       })
     });
 
@@ -156,7 +164,16 @@ export function LoginForm({ sessionMessage = null }: { sessionMessage?: string |
                   />
                 </svg>
               </span>
-              <input autoComplete="email" className="control-input" name="email" placeholder="you@company.com" type="email" />
+              <input
+                aria-invalid={Boolean(error)}
+                autoComplete="email"
+                className="control-input"
+                inputMode="email"
+                name="email"
+                placeholder="you@company.com"
+                required
+                type="email"
+              />
             </span>
           </label>
 
@@ -191,10 +208,12 @@ export function LoginForm({ sessionMessage = null }: { sessionMessage?: string |
                 </svg>
               </span>
               <input
+                aria-invalid={Boolean(error)}
                 autoComplete="current-password"
                 className="control-input"
                 name="password"
                 placeholder="Enter your password"
+                required
                 type={showPassword ? "text" : "password"}
               />
               <Button
@@ -263,11 +282,26 @@ export function LoginForm({ sessionMessage = null }: { sessionMessage?: string |
         </>
       )}
 
-      {sessionMessage ? <p className="auth-support-note">{sessionMessage}</p> : null}
-      {error ? <p className="form-error metrica-login-error">{error}</p> : null}
+      {sessionMessage ? <p className="auth-support-note" role="status">{sessionMessage}</p> : null}
+      {error ? (
+        <p aria-live="polite" className="form-error metrica-login-error" role="alert">
+          {error}
+        </p>
+      ) : null}
 
       <button className="button button-primary auth-submit metrica-login-submit" disabled={pending} type="submit">
-        {pending ? "Logging in..." : selectionState ? "Continue" : "Log In"}
+        <span>{pending ? "Logging in..." : selectionState ? "Continue" : "Log In"}</span>
+        {!pending ? (
+          <svg aria-hidden="true" className="metrica-login-submit-icon" fill="none" viewBox="0 0 24 24">
+            <path
+              d="M5 12h14m-5-5 5 5-5 5"
+              stroke="currentColor"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="1.8"
+            />
+          </svg>
+        ) : null}
       </button>
     </form>
   );

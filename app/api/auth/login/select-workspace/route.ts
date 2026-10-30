@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAgentEntryPath } from "@/lib/auth/entry-path";
 import { loginWithWorkspaceSelection } from "@/lib/auth/login";
+import { getSafeReturnTo } from "@/lib/auth/return-to";
 
 export async function POST(request: NextRequest) {
   const body = (await request.json()) as {
     challengeToken?: string;
     agentId?: string;
+    returnTo?: string;
   };
 
   try {
@@ -14,7 +16,9 @@ export async function POST(request: NextRequest) {
       agentId: body.agentId ?? ""
     });
 
-    const redirectTo = await getAgentEntryPath(agent);
+    const redirectTo = body.returnTo
+      ? getSafeReturnTo(body.returnTo, await getAgentEntryPath(agent))
+      : await getAgentEntryPath(agent);
 
     return NextResponse.json({ ok: true, redirectTo });
   } catch (error) {

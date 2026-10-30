@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useRef, useState, useTransition } from "react";
+import { Fragment, useEffect, useRef, useState, useTransition } from "react";
+import { PortalDropdown } from "@/components/inbox/portal-dropdown";
 import { useToast } from "@/components/toast-provider";
 import { parseContactPasteBlock } from "@/lib/contact-paste-parser";
 import { validateContactAddress } from "@/lib/contact-address";
@@ -37,6 +38,7 @@ type ContactSummary = {
   id: string;
   displayName: string;
   displayNameManualOverride: boolean;
+  whatsappPushName: string | null;
   phone: string;
   photoUrl?: string | null;
   email?: string | null;
@@ -126,6 +128,7 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
   const [importProgress, setImportProgress] = useState(0);
   const [isImportSubmitting, setIsImportSubmitting] = useState(false);
   const persistentFilterParams = buildPersistentContactFilterParams(searchParams);
+  const activeOwnerId = searchParams?.get("ownerId") ?? searchParams?.get("ownerIds") ?? "";
 
   useEffect(() => {
     setContactList(contacts);
@@ -605,30 +608,42 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
     }));
   };
 
-  const hotLeadCount = contactList.filter((contact) => contact.isHotLead).length;
-  const assignedContactCount = contactList.filter((contact) => contact.ownerId).length;
   const hasContacts = contactList.length > 0;
+  const renderNoteComposer = (contactId: string) => (
+    <div className="contact-note-composer">
+      <textarea
+        className="lead-record-input contact-note-textarea"
+        placeholder="Add internal context for this contact..."
+        rows={3}
+        value={drafts[contactId] ?? ""}
+        onChange={(event) => setDrafts((current) => ({ ...current, [contactId]: event.target.value }))}
+      />
+      <div className="contact-note-actions">
+        <button className="button button-secondary" onClick={() => { setOpenComposerId(null); setDrafts((current) => ({ ...current, [contactId]: "" })); }} type="button">Cancel</button>
+        <button className="button button-primary" disabled={isPending} onClick={() => handleSaveNote(contactId)} type="button">{isPending ? "Saving..." : "Save note"}</button>
+      </div>
+    </div>
+  );
 
   return (
     <section className="contacts-directory-shell">
-      <section className="contacts-directory-hero">
+      <header className="contacts-directory-hero">
         <div className="contacts-directory-hero-copy">
-          <span className="contacts-directory-kicker">Customer directory</span>
-          <h2>Contacts</h2>
-          <p>Keep contact details, ownership, notes, and follow-up context in one clean operating view.</p>
+          <div className="contacts-directory-title-line"><h2>Contacts</h2><span>{pagination.total} total</span></div>
+          <p>Manage customer details, ownership, and follow-ups.</p>
           <div className="contacts-directory-hero-metrics">
-            <span className="contacts-directory-hero-stat">
+            <div className="contact-summary__item">
               <strong>{pagination.total}</strong>
-              <small>{pagination.total === 1 ? "total contact" : "total contacts"}</small>
-            </span>
-            <span className="contacts-directory-hero-stat">
-              <strong>{hotLeadCount}</strong>
-              <small>{hotLeadCount === 1 ? "hot lead" : "hot leads"}</small>
-            </span>
-            <span className="contacts-directory-hero-stat">
-              <strong>{assignedContactCount}</strong>
-              <small>assigned owners</small>
-            </span>
+              <span>{pagination.total === 1 ? "total contact" : "total contacts"}</span>
+            </div>
+            <div className="contact-summary__item">
+              <strong>{contactList.filter((contact) => contact.isHotLead).length}</strong>
+              <span>hot leads</span>
+            </div>
+            <div className="contact-summary__item">
+              <strong>{contactList.filter((contact) => contact.ownerId).length}</strong>
+              <span>assigned owners</span>
+            </div>
           </div>
         </div>
         <div className="contacts-directory-hero-side">
@@ -660,53 +675,31 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
               Add contact
             </button>
           </div>
-          <div className="contacts-directory-hero-panel">
-            <span className="contacts-directory-hero-panel-label">Directory status</span>
-            <strong>
-              Showing {pagination.pageCount} of {pagination.total}{" "}
-              {pagination.total === 1 ? "contact" : "contacts"}
-            </strong>
-            <p>
-              {search.trim()
-                ? "Search filters are active. Clear them to return to the full directory."
-                : "Import spreadsheets, assign ownership, and keep internal notes close to each contact."}
-            </p>
-          </div>
         </div>
-      </section>
+      </header>
 
       <article className="table-card contacts-directory-card">
-        <div className="card-header">
-          <div>
-            <h3 className="card-title">Directory view</h3>
-            <p className="muted">Search, edit, and route your customer records from one workspace.</p>
-          </div>
-          <div className="contacts-directory-toolbar">
-            <span className="product-catalog-count">
-              Page {pagination.page} of {pagination.totalPages}
-            </span>
-            <span className="product-catalog-count">
-              {pagination.pageSize} rows per page
-            </span>
-          </div>
-        </div>
-
         <form action="/contacts" className="search-form contacts-directory-search">
-        {persistentFilterParams.map(([key, value]) => (
+        {persistentFilterParams.filter(([key]) => !["ownerId", "ownerIds", "assignee", "assigneeIds"].includes(key)).map(([key, value]) => (
           <input key={`search-${key}-${value}`} name={key} type="hidden" value={value} />
         ))}
         <input
           className="search-input"
           defaultValue={search}
           name="q"
-          placeholder="Search contact, phone, tag, or owner..."
+          placeholder="Search contacts, phone, tag, or owner..."
           type="search"
         />
+        <label className="contacts-directory-filter-label">
+          <span>Owner</span>
+          <select className="inbox-dialog-input app-select" defaultValue={activeOwnerId} name="ownerId">
+            <option value="">All owners</option>
+            <option value="unassigned">Unassigned</option>
+            {agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+          </select>
+        </label>
         <input name="page" type="hidden" value="1" />
         <input name="pageSize" type="hidden" value={String(pagination.pageSize)} />
-        <button className="button button-secondary" type="submit">
-          Search
-        </button>
         <button
           className="button button-secondary"
           disabled={isExporting}
@@ -715,197 +708,65 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
         >
           {isExporting ? "Exporting..." : "Export Contacts"}
         </button>
+        {(search.trim() || activeOwnerId) ? <a className="button button-secondary" href={`/contacts?pageSize=${pagination.pageSize}`}>Clear filters</a> : null}
         </form>
-
-        <div className="contacts-directory-toolbar contacts-directory-toolbar-secondary">
-          <span className="table-subtle">
-            Showing up to {pagination.pageSize} contacts per page. Adjust the list density below.
-          </span>
-          <form action="/contacts" className="contacts-pagination-form">
-          {persistentFilterParams.map(([key, value]) => (
-            <input key={`paginate-${key}-${value}`} name={key} type="hidden" value={value} />
-          ))}
-          <input name="q" type="hidden" value={search} />
-          <input name="page" type="hidden" value="1" />
-          <label className="contacts-page-size-label">
-            <span className="table-subtle">Rows</span>
-            <select
-              className="inbox-dialog-input app-select contacts-page-size-select"
-              defaultValue={String(pagination.pageSize)}
-              name="pageSize"
-            >
-              {[25, 50, 100].map((size) => (
-                <option key={size} value={size}>
-                  {size}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button className="button button-secondary" type="submit">
-            Apply
-          </button>
-          </form>
-        </div>
 
         {error ? <div className="form-error">{error}</div> : null}
 
-        <div className="timeline-list">
-          {hasContacts ? (
-            contactList.map((contact) => {
-            const initials = getContactInitials(contact.displayName);
-
-            return (
-              <article className="timeline-row contact-directory-row" key={contact.id}>
-                <div className="contact-directory-main">
-                  <div className="contact-directory-top">
-                    <div className="contact-directory-identity">
-                      <div className="contact-directory-avatar">
-                        {contact.photoUrl ? (
-                          <img
-                            alt={contact.displayName}
-                            className="contact-directory-avatar-image"
-                            src={`/api/contacts/${contact.id}/avatar`}
-                          />
-                        ) : (
-                          initials || "C"
-                        )}
-                      </div>
-                      <div className="contact-directory-copy">
-                        <div className="contact-directory-headline">
-                          <strong>{contact.displayName}</strong>
-                          {contact.isHotLead ? <span className="badge hot-badge">Hot lead</span> : null}
-                        </div>
-                        <div className="contact-directory-meta-line">
-                          <span className="table-subtle">{contact.phone}</span>
-                          {contact.email ? (
-                            <>
-                              <span className="contact-directory-meta-dot" aria-hidden="true">
-                                •
-                              </span>
-                              <span className="table-subtle">{contact.email}</span>
-                            </>
-                          ) : null}
-                        </div>
-                        {formatContactAddress(contact) ? (
-                          <div className="contact-directory-meta-line">
-                            <span className="table-subtle">{formatContactAddress(contact)}</span>
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                    <div className="contact-directory-actions">
-                      <div className="contact-directory-time-block">
-                        <span className="contact-directory-time-label">Last activity</span>
-                        <span className="timeline-time">{contact.lastInteractionAt}</span>
-                      </div>
-                      <div className="contact-directory-action-row">
-                        <button
-                          className="inbox-search-tool contact-note-toggle"
-                          onClick={() =>
-                            setOpenComposerId((current) => (current === contact.id ? null : contact.id))
-                          }
-                          type="button"
-                        >
-                          {openComposerId === contact.id ? "Close note" : "Add note"}
-                        </button>
-                        <button
-                          className="inbox-search-tool contact-note-toggle"
-                          onClick={() => handleOpenEditor(contact)}
-                          type="button"
-                        >
-                          Edit
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="contact-directory-summary">
-                    <span className="contact-directory-summary-label">Latest message</span>
-                    <p className="contact-directory-preview">{contact.lastMessagePreview}</p>
-                  </div>
-
-                  <div className="contact-directory-badges">
-                    <span
-                      className={`contact-owner-pill${contact.ownerId ? " is-assigned" : " is-unassigned"}`}
-                      style={contact.ownerId ? getOwnerPillStyle(contact.ownerId) : undefined}
-                    >
-                      <span className="contact-owner-pill-label">Owner</span>
-                      <strong>{contact.ownerName ?? "Unassigned"}</strong>
-                    </span>
-                    {contact.teammates.length ? (
-                      <span className="contact-owner-pill">
-                        <span className="contact-owner-pill-label">Team</span>
-                        <strong>{contact.teammates.map((teammate) => teammate.name).join(", ")}</strong>
-                      </span>
-                    ) : null}
-                    {contact.tags.map((tag) => (
-                      <span className={getContactTagClassName(tag)} key={tag}>
-                        {tag}
-                      </span>
-                    ))}
-                    <span className="contact-notes-pill">
-                      {contact.notes.length} {contact.notes.length === 1 ? "note" : "notes"}
-                    </span>
-                  </div>
-                  {contact.notes[0] ? (
-                    <div className="contact-note-inline">
-                      <div className="contact-note-meta">
-                        <strong>Latest note by {contact.notes[0].author}</strong>
-                        <span>{contact.notes[0].createdAt}</span>
-                      </div>
-                      <p>{contact.notes[0].body}</p>
-                    </div>
-                  ) : null}
-                </div>
-
-                {openComposerId === contact.id ? (
-                  <div className="contact-note-composer">
-                    <textarea
-                      className="lead-record-input contact-note-textarea"
-                      placeholder="Add internal context for this contact..."
-                      rows={3}
-                      value={drafts[contact.id] ?? ""}
-                      onChange={(event) =>
-                        setDrafts((current) => ({
-                          ...current,
-                          [contact.id]: event.target.value
-                        }))
-                      }
-                    />
-                    <div className="contact-note-actions">
-                      <button
-                        className="button button-secondary"
-                        onClick={() => {
-                          setOpenComposerId(null);
-                          setDrafts((current) => ({ ...current, [contact.id]: "" }));
-                        }}
-                        type="button"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        className="button button-primary"
-                        disabled={isPending}
-                        onClick={() => handleSaveNote(contact.id)}
-                        type="button"
-                      >
-                        {isPending ? "Saving..." : "Save note"}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-              </article>
-            );
-            })
-          ) : (
+        {hasContacts ? (
+          <>
+            <div className="contacts-directory-table-wrap">
+              <table className="contacts-directory-table">
+                <colgroup>
+                  <col className="contacts-directory-col-contact" />
+                  <col className="contacts-directory-col-status" />
+                  <col className="contacts-directory-col-owner" />
+                  <col className="contacts-directory-col-channel" />
+                  <col className="contacts-directory-col-message" />
+                  <col className="contacts-directory-col-activity" />
+                  <col className="contacts-directory-col-actions" />
+                </colgroup>
+                <thead><tr><th scope="col">Contact</th><th scope="col">Status</th><th scope="col">Owner</th><th scope="col">Channel</th><th scope="col">Last message</th><th scope="col">Last activity</th><th scope="col" className="contacts-directory-actions-heading">Actions</th></tr></thead>
+                <tbody>
+                  {contactList.map((contact) => (
+                    <Fragment key={contact.id}>
+                      <tr>
+                        <td><ContactIdentity contact={contact} /></td>
+                        <td>{contact.isHotLead ? <span className="badge hot-badge">Hot lead</span> : <span className="table-subtle">—</span>}</td>
+                        <td>{contact.ownerName ? <span className="contacts-owner-name">{contact.ownerName}</span> : <span className="contact-owner-pill is-unassigned">Unassigned</span>}</td>
+                        <td><span className="table-subtle">—</span></td>
+                        <td><p className="contacts-message-preview" title={contact.lastMessagePreview}>{formatMessagePreview(contact.lastMessagePreview)}</p></td>
+                        <td><time className="contacts-activity-time">{contact.lastInteractionAt}</time></td>
+                        <td className="contacts-directory-actions-cell"><ContactActionsMenu contactName={contact.displayName} onAddNote={() => setOpenComposerId((current) => current === contact.id ? null : contact.id)} onEdit={() => handleOpenEditor(contact)} /></td>
+                      </tr>
+                      {openComposerId === contact.id ? <tr className="contacts-note-composer-row"><td colSpan={7}>{renderNoteComposer(contact.id)}</td></tr> : null}
+                    </Fragment>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="contacts-directory-mobile-list">
+              {contactList.map((contact) => (
+                <article className="contacts-directory-mobile-card" key={contact.id}>
+                  <div className="contacts-mobile-card-head"><ContactIdentity contact={contact} /><ContactActionsMenu contactName={contact.displayName} onAddNote={() => setOpenComposerId((current) => current === contact.id ? null : contact.id)} onEdit={() => handleOpenEditor(contact)} /></div>
+                  <div className="contacts-mobile-card-meta"><span>{contact.isHotLead ? "Hot lead" : "—"}</span><span>{contact.ownerName ?? "Unassigned"}</span><span>—</span></div>
+                  <p className="contacts-message-preview" title={contact.lastMessagePreview}>{formatMessagePreview(contact.lastMessagePreview)}</p>
+                  <time className="contacts-activity-time">{contact.lastInteractionAt}</time>
+                  {openComposerId === contact.id ? renderNoteComposer(contact.id) : null}
+                </article>
+              ))}
+            </div>
+          </>
+        ) : (
+          <div className="timeline-list">
             <div className="lead-record-empty contact-directory-empty">
               <div className="contact-directory-empty-illustration" aria-hidden="true">
                 <span />
                 <span />
                 <span />
               </div>
-              <strong>No contacts yet</strong>
-              <p>Add your first contact manually or import a spreadsheet to start building the shared directory.</p>
+              <strong>{search.trim() || activeOwnerId ? "No matching contacts" : "No contacts yet"}</strong>
+              <p>{search.trim() || activeOwnerId ? "Try clearing or changing your search and owner filter." : "Add your first contact manually or import a spreadsheet to start building the shared directory."}</p>
               <div className="contact-directory-empty-actions">
                 <button
                   className="button button-primary"
@@ -927,17 +788,23 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
                 </button>
               </div>
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
-        {pagination.totalPages > 1 ? (
-          <div className="contacts-pagination">
+        <div className="contacts-pagination">
+          <span className="table-subtle">{pagination.total ? `${(pagination.page - 1) * pagination.pageSize + 1}–${Math.min(pagination.page * pagination.pageSize, pagination.total)} of ${pagination.total} contacts` : "0 contacts"}</span>
+          <form action="/contacts" className="contacts-pagination-form">
+            {persistentFilterParams.map(([key, value]) => <input key={`paginate-${key}-${value}`} name={key} type="hidden" value={value} />)}
+            <input name="q" type="hidden" value={search} /><input name="page" type="hidden" value="1" />
+            <label className="contacts-page-size-label"><span>Rows per page</span><select className="inbox-dialog-input app-select contacts-page-size-select" defaultValue={String(pagination.pageSize)} name="pageSize" onChange={(event) => event.currentTarget.form?.requestSubmit()}>{[25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}</select></label>
+          </form>
+          {pagination.totalPages > 1 ? <div className="contacts-pagination-navigation">
           <a
             aria-disabled={pagination.page <= 1}
             className={`button button-secondary${pagination.page <= 1 ? " is-disabled" : ""}`}
-            href={buildContactsPageHref({
+            href={pagination.page <= 1 ? undefined : buildContactsPageHref({
               search,
-              page: Math.max(1, pagination.page - 1),
+              page: pagination.page - 1,
               pageSize: pagination.pageSize,
               filters: persistentFilterParams
             })}
@@ -963,17 +830,17 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
           <a
             aria-disabled={pagination.page >= pagination.totalPages}
             className={`button button-secondary${pagination.page >= pagination.totalPages ? " is-disabled" : ""}`}
-            href={buildContactsPageHref({
+            href={pagination.page >= pagination.totalPages ? undefined : buildContactsPageHref({
               search,
-              page: Math.min(pagination.totalPages, pagination.page + 1),
+              page: pagination.page + 1,
               pageSize: pagination.pageSize,
               filters: persistentFilterParams
             })}
           >
             Next
           </a>
-          </div>
-        ) : null}
+          </div> : null}
+        </div>
       </article>
 
       {isCreateDialogOpen ? (
@@ -1708,30 +1575,6 @@ export function ContactsDirectory({ agents, contacts, pagination, search }: Cont
   );
 }
 
-function getOwnerPillStyle(ownerId: string) {
-  const hue = Array.from(ownerId).reduce((total, character) => total + character.charCodeAt(0), 0) % 360;
-
-  return {
-    borderColor: `hsla(${hue}, 85%, 72%, 0.32)`,
-    color: `hsl(${hue}, 92%, 88%)`,
-    background: `hsla(${hue}, 72%, 22%, 0.34)`
-  };
-}
-
-function getContactTagClassName(tag: string) {
-  const normalized = tag.trim().toLowerCase();
-
-  if (normalized === "whatsapp") {
-    return "lead-chip contact-tag-chip contact-tag-chip-whatsapp";
-  }
-
-  if (normalized === "hot lead" || normalized === "hot") {
-    return "lead-chip contact-tag-chip contact-tag-chip-hot";
-  }
-
-  return "lead-chip contact-tag-chip";
-}
-
 function SupportingTeammatePicker({
   agents,
   ownerId,
@@ -1874,6 +1717,90 @@ type ContactUpdatePayload = {
   tagsManualOverride: boolean;
 };
 
+function ContactIdentity({ contact }: { contact: ContactSummary }) {
+  const initials = getContactInitials(contact.displayName);
+  const whatsappPushName = getVisibleWhatsAppPushName(contact);
+
+  return (
+    <div className="contact-directory-identity">
+      <div className="contact-directory-avatar">
+        {contact.photoUrl ? <img alt={contact.displayName} className="contact-directory-avatar-image" src={`/api/contacts/${contact.id}/avatar`} /> : initials}
+      </div>
+      <div className="contact-directory-copy">
+        <strong>{contact.displayName}</strong>
+        {whatsappPushName ? (
+          <span className="contact-directory-whatsapp-name" title={`~${whatsappPushName}`}>
+            ~{whatsappPushName}
+          </span>
+        ) : null}
+        <span className="table-subtle">{formatContactPhone(contact.phone)}</span>
+      </div>
+    </div>
+  );
+}
+
+function getVisibleWhatsAppPushName(contact: Pick<ContactSummary, "displayName" | "whatsappPushName">) {
+  const whatsappPushName = contact.whatsappPushName?.trim();
+  if (
+    !whatsappPushName ||
+    whatsappPushName.toLocaleLowerCase() === contact.displayName.trim().toLocaleLowerCase()
+  ) {
+    return null;
+  }
+
+  return whatsappPushName;
+}
+
+function ContactActionsMenu({
+  contactName,
+  onAddNote,
+  onEdit
+}: {
+  contactName: string;
+  onAddNote: () => void;
+  onEdit: () => void;
+}) {
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [isOpen, setIsOpen] = useState(false);
+  const closeMenu = () => setIsOpen(false);
+
+  return (
+    <>
+      <button
+        aria-expanded={isOpen}
+        aria-haspopup="menu"
+        aria-label={`Actions for ${contactName}`}
+        className="contacts-actions-trigger"
+        onClick={() => setIsOpen((current) => !current)}
+        ref={triggerRef}
+        type="button"
+      >
+        <span aria-hidden="true">⋯</span>
+      </button>
+      <PortalDropdown align="end" anchorRef={triggerRef} className="contacts-actions-menu" onClose={closeMenu} open={isOpen}>
+        <div aria-label={`Actions for ${contactName}`} role="menu">
+          <button onClick={() => { closeMenu(); onAddNote(); }} role="menuitem" type="button">Add note</button>
+          <button onClick={() => { closeMenu(); onEdit(); }} role="menuitem" type="button">Edit</button>
+        </div>
+      </PortalDropdown>
+    </>
+  );
+}
+
+function formatMessagePreview(message: string) {
+  if (!message || message === "No messages yet") {
+    return "No messages yet";
+  }
+
+  const attachmentMatch = message.match(/^Attachment:\s*(.+)$/i);
+  if (attachmentMatch) {
+    const fileName = attachmentMatch[1].toLowerCase();
+    return /\.(webm|mp3|m4a|ogg|wav|aac)$/.test(fileName) ? "Voice-note attachment" : "Attachment";
+  }
+
+  return message;
+}
+
 function createEditableContactDraft(contact: ContactSummary): EditableContactDraft {
   return {
     ownerId: contact.ownerId ?? "",
@@ -1905,29 +1832,16 @@ function getContactInitials(displayName: string) {
   return initials || "C";
 }
 
+function formatContactPhone(phone: string) {
+  const normalized = phone.trim();
+  return !normalized || normalized === "+0" || normalized === "0" ? "No phone number" : normalized;
+}
+
 function normalizeTagsInput(tags: string) {
   return tags
     .split(",")
     .map((tag) => tag.trim())
     .filter(Boolean)
-    .join(", ");
-}
-
-function formatContactAddress(contact: {
-  addressLine1?: string | null;
-  addressLine2?: string | null;
-  city?: string | null;
-  state?: string | null;
-  postalCode?: string | null;
-  country?: string | null;
-}) {
-  return [
-    contact.addressLine1,
-    contact.addressLine2,
-    [contact.city, contact.state, contact.postalCode].filter(Boolean).join(" ").trim() || null,
-    contact.country
-  ]
-    .filter((value): value is string => Boolean(value?.trim()))
     .join(", ");
 }
 

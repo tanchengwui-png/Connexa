@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cleanupExpiredWorkspaces, sendSubscriptionExpiryReminderEmails } from "@/lib/billing-management";
-import { applyScheduledWorkspaceDowngrades } from "@/lib/workspace-package-upgrades";
+import { sendSubscriptionExpiryReminderEmails } from "@/lib/billing-management";
+import { applyScheduledWorkspaceDowngrades, reconcileExpiredWorkspacePackagePayments } from "@/lib/workspace-package-upgrades";
 
 function isAuthorized(request: NextRequest) {
   const expectedToken =
@@ -16,10 +16,10 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const cleanup = await cleanupExpiredWorkspaces();
+    const paymentReconciliation = await reconcileExpiredWorkspacePackagePayments();
     const downgrades = await applyScheduledWorkspaceDowngrades();
     const reminders = await sendSubscriptionExpiryReminderEmails();
-    return NextResponse.json({ ...cleanup, ...downgrades, ...reminders });
+    return NextResponse.json({ automaticDeletionDisabled: true, ...paymentReconciliation, ...downgrades, ...reminders });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unable to process billing maintenance." },

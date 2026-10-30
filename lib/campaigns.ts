@@ -478,9 +478,22 @@ export async function launchCampaign(input: {
   });
 
   const conversationByContactId = new Map<string, (typeof existingConversations)[number]>();
+  const groupOnlyContactIds = new Set<string>();
+  const conversationsByContactId = new Map<string, Array<(typeof existingConversations)[number]>>();
   for (const conversation of existingConversations) {
-    if (!conversationByContactId.has(conversation.contactId)) {
+    const conversations = conversationsByContactId.get(conversation.contactId) ?? [];
+    conversations.push(conversation);
+    conversationsByContactId.set(conversation.contactId, conversations);
+    const isGroupConversation = conversation.whatsAppRemoteId?.toLowerCase().endsWith("@g.us") ?? false;
+    const existingPreferred = conversationByContactId.get(conversation.contactId);
+    const existingIsGroup = existingPreferred?.whatsAppRemoteId?.toLowerCase().endsWith("@g.us") ?? false;
+    if (!existingPreferred || (existingIsGroup && !isGroupConversation)) {
       conversationByContactId.set(conversation.contactId, conversation);
+    }
+  }
+  for (const [contactId, conversations] of conversationsByContactId) {
+    if (conversations.length && conversations.every((conversation) => conversation.whatsAppRemoteId?.toLowerCase().endsWith("@g.us"))) {
+      groupOnlyContactIds.add(contactId);
     }
   }
 
@@ -503,6 +516,20 @@ export async function launchCampaign(input: {
 
   for (const contact of orderedContacts) {
     const phone = contact.phone.trim();
+    if (groupOnlyContactIds.has(contact.id)) {
+      await prisma.campaignRunRecipient.create({
+        data: {
+          workspaceId: agent.workspaceId,
+          campaignRunId: campaignRun.id,
+          contactId: contact.id,
+          status: CampaignRunRecipientStatus.EXCLUDED,
+          reason: "Group chats cannot receive campaigns",
+          queuedJobCount: 0
+        }
+      });
+      excludedCount += 1;
+      continue;
+    }
     if (!phone) {
       await prisma.campaignRunRecipient.create({
         data: {

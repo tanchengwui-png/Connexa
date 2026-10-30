@@ -31,6 +31,7 @@ export type AccountRow = {
   passwordHash: string;
   emailVerifiedAt: Date | null;
   lastLoginAt: Date | null;
+  deactivatedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -121,6 +122,7 @@ export type AgentWorkspaceLoginRow = AgentRow & {
   workspaceSlug: string;
   effectivePasswordHash: string | null;
   effectiveEmailVerifiedAt: Date | null;
+  accountDeactivatedAt: Date | null;
 };
 
 export type VerificationAgentRow = {
@@ -313,6 +315,11 @@ export type PendingWorkspacePackageUpgradeRow = {
   replacesId: string | null;
   replacementReason: string | null;
   paymentStartedAt: Date | null;
+  paymentExpiresAt: Date | null;
+  paymentReconciledAt: Date | null;
+  paymentGatewayState: string | null;
+  paymentReconciliationReason: string | null;
+  paymentReconciliationLeaseUntil: Date | null;
   paidAt: Date | null;
   cancelledAt: Date | null;
   completedAt: Date | null;
@@ -412,7 +419,8 @@ export async function findAgentsByEmail(email: string) {
           w.name AS "workspaceName",
           w.slug AS "workspaceSlug",
           COALESCE(ac."passwordHash", a."passwordHash") AS "effectivePasswordHash",
-          COALESCE(ac."emailVerifiedAt", a."emailVerifiedAt") AS "effectiveEmailVerifiedAt"
+          COALESCE(ac."emailVerifiedAt", a."emailVerifiedAt") AS "effectiveEmailVerifiedAt",
+          ac."deactivatedAt" AS "accountDeactivatedAt"
         FROM "Agent" a
         JOIN "Workspace" w ON w.id = a."workspaceId"
         LEFT JOIN "Account" ac
@@ -429,7 +437,8 @@ export async function findAgentsByEmail(email: string) {
             w.name AS "workspaceName",
             w.slug AS "workspaceSlug",
             a."passwordHash" AS "effectivePasswordHash",
-            a."emailVerifiedAt" AS "effectiveEmailVerifiedAt"
+            a."emailVerifiedAt" AS "effectiveEmailVerifiedAt",
+            NULL::timestamp AS "accountDeactivatedAt"
           FROM "Agent" a
           JOIN "Workspace" w ON w.id = a."workspaceId"
           WHERE a.email = $1
@@ -1496,6 +1505,7 @@ export async function updatePendingWorkspacePackageUpgradeProvider(input: {
   providerCheckoutUrl: string;
   status?: string;
   paymentStartedAt?: Date | null;
+  paymentExpiresAt?: Date | null;
   executor?: DbExecutor;
 }) {
   return queryOne<PendingWorkspacePackageUpgradeRow>(
@@ -1505,6 +1515,7 @@ export async function updatePendingWorkspacePackageUpgradeProvider(input: {
          "providerCheckoutUrl" = $4,
          status = COALESCE($5, status),
          "paymentStartedAt" = COALESCE($6, "paymentStartedAt"),
+         "paymentExpiresAt" = COALESCE($7, "paymentExpiresAt"),
          "updatedAt" = NOW()
      WHERE id = $1
      RETURNING *`,
@@ -1514,7 +1525,8 @@ export async function updatePendingWorkspacePackageUpgradeProvider(input: {
       input.providerReference,
       input.providerCheckoutUrl,
       input.status ?? null,
-      input.paymentStartedAt ?? null
+      input.paymentStartedAt ?? null,
+      input.paymentExpiresAt ?? null
     ],
     input.executor
   );
@@ -1555,6 +1567,10 @@ export async function updatePendingWorkspacePackageUpgradeStatus(input: {
   completedAt?: Date | null;
   replacedById?: string | null;
   replacementReason?: string | null;
+  paymentReconciledAt?: Date | null;
+  paymentGatewayState?: string | null;
+  paymentReconciliationReason?: string | null;
+  clearPaymentReconciliationLease?: boolean;
   executor?: DbExecutor;
 }) {
   return queryOne<PendingWorkspacePackageUpgradeRow>(
@@ -1567,6 +1583,10 @@ export async function updatePendingWorkspacePackageUpgradeStatus(input: {
 	         "completedAt" = COALESCE($7, "completedAt"),
 	         "replacedById" = COALESCE($8, "replacedById"),
 	         "replacementReason" = COALESCE($9, "replacementReason"),
+             "paymentReconciledAt" = COALESCE($10, "paymentReconciledAt"),
+             "paymentGatewayState" = COALESCE($11, "paymentGatewayState"),
+             "paymentReconciliationReason" = COALESCE($12, "paymentReconciliationReason"),
+             "paymentReconciliationLeaseUntil" = CASE WHEN $13 THEN NULL ELSE "paymentReconciliationLeaseUntil" END,
 	         "updatedAt" = NOW()
 	     WHERE id = $1
 	     RETURNING *`,
@@ -1579,7 +1599,11 @@ export async function updatePendingWorkspacePackageUpgradeStatus(input: {
 	      input.cancelledAt ?? null,
 	      input.completedAt ?? null,
 	      input.replacedById ?? null,
-      input.replacementReason ?? null
+      input.replacementReason ?? null,
+      input.paymentReconciledAt ?? null,
+      input.paymentGatewayState ?? null,
+      input.paymentReconciliationReason ?? null,
+      input.clearPaymentReconciliationLease ?? false
     ],
     input.executor
   );
@@ -1631,6 +1655,11 @@ async function runPendingWorkspacePackageUpgradeStoreMigrations() {
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "replacesId" TEXT`);
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "replacementReason" TEXT`);
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentStartedAt" TIMESTAMP(3)`);
+  await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentExpiresAt" TIMESTAMP(3)`);
+  await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentReconciledAt" TIMESTAMP(3)`);
+  await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentGatewayState" TEXT`);
+  await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentReconciliationReason" TEXT`);
+  await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "paymentReconciliationLeaseUntil" TIMESTAMP(3)`);
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP`);
   await execute(`UPDATE "PendingWorkspacePackageUpgrade" SET status = 'ISSUED' WHERE status = 'PENDING'`);
@@ -1645,6 +1674,21 @@ async function runPendingWorkspacePackageUpgradeStoreMigrations() {
   );
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ALTER COLUMN "createdAt" SET DEFAULT CURRENT_TIMESTAMP`);
   await execute(`ALTER TABLE "PendingWorkspacePackageUpgrade" ALTER COLUMN "updatedAt" SET DEFAULT CURRENT_TIMESTAMP`);
+  await execute(
+    `UPDATE "PendingWorkspacePackageUpgrade"
+     SET "paymentExpiresAt" = COALESCE("paymentStartedAt", "createdAt") + INTERVAL '20 minutes'
+     WHERE status = 'PAYMENT_PROCESSING' AND "paymentExpiresAt" IS NULL`
+  );
+  await execute(
+    `CREATE TABLE IF NOT EXISTS "WorkspacePackagePaymentReconciliation" (
+       id TEXT PRIMARY KEY,
+       "upgradeId" TEXT NOT NULL REFERENCES "PendingWorkspacePackageUpgrade"(id) ON DELETE CASCADE,
+       action TEXT NOT NULL,
+       reason TEXT,
+       "gatewayState" TEXT,
+       "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+     )`
+  );
 
   await execute(
     `CREATE UNIQUE INDEX IF NOT EXISTS "PendingWorkspacePackageUpgrade_invoiceNumber_key"
@@ -1663,6 +1707,14 @@ async function runPendingWorkspacePackageUpgradeStoreMigrations() {
   await execute(
     `CREATE INDEX IF NOT EXISTS "PendingWorkspacePackageUpgrade_workspaceId_status_idx"
      ON "PendingWorkspacePackageUpgrade" ("workspaceId", status)`
+  );
+  await execute(
+    `CREATE INDEX IF NOT EXISTS "PendingWorkspacePackageUpgrade_status_paymentExpiresAt_idx"
+     ON "PendingWorkspacePackageUpgrade" (status, "paymentExpiresAt")`
+  );
+  await execute(
+    `CREATE INDEX IF NOT EXISTS "WorkspacePackagePaymentReconciliation_upgradeId_createdAt_idx"
+     ON "WorkspacePackagePaymentReconciliation" ("upgradeId", "createdAt")`
   );
   const activePlanChangeIndex = await queryOne<{ indexdef: string }>(
     `SELECT indexdef

@@ -40,8 +40,13 @@ if (!global.whatsAppRuntimeSupervisor) {
   global.whatsAppRuntimeSupervisor = supervisorStates;
 }
 
-function getOrCreateSupervisorEntry(workspaceId: string) {
-  const existing = supervisorStates.get(workspaceId);
+function buildSupervisorKey(workspaceId: string, channelId?: string | null) {
+  return `${workspaceId}\u0000${channelId?.trim() || "workspace-default"}`;
+}
+
+function getOrCreateSupervisorEntry(workspaceId: string, channelId?: string | null) {
+  const key = buildSupervisorKey(workspaceId, channelId);
+  const existing = supervisorStates.get(key);
   if (existing) {
     return existing;
   }
@@ -54,7 +59,7 @@ function getOrCreateSupervisorEntry(workspaceId: string) {
     lastReadyAt: null,
     lastDisconnectAt: null
   };
-  supervisorStates.set(workspaceId, created);
+  supervisorStates.set(key, created);
   return created;
 }
 
@@ -94,10 +99,11 @@ function buildAutoRecoveryPauseReason(attemptCount: number) {
 
 export function registerAutomaticRecoveryAttempt(input: {
   workspaceId: string;
+  channelId?: string | null;
   reason?: string | null;
 }) {
   const now = Date.now();
-  const entry = getOrCreateSupervisorEntry(input.workspaceId);
+  const entry = getOrCreateSupervisorEntry(input.workspaceId, input.channelId);
   entry.autoRecoveryAttempts = pruneTimestamps(entry.autoRecoveryAttempts, now);
 
   if (entry.manualAttentionSince && entry.manualAttentionReason) {
@@ -126,9 +132,13 @@ export function registerAutomaticRecoveryAttempt(input: {
   };
 }
 
-export function recordRuntimeAuthFailure(workspaceId: string, message?: string | null) {
+export function recordRuntimeAuthFailure(
+  workspaceId: string,
+  message?: string | null,
+  channelId?: string | null
+) {
   const now = Date.now();
-  const entry = getOrCreateSupervisorEntry(workspaceId);
+  const entry = getOrCreateSupervisorEntry(workspaceId, channelId);
   entry.authFailures = pruneTimestamps(entry.authFailures, now);
   entry.authFailures.push(now);
   entry.manualAttentionSince = now;
@@ -138,14 +148,26 @@ export function recordRuntimeAuthFailure(workspaceId: string, message?: string |
   return buildStatus(entry);
 }
 
-export function recordRuntimeDisconnected(workspaceId: string) {
-  const entry = getOrCreateSupervisorEntry(workspaceId);
+export function recordRuntimeInterventionRequired(
+  workspaceId: string,
+  message: string,
+  channelId?: string | null
+) {
+  const now = Date.now();
+  const entry = getOrCreateSupervisorEntry(workspaceId, channelId);
+  entry.manualAttentionSince = now;
+  entry.manualAttentionReason = message.trim() || "WhatsApp runtime requires manual intervention.";
+  return buildStatus(entry);
+}
+
+export function recordRuntimeDisconnected(workspaceId: string, channelId?: string | null) {
+  const entry = getOrCreateSupervisorEntry(workspaceId, channelId);
   entry.lastDisconnectAt = Date.now();
   return buildStatus(entry);
 }
 
-export function recordRuntimeReady(workspaceId: string) {
-  const entry = getOrCreateSupervisorEntry(workspaceId);
+export function recordRuntimeReady(workspaceId: string, channelId?: string | null) {
+  const entry = getOrCreateSupervisorEntry(workspaceId, channelId);
   entry.autoRecoveryAttempts = [];
   entry.authFailures = [];
   entry.manualAttentionSince = null;
@@ -154,12 +176,20 @@ export function recordRuntimeReady(workspaceId: string) {
   return buildStatus(entry);
 }
 
-export function clearRuntimeSupervisorState(workspaceId: string) {
-  supervisorStates.delete(workspaceId);
+export function clearRuntimeSupervisorState(workspaceId: string, channelId?: string | null) {
+  if (channelId) {
+    supervisorStates.delete(buildSupervisorKey(workspaceId, channelId));
+    return;
+  }
+
+  const prefix = `${workspaceId}\u0000`;
+  for (const key of supervisorStates.keys()) {
+    if (key.startsWith(prefix)) supervisorStates.delete(key);
+  }
 }
 
-export function getRuntimeSupervisorStatus(workspaceId: string) {
-  const entry = supervisorStates.get(workspaceId);
+export function getRuntimeSupervisorStatus(workspaceId: string, channelId?: string | null) {
+  const entry = supervisorStates.get(buildSupervisorKey(workspaceId, channelId));
   if (!entry) {
     return {
       requiresManualAttention: false,
@@ -179,8 +209,8 @@ export function getRuntimeSupervisorStatus(workspaceId: string) {
 export function getRuntimeSupervisorPausedCount() {
   let count = 0;
 
-  for (const workspaceId of supervisorStates.keys()) {
-    if (getRuntimeSupervisorStatus(workspaceId).requiresManualAttention) {
+  for (const entry of supervisorStates.values()) {
+    if (buildStatus(entry).requiresManualAttention) {
       count += 1;
     }
   }

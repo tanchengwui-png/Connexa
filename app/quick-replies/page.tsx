@@ -8,11 +8,12 @@ export default async function QuickRepliesPage() {
 
   return (
     <DashboardShell currentPath="/quick-replies">
-      <div className="more-page-stack">
+      <div className="more-page-stack quick-replies-page">
         <MorePageIntro
           badge="Quick replies"
           title="Keep the shared reply library clean, searchable, and reusable."
           description="Standardize saved replies, categories, shortcuts, and attached media so the team sends consistent WhatsApp responses with less manual editing."
+          headingAs="h1"
         >
           <a className="button button-primary" href="/quick-replies/new">
             Create New Quick Reply

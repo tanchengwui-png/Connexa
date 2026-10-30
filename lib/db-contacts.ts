@@ -16,6 +16,7 @@ type ContactBaseRow = {
   displayName: string;
   syncedDisplayName: string | null;
   displayNameManualOverride: boolean;
+  whatsappPushName: string | null;
   phone: string;
   photoUrl: string | null;
   email: string | null;
@@ -58,7 +59,10 @@ const CONTACTS_DIRECTORY_VISIBLE_CONDITION = `(
     FROM "Conversation" conv
     WHERE conv."contactId" = c.id
       AND (
-        conv."whatsAppRemoteId" IS NULL
+        -- Group records always have a subject when their remote id is absent
+        -- (for example an older/fallback history import). A direct or manual
+        -- conversation has no subject in that state and remains visible.
+        (conv."whatsAppRemoteId" IS NULL AND conv.subject IS NULL)
         OR conv."whatsAppRemoteId" NOT LIKE '%@g.us'
       )
   )

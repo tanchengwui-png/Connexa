@@ -6,7 +6,7 @@ const token =
   process.env.AUTOMATION_WORKER_TOKEN?.trim() ||
   process.env.OUTBOUND_WORKER_TOKEN?.trim() ||
   "";
-const intervalMs = Math.max(60_000, Number(process.env.BILLING_CLEANUP_INTERVAL_MS || "86400000"));
+const intervalMs = Math.max(60_000, Number(process.env.BILLING_CLEANUP_INTERVAL_MS || "60000"));
 
 if (!token) {
   console.error("BILLING_WORKER_TOKEN, AUTOMATION_WORKER_TOKEN, or OUTBOUND_WORKER_TOKEN is required.");
@@ -28,6 +28,7 @@ while (!shuttingDown) {
       console.error("Billing cleanup failed.", payload ?? response.statusText);
     } else if (
       payload?.deletedWorkspaceCount ||
+      payload?.reconciledCount ||
       payload?.appliedDowngradeCount ||
       payload?.sentCount ||
       payload?.duplicateCount

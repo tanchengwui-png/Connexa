@@ -5,7 +5,8 @@ import {
   buildManagedWebhookVerifyToken,
   exchangeMetaEmbeddedSignupCode,
   fetchMetaEmbeddedSignupPhoneNumbers,
-  registerMetaCloudPhoneNumber
+  registerMetaCloudPhoneNumber,
+  subscribeMetaWabaApp
 } from "@/lib/meta-whatsapp";
 import { getResolvedPlatformMetaConfig } from "@/lib/platform-config";
 import { saveWhatsAppCloudCredentials } from "@/lib/whatsapp-channel";
@@ -26,6 +27,7 @@ type CallbackBody = {
   workspaceId?: string;
   channelId?: string;
   connectionName?: string | null;
+  wabaId?: string;
   phoneNumberId?: string;
   pin?: string;
   confirmRegistration?: boolean;
@@ -39,6 +41,9 @@ function publicError(error: unknown) {
     META_ONBOARDING_STATE_REPLAYED: "This Meta setup response has already been used.",
     META_ONBOARDING_ATTEMPT_EXPIRED: "The Meta setup session expired. Start again.",
     META_PHONE_NUMBER_REQUIRED: "Choose a verified WhatsApp phone number.",
+    META_BUSINESS_ACCOUNT_REQUIRED: "Meta did not return the WhatsApp Business Account for this number.",
+    META_EMBEDDED_SIGNUP_SESSION_MISMATCH: "Meta's completed signup selection could not be verified against the authorized account. Start again.",
+    META_WEBHOOK_SUBSCRIPTION_CONFIGURATION_REQUIRED: "Meta webhook subscription is not configured.",
     META_STANDARD_REGISTRATION_CONSENT_REQUIRED: "Confirm that this API-only number may be registered before continuing.",
     META_COEXISTENCE_NOT_VERIFIED: "Meta did not confirm that this number is eligible for Business App Coexistence. No migration was attempted."
   };
@@ -70,16 +75,31 @@ export async function POST(request: NextRequest) {
       claimedAttemptId = attempt.id;
       const { accessToken, tokenExpiresAt } = await exchangeMetaEmbeddedSignupCode(body?.code?.trim() ?? "");
       const phoneNumbers = await fetchMetaEmbeddedSignupPhoneNumbers(accessToken);
+      const reportedWabaId = body?.wabaId?.trim() ?? "";
+      const reportedPhoneNumberId = body?.phoneNumberId?.trim() ?? "";
+      const verifiedPhoneNumbers = reportedWabaId || reportedPhoneNumberId
+        ? phoneNumbers.filter(
+            (phoneNumber) =>
+              (!reportedWabaId || phoneNumber.businessAccountId === reportedWabaId) &&
+              (!reportedPhoneNumberId || phoneNumber.phoneNumberId === reportedPhoneNumberId)
+          )
+        : phoneNumbers;
+      if (
+        ((reportedWabaId || reportedPhoneNumberId) && verifiedPhoneNumbers.length === 0) ||
+        (reportedPhoneNumberId && verifiedPhoneNumbers.length !== 1)
+      ) {
+        throw new Error("META_EMBEDDED_SIGNUP_SESSION_MISMATCH");
+      }
       await storeMetaOnboardingAssets({
         attemptId: attempt.id,
         accessToken,
         tokenExpiresAt,
-        phoneNumbers
+        phoneNumbers: verifiedPhoneNumbers
       });
       return NextResponse.json({
         attemptId: attempt.id,
         mode: attempt.mode,
-        phoneNumbers
+        phoneNumbers: verifiedPhoneNumbers
       });
     }
 
@@ -113,14 +133,23 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const businessAccountId = selectedPhoneNumber.businessAccountId?.trim() ?? "";
+    if (!businessAccountId) {
+      throw new Error("META_BUSINESS_ACCOUNT_REQUIRED");
+    }
+    await subscribeMetaWabaApp({
+      accessToken: selection.accessToken,
+      businessAccountId
+    });
+
     const platformConfig = await getResolvedPlatformMetaConfig();
     const channel = await saveWhatsAppCloudCredentials({
       workspaceId,
       channelId,
       phoneNumberId,
-      businessAccountId: selectedPhoneNumber.businessAccountId,
-      legacyWabaId: selectedPhoneNumber.businessAccountId,
-      messagingAccountId: selectedPhoneNumber.businessAccountId,
+      businessAccountId,
+      legacyWabaId: businessAccountId,
+      messagingAccountId: businessAccountId,
       integrationIdentity: platformConfig.appId.trim() || "meta_direct",
       accountModelVersion: "legacy_compatible",
       onboardingMode: selection.attempt.mode === "coexistence" ? "coexistence" : "standard",

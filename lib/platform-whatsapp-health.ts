@@ -71,7 +71,7 @@ function getPlatformWorkspaceAlerts(input: {
 
 export async function getPlatformWhatsAppHealthOverview() {
   const recentWindowStart = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const [recentEvents, workspaces, senderMetrics] = await Promise.all([
+  const [recentEvents, workspaces, pairingAudits, senderMetrics] = await Promise.all([
     prisma.whatsAppRuntimeEvent.findMany({
       where: {
         createdAt: {
@@ -105,6 +105,13 @@ export async function getPlatformWhatsAppHealthOverview() {
         }
       }
     }),
+    prisma.whatsAppPhonePairingAudit.findMany({
+      orderBy: [{ createdAt: "desc" }],
+      select: {
+        channelId: true,
+        createdAt: true
+      }
+    }),
     getWhatsAppSenderNodeMetrics().catch(() => null)
   ]);
   type RecentEvent = (typeof recentEvents)[number];
@@ -112,6 +119,12 @@ export async function getPlatformWhatsAppHealthOverview() {
   const senderWorkspaceMetrics = new Map(
     (senderMetrics?.workspaces ?? []).map((workspace: SenderWorkspaceMetric) => [workspace.workspaceId, workspace])
   );
+  const latestPairingAuditByChannel = new Map<string, Date>();
+  for (const audit of pairingAudits) {
+    if (!latestPairingAuditByChannel.has(audit.channelId)) {
+      latestPairingAuditByChannel.set(audit.channelId, audit.createdAt);
+    }
+  }
 
   const rows = await Promise.all(
     workspaces.map(async (workspace: PlatformWorkspace) => {
@@ -169,6 +182,12 @@ export async function getPlatformWhatsAppHealthOverview() {
           phoneNumber: channel.phoneNumber ?? null,
           connectionStatus: channel.connectionStatus,
           connectionMethod: channel.connectionMethod,
+          linkedVia:
+            channel.connectionMethod === "api"
+              ? "Cloud API"
+              : latestPairingAuditByChannel.has(channel.id)
+                ? "Pairing code"
+                : "QR code",
           connectedAt: channel.connectedAt?.toISOString() ?? null,
           connectedBy:
             channel.connectedByAgentName?.trim() || null,

@@ -1,4 +1,4 @@
-import { getConversationDetail, listConversations } from "@/lib/conversations";
+import { getConversationDetail, listConversationsPage } from "@/lib/conversations";
 import { requireCurrentAgent, requireCurrentWorkspaceId } from "@/lib/auth/current-user";
 import { releaseExpiredConversationSnoozes } from "@/lib/conversation-snooze";
 import { AgentRole, ConversationStatus, IndustryType, MessageDirection } from "@/lib/db-types";
@@ -8,8 +8,6 @@ import {
   listQuickReplyRows
 } from "@/lib/db-conversations";
 import { listWorkspaceContactTags } from "@/lib/contact-tags";
-import { listWorkspaceMediaAssets } from "@/lib/media-library";
-import { formatMediaAssetSize } from "@/lib/media-library-shared";
 import type { WorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
 import { getWorkspaceWhatsAppChannels } from "@/lib/whatsapp-channel";
 import { canStartUnsavedNumberConversation } from "@/lib/whatsapp-channel";
@@ -24,11 +22,12 @@ import { getConversationScheduledStats } from "@/lib/scheduled-messages";
 import { getPlatformAutomationWorkflowConfig } from "@/lib/platform-config";
 import { getAgentInboxNotificationSoundsMuted } from "@/lib/inbox-notification-preferences";
 import { getAgentInboxNotificationDesktopPromptState } from "@/lib/inbox-notification-preferences";
+import { isWhatsAppGroupNotificationPayload } from "@/lib/whatsapp-group-notification";
 
 const DISPLAY_TIME_ZONE = "Asia/Kuala_Lumpur";
 const WHATSAPP_INBOX_HEALTH_TIMEOUT_MS = Math.max(
-  1000,
-  Number.parseInt(process.env.WHATSAPP_INBOX_HEALTH_TIMEOUT_MS ?? "2500", 10) || 2500
+  100,
+  Number.parseInt(process.env.WHATSAPP_INBOX_HEALTH_TIMEOUT_MS ?? "300", 10) || 300
 );
 
 const statusLabels: Record<ConversationStatus, string> = {
@@ -37,14 +36,37 @@ const statusLabels: Record<ConversationStatus, string> = {
   CLOSED: "Closed"
 };
 
-export async function getInboxData(selectedConversationId?: string, selectedChannelId?: string | null) {
+export async function getInboxData(
+  selectedConversationId?: string,
+  selectedChannelId?: string | null,
+  options: { messageCursor?: string | null; messageLimit?: number } = {}
+) {
   const currentAgent = await requireCurrentAgent();
   const workspaceId = await requireCurrentWorkspaceId();
   await releaseExpiredConversationSnoozes(workspaceId);
   const isMockMode = isWhatsAppMockModeEnabled();
   const appUrl = process.env.APP_URL?.replace(/\/$/, "") ?? "http://localhost:3000";
   const whatsAppChannelsPromise = getWorkspaceWhatsAppChannels(workspaceId);
-  const [workspace, agents, quickReplies, whatsAppHealth, mediaAssets, contactTags, scheduledStatsByConversationId, workflowTimeoutConfig, whatsAppChannels] = await Promise.all([
+  const conversationDataPromise = (async () => {
+    try {
+      const conversationResult = await listConversationsPage({ channelId: selectedChannelId, limit: 50 });
+      return {
+        conversationRecords: conversationResult.conversations,
+        conversationPage: conversationResult.page,
+        selectedConversationRecord: selectedConversationId
+          ? await getConversationDetail(selectedConversationId, options)
+          : null
+      };
+    } catch (error) {
+      if (!isMissingConversationSnoozeColumnError(error)) throw error;
+      return {
+        conversationRecords: [] as Awaited<ReturnType<typeof listConversationsPage>>["conversations"],
+        conversationPage: { hasMore: false, nextCursor: null, totalCount: 0 },
+        selectedConversationRecord: null
+      };
+    }
+  })();
+  const [workspace, agents, quickReplies, whatsAppHealth, contactTags, whatsAppChannels, conversationData] = await Promise.all([
     getInboxWorkspaceSummary(workspaceId),
     listAgentNameRows(workspaceId),
     listQuickReplyRows(workspaceId),
@@ -60,11 +82,9 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
         timeoutMs: WHATSAPP_INBOX_HEALTH_TIMEOUT_MS
       })
     ),
-    listWorkspaceMediaAssets(workspaceId),
     listWorkspaceContactTags(workspaceId),
-    getConversationScheduledStats(workspaceId),
-    getPlatformAutomationWorkflowConfig(),
-    whatsAppChannelsPromise
+    whatsAppChannelsPromise,
+    conversationDataPromise
   ]);
 
   if (!workspace) {
@@ -73,21 +93,11 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
 
   const whatsAppChannel = whatsAppHealth.channel as WorkspaceWhatsAppChannelStatus | null;
 
-  let conversationRecords: Awaited<ReturnType<typeof listConversations>> = [];
-  let selectedConversationRecord: Awaited<ReturnType<typeof getConversationDetail>> = null;
-
-  try {
-    conversationRecords = (await listConversations()).filter((conversation) =>
-      selectedChannelId ? conversation.channelId === selectedChannelId : true
-    );
-    selectedConversationRecord =
-      (selectedConversationId && (await getConversationDetail(selectedConversationId))) ||
-      (conversationRecords[0] ? await getConversationDetail(conversationRecords[0].id) : null);
-  } catch (error) {
-    if (!isMissingConversationSnoozeColumnError(error)) {
-      throw error;
-    }
-  }
+  const { conversationRecords, conversationPage, selectedConversationRecord } = conversationData;
+  // Scheduled-message and automation metadata are refreshed by the existing
+  // purpose-built client endpoints after the critical list is interactive.
+  const scheduledStatsByConversationId = new Map() as InboxScheduledStats;
+  const workflowTimeoutConfig = { idleAfterHours: 0 } as InboxWorkflowTimeoutConfig;
   const mentionBodiesByMessageId = selectedConversationRecord
     ? await resolveMentionBodies({
         workspaceId,
@@ -142,8 +152,22 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
       })),
       updatedAt: whatsAppHealth.channel?.updatedAt ? formatDetailTimestamp(whatsAppHealth.channel.updatedAt) : null,
       runtimeStatus: whatsAppHealth.runtimeStatus,
+      senderReachable: whatsAppHealth.senderReachable,
+      senderError: whatsAppHealth.senderError,
       isInboxReady: whatsAppHealth.isInboxReady,
       isHistoryStabilizing: whatsAppHealth.isHistoryStabilizing,
+      historySyncFullyCaughtUp: whatsAppHealth.historySyncFullyCaughtUp,
+      historySyncProcessedChats: whatsAppHealth.historySyncProcessedChats,
+      historySyncTotalChats: whatsAppHealth.historySyncTotalChats,
+      historySyncPhase: whatsAppHealth.historySyncPhase,
+      historySyncActive: whatsAppHealth.historySyncActive,
+      historySyncStartedAt: whatsAppHealth.historySyncStartedAt,
+      historySyncProgressAt: whatsAppHealth.historySyncProgressAt,
+      historySyncLastSuccessfulAt: whatsAppHealth.historySyncLastSuccessfulAt,
+      historySyncNextReconciliationAt: whatsAppHealth.historySyncNextReconciliationAt,
+      historySyncRemainingChats: whatsAppHealth.historySyncRemainingChats,
+      historySyncDeferredChats: whatsAppHealth.historySyncDeferredChats,
+      historySyncNewMessages: whatsAppHealth.historySyncNewMessages,
       isHistoryStuck: whatsAppHealth.isHistoryStuck,
       isLiveOnlyMode: whatsAppHealth.isLiveOnlyMode,
       importedConversationCount: whatsAppHealth.importedConversationCount,
@@ -166,12 +190,14 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
       unassigned: workspace.unassignedCount,
       hotLeads: workspace.hotLeadCount
     },
+    conversationPage,
     conversations: conversationRecords.map((conversation) => ({
       id: conversation.id,
       channelId: conversation.channelId ?? null,
       channelLabel: conversation.channelLabel ?? null,
       contactName: conversation.contactName,
       photoUrl: conversation.photoUrl ?? null,
+      profilePicUrl: getInboxProfilePictureUrl(conversation.id, conversation.photoUrl),
       phone: conversation.phone,
       isGroup: conversation.isGroup,
       tags: conversation.tags,
@@ -203,159 +229,14 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
       lastMessageAt: formatListTimestamp(conversation.lastMessageAt),
       lastMessageAtIso: conversation.lastMessageAt.toISOString()
     })),
-    selectedConversation: selectedConversationRecord
-      ? {
-          id: selectedConversationRecord.id,
-          channelId: selectedConversationRecord.channelId ?? null,
-          channelLabel: selectedConversationRecord.channelLabel ?? null,
-          contactName: selectedConversationRecord.contactName,
-          photoUrl: selectedConversationRecord.photoUrl ?? null,
-          lead: selectedConversationRecord.lead
-            ? {
-                id: selectedConversationRecord.lead.id,
-                product: selectedConversationRecord.lead.product
-                  ? formatProductSummary(selectedConversationRecord.lead.product)
-                  : null,
-                appointments: selectedConversationRecord.lead.appointments.map(
-                  (appointment: (typeof selectedConversationRecord.lead.appointments)[number]) => ({
-                  id: appointment.id,
-                  title: appointment.title,
-                  type: formatAppointmentType(appointment.type),
-                  startAt: formatDetailTimestamp(appointment.startAt),
-                  startAtIso: appointment.startAt.toISOString(),
-                  endAt: formatDetailTimestamp(appointment.endAt),
-                  endAtIso: appointment.endAt.toISOString(),
-                  location: appointment.location,
-                  note: appointment.note
-                  })
-                ),
-                budget: selectedConversationRecord.lead.budget,
-                budgetValue: selectedConversationRecord.lead.budgetValue,
-                financingStatus: selectedConversationRecord.lead.financingStatus,
-                nextActionAt: selectedConversationRecord.lead.nextActionAt
-                  ? formatDetailTimestamp(selectedConversationRecord.lead.nextActionAt)
-                  : null,
-                nextActionAtIso: selectedConversationRecord.lead.nextActionAt?.toISOString() ?? null,
-                preferredArea: selectedConversationRecord.lead.preferredArea,
-                priority: formatLeadPriority(selectedConversationRecord.lead.priority),
-                project: selectedConversationRecord.lead.project,
-                sourceDetail: selectedConversationRecord.lead.sourceDetail,
-                stage: formatLeadStage(selectedConversationRecord.lead.stage),
-                customData: selectedConversationRecord.lead.customData
-              }
-            : null,
-          phone: selectedConversationRecord.phone,
-          isGroup: selectedConversationRecord.isGroup,
-          status: formatConversationStatus(selectedConversationRecord.status),
-          isSnoozed: selectedConversationRecord.isSnoozed,
-          snoozedUntil: selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
-            ? formatSnoozeUntil(selectedConversationRecord.snoozedUntil)
-            : null,
-          snoozedUntilIso: selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
-            ? selectedConversationRecord.snoozedUntil.toISOString()
-            : null,
-          snoozeReason: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozeReason : null,
-          snoozeStatus: selectedConversationRecord.snoozeStatus,
-          snoozedBy: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozedBy : null,
-          isMuted: selectedConversationRecord.isMuted,
-          muteExpiration: selectedConversationRecord.muteExpiration
-            ? formatDetailTimestamp(selectedConversationRecord.muteExpiration)
-            : null,
-          muteExpirationIso: selectedConversationRecord.muteExpiration?.toISOString() ?? null,
-          isArchived: selectedConversationRecord.isArchived,
-          isPinned: selectedConversationRecord.isPinned,
-          scheduledCount: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.scheduledCount ?? 0,
-          nextScheduledAt: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt
-            ? formatDetailTimestamp(scheduledStatsByConversationId.get(selectedConversationRecord.id)!.nextScheduledAt as Date)
-            : null,
-          nextScheduledAtIso:
-            scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt?.toISOString() ?? null,
-          assignee: selectedConversationRecord.assignee?.name ?? "Unassigned",
-          assigneeId: selectedConversationRecord.assignee?.id ?? null,
-          teammateIds: selectedConversationRecord.teammates.map(
-            (teammate: (typeof selectedConversationRecord.teammates)[number]) => teammate.id
-          ),
-          teammates: selectedConversationRecord.teammates,
-          tags: selectedConversationRecord.tags,
-          notes: selectedConversationRecord.notes.map((note: (typeof selectedConversationRecord.notes)[number]) => ({
-            id: note.id,
-            body: note.body,
-            author: note.author,
-            createdAt: formatDetailTimestamp(note.createdAt),
-            createdAtIso: note.createdAt.toISOString()
-          })),
-          auditEvents: selectedConversationRecord.auditEvents.map(
-            (event: (typeof selectedConversationRecord.auditEvents)[number]) => ({
-            id: event.id,
-            type: event.type,
-            actor: event.actor,
-            fromAssignee: event.fromAssignee,
-            toAssignee: event.toAssignee,
-            createdAt: formatDetailTimestamp(event.createdAt),
-            createdAtIso: event.createdAt.toISOString()
-            })
-          ),
-          automation: selectedConversationRecord.automation
-            ? {
-                automationPausedUntil: selectedConversationRecord.automation.automationPausedUntil
-                  ? formatDetailTimestamp(selectedConversationRecord.automation.automationPausedUntil)
-                  : null,
-                automationPausedUntilIso:
-                  selectedConversationRecord.automation.automationPausedUntil?.toISOString() ?? null,
-                activeFlowKey: selectedConversationRecord.automation.activeFlowKey,
-                activeFlowStep: selectedConversationRecord.automation.activeFlowStep,
-                lastAutoReplyAt: selectedConversationRecord.automation.lastAutoReplyAt
-                  ? formatDetailTimestamp(selectedConversationRecord.automation.lastAutoReplyAt)
-                  : null,
-                lastAutoReplyAtIso:
-                  selectedConversationRecord.automation.lastAutoReplyAt?.toISOString() ?? null,
-                lastMatchedRuleName: selectedConversationRecord.automation.lastMatchedRuleName,
-                isIdle:
-                  Boolean(selectedConversationRecord.automation.activeFlowStep) &&
-                  Boolean(selectedConversationRecord.automation.lastAutoReplyAt) &&
-                  Date.now() - selectedConversationRecord.automation.lastAutoReplyAt!.getTime() >=
-                    workflowTimeoutConfig.idleAfterHours * 60 * 60 * 1000
-              }
-            : null,
-          messages: selectedConversationRecord.messages.map((message: (typeof selectedConversationRecord.messages)[number]) => ({
-            id: message.id,
-            attachmentMimeType: message.attachmentMimeType,
-            attachmentName: message.attachmentName,
-            attachmentUrl: message.attachmentUrl,
-            body: sanitizeInboxDisplayText(
-              mentionBodiesByMessageId.get(message.id) ?? message.body,
-              message.attachmentUrl ?? null,
-              { preserveLineBreaks: true }
-            ),
-            deletedAt: message.deletedAt ? message.deletedAt.toISOString() : null,
-            direction:
-              message.direction === MessageDirection.INBOUND
-                ? ("inbound" as const)
-                : ("outbound" as const),
-            isConnexaOutbound: message.isConnexaOutbound,
-            outboundJobAvailableAt: message.outboundJobAvailableAt
-              ? formatDetailTimestamp(message.outboundJobAvailableAt)
-              : null,
-            outboundJobLastError: message.outboundJobLastError,
-            outboundJobStatus: message.outboundJobStatus,
-            providerMessageId: message.providerMessageId,
-            deliveryStatus: normalizeInboxDeliveryStatus(message.deliveryStatus),
-            ack: message.ack,
-            ackUpdatedAt: message.ackUpdatedAt ? message.ackUpdatedAt.toISOString() : null,
-            replyToMessageId: message.replyToMessageId,
-            replyToMessage: message.replyToMessage,
-            reactions: message.reactions.map((reaction: (typeof message.reactions)[number]) => ({
-              id: reaction.id,
-              emoji: reaction.emoji,
-              sender: reactionSenderLabelsByReactionId.get(reaction.id) ?? reaction.sender,
-              sentAtIso: reaction.sentAt.toISOString()
-            })),
-            sender: senderLabelsByMessageId.get(message.id) ?? message.sender,
-            sentAt: formatMessageTime(message.sentAt),
-            sentAtIso: message.sentAt.toISOString()
-          }))
-        }
-      : null,
+    selectedConversation: formatInboxSelectedConversation({
+      selectedConversationRecord,
+      scheduledStatsByConversationId,
+      workflowTimeoutConfig,
+      mentionBodiesByMessageId,
+      senderLabelsByMessageId,
+      reactionSenderLabelsByReactionId
+    }),
     quickReplies: quickReplies.map((item: (typeof quickReplies)[number]) => ({
       id: item.id,
       title: item.title,
@@ -365,18 +246,213 @@ export async function getInboxData(selectedConversationId?: string, selectedChan
       mediaAssetIds: parseMediaAssetIds(item.mediaAssetIdsJson)
     })),
     contactTags,
-    mediaAssets: mediaAssets.map((asset: (typeof mediaAssets)[number]) => ({
-      id: asset.id,
-      title: asset.title,
-      originalName: asset.originalName,
-      publicUrl: asset.publicUrl,
-      kind: asset.kind,
-      mimeType: asset.mimeType,
-      sizeLabel: formatMediaAssetSize(asset.sizeBytes)
-    })),
+    // Media-library data is hydrated by the client after the critical
+    // conversation list is interactive.
+    mediaAssets: [],
     agents: agents.map((agent: (typeof agents)[number]) => ({
       id: agent.id,
       name: agent.name
+    }))
+  };
+}
+
+type InboxSelectedConversationRecord = NonNullable<Awaited<ReturnType<typeof getConversationDetail>>>;
+type InboxScheduledStats = Awaited<ReturnType<typeof getConversationScheduledStats>>;
+type InboxWorkflowTimeoutConfig = Awaited<ReturnType<typeof getPlatformAutomationWorkflowConfig>>;
+
+export async function getInboxConversationData(
+  conversationId: string,
+  options: { messageCursor?: string | null; messageLimit?: number } = {}
+) {
+  const workspaceId = await requireCurrentWorkspaceId();
+  const selectedConversationRecord = await getConversationDetail(conversationId, options);
+  if (!selectedConversationRecord) return null;
+
+  const [scheduledStatsByConversationId, workflowTimeoutConfig, mentionBodiesByMessageId, senderLabelsByMessageId, reactionSenderLabelsByReactionId] =
+    await Promise.all([
+      getConversationScheduledStats(workspaceId, [conversationId]),
+      getPlatformAutomationWorkflowConfig(),
+      resolveMentionBodies({ workspaceId, messages: selectedConversationRecord.messages }),
+      resolveMessageSenders({ workspaceId, messages: selectedConversationRecord.messages }),
+      resolveReactionSenders({ workspaceId, messages: selectedConversationRecord.messages })
+    ]);
+
+  return formatInboxSelectedConversation({
+    selectedConversationRecord,
+    scheduledStatsByConversationId,
+    workflowTimeoutConfig,
+    mentionBodiesByMessageId,
+    senderLabelsByMessageId,
+    reactionSenderLabelsByReactionId
+  });
+}
+
+function formatInboxSelectedConversation(input: {
+  selectedConversationRecord: InboxSelectedConversationRecord | null;
+  scheduledStatsByConversationId: InboxScheduledStats;
+  workflowTimeoutConfig: InboxWorkflowTimeoutConfig;
+  mentionBodiesByMessageId: Map<string, string>;
+  senderLabelsByMessageId: Map<string, string>;
+  reactionSenderLabelsByReactionId: Map<string, string>;
+}) {
+  const {
+    selectedConversationRecord,
+    scheduledStatsByConversationId,
+    workflowTimeoutConfig,
+    mentionBodiesByMessageId,
+    senderLabelsByMessageId,
+    reactionSenderLabelsByReactionId
+  } = input;
+  if (!selectedConversationRecord) return null;
+
+  return {
+    id: selectedConversationRecord.id,
+    channelId: selectedConversationRecord.channelId ?? null,
+    channelLabel: selectedConversationRecord.channelLabel ?? null,
+    contactName: selectedConversationRecord.contactName,
+    whatsappPushName: selectedConversationRecord.whatsappPushName,
+    photoUrl: selectedConversationRecord.photoUrl ?? null,
+    profilePicUrl: getInboxProfilePictureUrl(selectedConversationRecord.id, selectedConversationRecord.photoUrl),
+    lead: selectedConversationRecord.lead
+      ? {
+          id: selectedConversationRecord.lead.id,
+          product: selectedConversationRecord.lead.product
+            ? formatProductSummary(selectedConversationRecord.lead.product)
+            : null,
+          appointments: selectedConversationRecord.lead.appointments.map((appointment) => ({
+            id: appointment.id,
+            title: appointment.title,
+            type: formatAppointmentType(appointment.type),
+            startAt: formatDetailTimestamp(appointment.startAt),
+            startAtIso: appointment.startAt.toISOString(),
+            endAt: formatDetailTimestamp(appointment.endAt),
+            endAtIso: appointment.endAt.toISOString(),
+            location: appointment.location,
+            note: appointment.note
+          })),
+          budget: selectedConversationRecord.lead.budget,
+          budgetValue: selectedConversationRecord.lead.budgetValue,
+          financingStatus: selectedConversationRecord.lead.financingStatus,
+          nextActionAt: selectedConversationRecord.lead.nextActionAt
+            ? formatDetailTimestamp(selectedConversationRecord.lead.nextActionAt)
+            : null,
+          nextActionAtIso: selectedConversationRecord.lead.nextActionAt?.toISOString() ?? null,
+          preferredArea: selectedConversationRecord.lead.preferredArea,
+          priority: formatLeadPriority(selectedConversationRecord.lead.priority),
+          project: selectedConversationRecord.lead.project,
+          sourceDetail: selectedConversationRecord.lead.sourceDetail,
+          stage: formatLeadStage(selectedConversationRecord.lead.stage),
+          customData: selectedConversationRecord.lead.customData
+        }
+      : null,
+    phone: selectedConversationRecord.phone,
+    isGroup: selectedConversationRecord.isGroup,
+    status: formatConversationStatus(selectedConversationRecord.status),
+    isSnoozed: selectedConversationRecord.isSnoozed,
+    snoozedUntil:
+      selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
+        ? formatSnoozeUntil(selectedConversationRecord.snoozedUntil)
+        : null,
+    snoozedUntilIso:
+      selectedConversationRecord.isSnoozed && selectedConversationRecord.snoozedUntil
+        ? selectedConversationRecord.snoozedUntil.toISOString()
+        : null,
+    snoozeReason: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozeReason : null,
+    snoozeStatus: selectedConversationRecord.snoozeStatus,
+    snoozedBy: selectedConversationRecord.isSnoozed ? selectedConversationRecord.snoozedBy : null,
+    isMuted: selectedConversationRecord.isMuted,
+    muteExpiration: selectedConversationRecord.muteExpiration
+      ? formatDetailTimestamp(selectedConversationRecord.muteExpiration)
+      : null,
+    muteExpirationIso: selectedConversationRecord.muteExpiration?.toISOString() ?? null,
+    isArchived: selectedConversationRecord.isArchived,
+    isPinned: selectedConversationRecord.isPinned,
+    scheduledCount: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.scheduledCount ?? 0,
+    nextScheduledAt: scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt
+      ? formatDetailTimestamp(scheduledStatsByConversationId.get(selectedConversationRecord.id)!.nextScheduledAt as Date)
+      : null,
+    nextScheduledAtIso:
+      scheduledStatsByConversationId.get(selectedConversationRecord.id)?.nextScheduledAt?.toISOString() ?? null,
+    assignee: selectedConversationRecord.assignee?.name ?? "Unassigned",
+    assigneeId: selectedConversationRecord.assignee?.id ?? null,
+    teammateIds: selectedConversationRecord.teammates.map((teammate) => teammate.id),
+    teammates: selectedConversationRecord.teammates,
+    tags: selectedConversationRecord.tags,
+    notes: selectedConversationRecord.notes.map((note) => ({
+      id: note.id,
+      body: note.body,
+      author: note.author,
+      createdAt: formatDetailTimestamp(note.createdAt),
+      createdAtIso: note.createdAt.toISOString()
+    })),
+    auditEvents: selectedConversationRecord.auditEvents.map((event) => ({
+      id: event.id,
+      type: event.type,
+      actor: event.actor,
+      fromAssignee: event.fromAssignee,
+      toAssignee: event.toAssignee,
+      createdAt: formatDetailTimestamp(event.createdAt),
+      createdAtIso: event.createdAt.toISOString()
+    })),
+    automation: selectedConversationRecord.automation
+      ? {
+          automationPausedUntil: selectedConversationRecord.automation.automationPausedUntil
+            ? formatDetailTimestamp(selectedConversationRecord.automation.automationPausedUntil)
+            : null,
+          automationPausedUntilIso:
+            selectedConversationRecord.automation.automationPausedUntil?.toISOString() ?? null,
+          activeFlowKey: selectedConversationRecord.automation.activeFlowKey,
+          activeFlowStep: selectedConversationRecord.automation.activeFlowStep,
+          lastAutoReplyAt: selectedConversationRecord.automation.lastAutoReplyAt
+            ? formatDetailTimestamp(selectedConversationRecord.automation.lastAutoReplyAt)
+            : null,
+          lastAutoReplyAtIso: selectedConversationRecord.automation.lastAutoReplyAt?.toISOString() ?? null,
+          lastMatchedRuleName: selectedConversationRecord.automation.lastMatchedRuleName,
+          isIdle:
+            Boolean(selectedConversationRecord.automation.activeFlowStep) &&
+            Boolean(selectedConversationRecord.automation.lastAutoReplyAt) &&
+            Date.now() - selectedConversationRecord.automation.lastAutoReplyAt!.getTime() >=
+              workflowTimeoutConfig.idleAfterHours * 60 * 60 * 1000
+        }
+      : null,
+    messagePage: selectedConversationRecord.messagePage,
+    messages: selectedConversationRecord.messages.map((message) => ({
+      id: message.id,
+      attachmentMimeType: message.attachmentMimeType,
+      attachmentName: message.attachmentName,
+      attachmentUrl: message.attachmentUrl,
+      body: sanitizeInboxDisplayText(
+        mentionBodiesByMessageId.get(message.id) ?? message.body,
+        message.attachmentUrl ?? null,
+        { preserveLineBreaks: true }
+      ),
+      deletedAt: message.deletedAt ? message.deletedAt.toISOString() : null,
+      direction: message.direction === MessageDirection.INBOUND ? ("inbound" as const) : ("outbound" as const),
+      isSystemEvent: isWhatsAppGroupNotificationPayload(
+        message.rawPayload,
+        message.whatsAppEnvelopeRawJson
+      ),
+      isConnexaOutbound: message.isConnexaOutbound,
+      outboundJobAvailableAt: message.outboundJobAvailableAt
+        ? formatDetailTimestamp(message.outboundJobAvailableAt)
+        : null,
+      outboundJobLastError: message.outboundJobLastError,
+      outboundJobStatus: message.outboundJobStatus,
+      providerMessageId: message.providerMessageId,
+      deliveryStatus: normalizeInboxDeliveryStatus(message.deliveryStatus),
+      ack: message.ack,
+      ackUpdatedAt: message.ackUpdatedAt ? message.ackUpdatedAt.toISOString() : null,
+      replyToMessageId: message.replyToMessageId,
+      replyToMessage: message.replyToMessage,
+      reactions: message.reactions.map((reaction) => ({
+        id: reaction.id,
+        emoji: reaction.emoji,
+        sender: reactionSenderLabelsByReactionId.get(reaction.id) ?? reaction.sender,
+        sentAtIso: reaction.sentAt.toISOString()
+      })),
+      sender: senderLabelsByMessageId.get(message.id) ?? message.sender,
+      sentAt: formatMessageTime(message.sentAt),
+      sentAtIso: message.sentAt.toISOString()
     }))
   };
 }
@@ -1106,6 +1182,26 @@ function parseImageUrls(value: string | null) {
   } catch {
     return [];
   }
+}
+
+function getInboxProfilePictureUrl(conversationId: string, photoUrl: string | null | undefined) {
+  const normalizedPhotoUrl = photoUrl?.trim();
+  if (!normalizedPhotoUrl) {
+    return null;
+  }
+
+  // Locally cached WhatsApp avatars are already served by the upload handler.
+  // Avoid routing those images through the authenticated conversation endpoint:
+  // an image request must be able to recover independently from that API call.
+  if (normalizedPhotoUrl.startsWith("/api/uploads/")) {
+    return normalizedPhotoUrl;
+  }
+
+  if (normalizedPhotoUrl.startsWith("/uploads/")) {
+    return `/api${normalizedPhotoUrl}`;
+  }
+
+  return `/api/conversations/${conversationId}/avatar`;
 }
 
 function normalizeInboxDeliveryStatus(value: string | null | undefined): "pending" | "sent" | "delivered" | "read" {

@@ -85,7 +85,7 @@ export function NewConversationDialog({
     <div className="inbox-dialog-backdrop" onClick={onClose} style={{ zIndex: INBOX_LAYERS.modal }}>
       <div
         aria-modal="true"
-        className="inbox-dialog confirmation-dialog simulate-inbound-dialog"
+        className="inbox-dialog confirmation-dialog simulate-inbound-dialog new-conversation-modal"
         onClick={(event) => event.stopPropagation()}
         role="dialog"
         style={{ zIndex: INBOX_LAYERS.modal + 1 }}

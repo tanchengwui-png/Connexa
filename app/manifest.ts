@@ -14,15 +14,10 @@ export default function manifest(): MetadataRoute.Manifest {
     theme_color: "#07111b",
     icons: [
       {
-        src: "/icon",
+        src: "/connexa-favicon-512.png",
         sizes: "512x512",
         type: "image/png",
         purpose: "maskable"
-      },
-      {
-        src: "/apple-icon",
-        sizes: "180x180",
-        type: "image/png"
       }
     ]
   };

@@ -17,13 +17,13 @@ const steps = [
   },
   {
     id: 3,
-    title: "Connect Phone",
+    title: "Connect Device",
     description: "Scan QR or save API credentials for the selected channel."
   },
   {
     id: 4,
-    title: "Verify Inbox",
-    description: "Confirm the inbox is ready for live conversations."
+    title: "Go Live",
+    description: "Start messaging from your shared team inbox."
   }
 ] as const;
 
@@ -46,7 +46,7 @@ export function SetupProgressCard({
         </p>
       </div>
 
-      {selectedMethodLabel ? (
+      {selectedMethodLabel && !isGuided ? (
         <div className="wa-progress-method-chip">{selectedMethodLabel}</div>
       ) : null}
 

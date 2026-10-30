@@ -71,16 +71,51 @@ type CapturedEnvelope = {
   rawJson: unknown;
 };
 
+const WHATSAPP_MEDIA_DOWNLOAD_ATTEMPTS = Math.max(
+  1,
+  Number.parseInt(process.env.WHATSAPP_MEDIA_DOWNLOAD_ATTEMPTS ?? "4", 10) || 4
+);
+
+const WHATSAPP_MEDIA_DOWNLOAD_RETRY_MS = Math.max(
+  250,
+  Number.parseInt(process.env.WHATSAPP_MEDIA_DOWNLOAD_RETRY_MS ?? "750", 10) || 750
+);
+
+/**
+ * WhatsApp Web can expose an image event before its encrypted media is ready
+ * to download. Retry both rejected and empty responses so a temporary delay
+ * does not leave the inbox with an attachment-less media placeholder.
+ */
+export async function downloadWhatsAppMediaWithRetry(message: Pick<Message, "downloadMedia">) {
+  for (let attempt = 1; attempt <= WHATSAPP_MEDIA_DOWNLOAD_ATTEMPTS; attempt += 1) {
+    const media = await message.downloadMedia().catch(() => null);
+    if (media?.data) {
+      return media;
+    }
+
+    if (attempt < WHATSAPP_MEDIA_DOWNLOAD_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, WHATSAPP_MEDIA_DOWNLOAD_RETRY_MS * attempt));
+    }
+  }
+
+  return null;
+}
+
 export async function captureWhatsAppMessageEnvelope(input: {
   workspaceId: string;
   channelId?: string | null;
   message: Message;
+  providerMessageId?: string | null;
   rawData?: unknown;
   conversationId?: string | null;
   storedMessageId?: string | null;
 }) {
   const { message } = input;
-  const providerMessageId = message.id._serialized;
+  const providerMessageId = input.providerMessageId?.trim() || readSerializedId(message.id);
+  if (!providerMessageId) {
+    return null;
+  }
+
   const rawRecord = asRecord(input.rawData);
   const rawContactRecord = asRecord(rawRecord?.contact);
 
@@ -90,7 +125,7 @@ export async function captureWhatsAppMessageEnvelope(input: {
     message.hasQuotedMsg ? message.getQuotedMessage().catch(() => null) : Promise.resolve(null)
   ]);
 
-  const downloadedMedia = message.hasMedia ? await message.downloadMedia().catch(() => null) : null;
+  const downloadedMedia = message.hasMedia ? await downloadWhatsAppMediaWithRetry(message) : null;
   const storedMedia = downloadedMedia
     ? await persistIncomingMedia({
         workspaceId: input.workspaceId,
@@ -346,8 +381,6 @@ export async function captureWhatsAppMessageEnvelope(input: {
     ]
   );
 
-  console.info("[whatsapp-web][captured-envelope]", JSON.stringify(envelope, null, 2));
-
   return envelope;
 }
 
@@ -482,7 +515,7 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
   const groupMentions = readGroupMentions(rawRecord);
   const envelopeId = randomUUID();
 
-  await execute(
+  const writeResult = await execute(
     `INSERT INTO "WhatsAppMessageEnvelope" (
       id, "workspaceId", "channelId", "conversationId", "messageId", "providerMessageId",
       "mediaAssetId",
@@ -557,7 +590,55 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
       "contactSnapshotJson" = COALESCE(EXCLUDED."contactSnapshotJson", "WhatsAppMessageEnvelope"."contactSnapshotJson"),
       "chatSnapshotJson" = COALESCE(EXCLUDED."chatSnapshotJson", "WhatsAppMessageEnvelope"."chatSnapshotJson"),
       "rawJson" = COALESCE(EXCLUDED."rawJson", "WhatsAppMessageEnvelope"."rawJson"),
-      "updatedAt" = NOW()`,
+      "updatedAt" = NOW()
+    WHERE "WhatsAppMessageEnvelope"."channelId" IS DISTINCT FROM COALESCE(EXCLUDED."channelId", "WhatsAppMessageEnvelope"."channelId")
+       OR "WhatsAppMessageEnvelope"."conversationId" IS DISTINCT FROM COALESCE(EXCLUDED."conversationId", "WhatsAppMessageEnvelope"."conversationId")
+       OR "WhatsAppMessageEnvelope"."messageId" IS DISTINCT FROM COALESCE(EXCLUDED."messageId", "WhatsAppMessageEnvelope"."messageId")
+       OR "WhatsAppMessageEnvelope"."mediaAssetId" IS DISTINCT FROM COALESCE(EXCLUDED."mediaAssetId", "WhatsAppMessageEnvelope"."mediaAssetId")
+       OR "WhatsAppMessageEnvelope"."from" IS DISTINCT FROM COALESCE(EXCLUDED."from", "WhatsAppMessageEnvelope"."from")
+       OR "WhatsAppMessageEnvelope"."to" IS DISTINCT FROM COALESCE(EXCLUDED."to", "WhatsAppMessageEnvelope"."to")
+       OR "WhatsAppMessageEnvelope"."author" IS DISTINCT FROM COALESCE(EXCLUDED."author", "WhatsAppMessageEnvelope"."author")
+       OR "WhatsAppMessageEnvelope".ack IS DISTINCT FROM COALESCE(EXCLUDED.ack, "WhatsAppMessageEnvelope".ack)
+       OR "WhatsAppMessageEnvelope"."messageTimestamp" IS DISTINCT FROM COALESCE(EXCLUDED."messageTimestamp", "WhatsAppMessageEnvelope"."messageTimestamp")
+       OR "WhatsAppMessageEnvelope"."messageType" IS DISTINCT FROM COALESCE(EXCLUDED."messageType", "WhatsAppMessageEnvelope"."messageType")
+       OR "WhatsAppMessageEnvelope".body IS DISTINCT FROM COALESCE(EXCLUDED.body, "WhatsAppMessageEnvelope".body)
+       OR "WhatsAppMessageEnvelope"."fromMe" IS DISTINCT FROM EXCLUDED."fromMe"
+       OR "WhatsAppMessageEnvelope"."hasMedia" IS DISTINCT FROM EXCLUDED."hasMedia"
+       OR "WhatsAppMessageEnvelope"."isForwarded" IS DISTINCT FROM COALESCE(EXCLUDED."isForwarded", "WhatsAppMessageEnvelope"."isForwarded")
+       OR "WhatsAppMessageEnvelope"."isStatus" IS DISTINCT FROM COALESCE(EXCLUDED."isStatus", "WhatsAppMessageEnvelope"."isStatus")
+       OR "WhatsAppMessageEnvelope".broadcast IS DISTINCT FROM COALESCE(EXCLUDED.broadcast, "WhatsAppMessageEnvelope".broadcast)
+       OR "WhatsAppMessageEnvelope"."deviceType" IS DISTINCT FROM COALESCE(EXCLUDED."deviceType", "WhatsAppMessageEnvelope"."deviceType")
+       OR "WhatsAppMessageEnvelope"."hasQuotedMsg" IS DISTINCT FROM COALESCE(EXCLUDED."hasQuotedMsg", "WhatsAppMessageEnvelope"."hasQuotedMsg")
+       OR "WhatsAppMessageEnvelope"."mentionedIdsJson" IS DISTINCT FROM CASE
+            WHEN jsonb_array_length(EXCLUDED."mentionedIdsJson") > 0 THEN EXCLUDED."mentionedIdsJson"
+            ELSE "WhatsAppMessageEnvelope"."mentionedIdsJson"
+          END
+       OR "WhatsAppMessageEnvelope"."groupMentionsJson" IS DISTINCT FROM CASE
+            WHEN jsonb_array_length(EXCLUDED."groupMentionsJson") > 0 THEN EXCLUDED."groupMentionsJson"
+            ELSE "WhatsAppMessageEnvelope"."groupMentionsJson"
+          END
+       OR "WhatsAppMessageEnvelope"."linksJson" IS DISTINCT FROM CASE
+            WHEN jsonb_array_length(EXCLUDED."linksJson") > 0 THEN EXCLUDED."linksJson"
+            ELSE "WhatsAppMessageEnvelope"."linksJson"
+          END
+       OR "WhatsAppMessageEnvelope"."selectedButtonId" IS DISTINCT FROM COALESCE(EXCLUDED."selectedButtonId", "WhatsAppMessageEnvelope"."selectedButtonId")
+       OR "WhatsAppMessageEnvelope"."selectedRowId" IS DISTINCT FROM COALESCE(EXCLUDED."selectedRowId", "WhatsAppMessageEnvelope"."selectedRowId")
+       OR "WhatsAppMessageEnvelope"."mediaMimeType" IS DISTINCT FROM COALESCE(EXCLUDED."mediaMimeType", "WhatsAppMessageEnvelope"."mediaMimeType")
+       OR "WhatsAppMessageEnvelope"."mediaFilename" IS DISTINCT FROM COALESCE(EXCLUDED."mediaFilename", "WhatsAppMessageEnvelope"."mediaFilename")
+       OR "WhatsAppMessageEnvelope"."mediaCaption" IS DISTINCT FROM COALESCE(EXCLUDED."mediaCaption", "WhatsAppMessageEnvelope"."mediaCaption")
+       OR "WhatsAppMessageEnvelope"."mediaUrl" IS DISTINCT FROM COALESCE(EXCLUDED."mediaUrl", "WhatsAppMessageEnvelope"."mediaUrl")
+       OR "WhatsAppMessageEnvelope"."quotedMessageId" IS DISTINCT FROM COALESCE(EXCLUDED."quotedMessageId", "WhatsAppMessageEnvelope"."quotedMessageId")
+       OR "WhatsAppMessageEnvelope"."quotedBody" IS DISTINCT FROM COALESCE(EXCLUDED."quotedBody", "WhatsAppMessageEnvelope"."quotedBody")
+       OR "WhatsAppMessageEnvelope"."contactId" IS DISTINCT FROM COALESCE(EXCLUDED."contactId", "WhatsAppMessageEnvelope"."contactId")
+       OR "WhatsAppMessageEnvelope"."contactName" IS DISTINCT FROM COALESCE(EXCLUDED."contactName", "WhatsAppMessageEnvelope"."contactName")
+       OR "WhatsAppMessageEnvelope"."contactPushname" IS DISTINCT FROM COALESCE(EXCLUDED."contactPushname", "WhatsAppMessageEnvelope"."contactPushname")
+       OR "WhatsAppMessageEnvelope"."contactNumber" IS DISTINCT FROM COALESCE(EXCLUDED."contactNumber", "WhatsAppMessageEnvelope"."contactNumber")
+       OR "WhatsAppMessageEnvelope"."chatId" IS DISTINCT FROM COALESCE(EXCLUDED."chatId", "WhatsAppMessageEnvelope"."chatId")
+       OR "WhatsAppMessageEnvelope"."chatName" IS DISTINCT FROM COALESCE(EXCLUDED."chatName", "WhatsAppMessageEnvelope"."chatName")
+       OR "WhatsAppMessageEnvelope"."chatIsGroup" IS DISTINCT FROM COALESCE(EXCLUDED."chatIsGroup", "WhatsAppMessageEnvelope"."chatIsGroup")
+       OR "WhatsAppMessageEnvelope"."contactSnapshotJson" IS DISTINCT FROM COALESCE(EXCLUDED."contactSnapshotJson", "WhatsAppMessageEnvelope"."contactSnapshotJson")
+       OR "WhatsAppMessageEnvelope"."chatSnapshotJson" IS DISTINCT FROM COALESCE(EXCLUDED."chatSnapshotJson", "WhatsAppMessageEnvelope"."chatSnapshotJson")
+       OR "WhatsAppMessageEnvelope"."rawJson" IS DISTINCT FROM COALESCE(EXCLUDED."rawJson", "WhatsAppMessageEnvelope"."rawJson")`,
     [
       envelopeId,
       input.workspaceId,
@@ -607,7 +688,8 @@ export async function upsertWhatsAppMessageEnvelopeFromPayload(input: {
   return {
     providerMessageId,
     mentionedIds,
-    groupMentions
+    groupMentions,
+    written: writeResult.rowCount === 1
   };
 }
 

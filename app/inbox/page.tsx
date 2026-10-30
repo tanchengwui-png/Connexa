@@ -23,7 +23,7 @@ export default async function InboxPage({ searchParams }: InboxPageProps) {
     }
   }
 
-  const { conversations, quickReplies, whatsapp, agents, selectedConversation, summary, currentAgent, workspaceIndustryType, mediaAssets, contactTags } =
+  const { conversations, conversationPage, quickReplies, whatsapp, agents, selectedConversation, summary, currentAgent, workspaceIndustryType, mediaAssets, contactTags } =
     await getInboxData(params?.conversationId, params?.channelId ?? null);
   const hasDisconnectedWhatsAppSession =
     (whatsapp.runtimeStatus === "DISCONNECTED" || whatsapp.runtimeStatus === "AUTH_FAILED");
@@ -42,6 +42,7 @@ export default async function InboxPage({ searchParams }: InboxPageProps) {
       <div className="inbox-page-shell">
         <InboxWorkspace
           conversations={conversations}
+          conversationPage={conversationPage}
           contactTags={contactTags}
           quickReplies={quickReplies}
           mediaAssets={mediaAssets}
@@ -55,7 +56,7 @@ export default async function InboxPage({ searchParams }: InboxPageProps) {
         <footer className="inbox-shell-footer" aria-label="Inbox status">
           <span>Connexa</span>
           <span>Shared Inbox</span>
-          <span>{conversations.length} conversations</span>
+          <span>{conversationPage.totalCount} conversations total</span>
           <span>{footerStatusLabel}</span>
         </footer>
       </div>

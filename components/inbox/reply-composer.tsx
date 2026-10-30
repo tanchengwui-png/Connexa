@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ClipboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { AttachmentPreview } from "@/components/attachment-preview";
 import { useToast } from "@/components/toast-provider";
-import { Button } from "@/components/ui/button";
 import { FullEmojiPicker } from "@/components/full-emoji-picker";
 import { ScheduleSendDialog } from "@/components/inbox/schedule-send-dialog";
 import {
@@ -48,6 +48,7 @@ type ReplyComposerProps = {
     body: string | null;
     attachmentName: string | null;
   } | null;
+  recordedVoiceNote: File | null;
   canSendPublicReply: boolean;
   selectedMentions: InboxSelectedMention[];
   selectedAttachments: InboxComposerAttachment[];
@@ -55,13 +56,14 @@ type ReplyComposerProps = {
   onAttachmentChange: (attachments: InboxComposerAttachment[]) => void;
   onClearReply: () => void;
   onInsertQuickReply: (quickReply: InboxQuickReply) => void;
+  onInternalNoteChange: (isInternalNote: boolean) => void;
   onMediaAssetsChange: (assets: InboxMediaAsset[]) => void;
   onMessageBodyChange: (value: string) => void;
+  onRecordedVoiceNoteChange: (file: File | null) => void;
   onSelectedMentionsChange: (mentions: InboxSelectedMention[]) => void;
   onSendMessage: () => void;
   onScheduleMessage: (value: string) => void;
   onTakeOverConversation: () => void;
-  onToggleInternalNote: () => void;
   quickReplies: InboxQuickReply[];
   requiresTakeOverForPublicReply: boolean;
   takeoverOwnerName: string | null;
@@ -94,6 +96,7 @@ export function ReplyComposer({
   messageBody,
   mentionCandidates,
   replyingToMessage,
+  recordedVoiceNote,
   canSendPublicReply,
   selectedMentions,
   selectedAttachments,
@@ -101,13 +104,14 @@ export function ReplyComposer({
   onAttachmentChange,
   onClearReply,
   onInsertQuickReply,
+  onInternalNoteChange,
   onMediaAssetsChange,
   onMessageBodyChange,
+  onRecordedVoiceNoteChange,
   onSelectedMentionsChange,
   onSendMessage,
   onScheduleMessage,
   onTakeOverConversation,
-  onToggleInternalNote,
   quickReplies,
   requiresTakeOverForPublicReply,
   takeoverOwnerName
@@ -177,16 +181,6 @@ export function ReplyComposer({
         : null;
     })
     .filter((asset): asset is InboxMediaAsset & { sendAsVoice: boolean } => Boolean(asset));
-  const helperCopy = isInternalNote
-    ? "Internal note only. This stays inside your workspace and is not sent to WhatsApp."
-    : showTakeoverCallout
-      ? `Public reply is locked while this conversation is owned by ${takeoverOwnerName ?? "another teammate"}. Take over to reply.`
-      : canSendPublicReply && whatsappMode === "mock"
-        ? "Mock reply. This is simulated locally for testing and does not send a real WhatsApp message."
-        : canSendPublicReply
-          ? "Public reply. This sends a real WhatsApp message to the customer."
-          : "Public reply is disabled until the WhatsApp channel is configured and ready.";
-
   const templateCategories = useMemo(
     () => Array.from(new Set(quickReplies.map((item) => item.category))).sort((left, right) => left.localeCompare(right)),
     [quickReplies]
@@ -565,6 +559,25 @@ export function ReplyComposer({
     void uploadFiles(Array.from(fileList));
   };
 
+  const handleAttachmentPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    if (isInternalNote) {
+      return;
+    }
+
+    const itemFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    const pastedFiles = itemFiles.length ? itemFiles : Array.from(event.clipboardData.files);
+
+    if (!pastedFiles.length) {
+      return;
+    }
+
+    event.preventDefault();
+    void uploadFiles(pastedFiles);
+  };
+
   const handleVoiceUploadSelection = (fileList: FileList | null) => {
     if (!fileList?.length) {
       return;
@@ -643,7 +656,7 @@ export function ReplyComposer({
         const file = new File([blob], `voice-note-${Date.now()}.${extension}`, {
           type: nextMimeType
         });
-        void uploadFiles([file], { sendAsVoice: true });
+        onRecordedVoiceNoteChange(file);
       };
 
       recorder.start(250);
@@ -695,21 +708,27 @@ export function ReplyComposer({
         void uploadFiles(Array.from(event.dataTransfer.files ?? []));
       }}
     >
-      <div className="inbox-composer-head">
-        <div className="inbox-composer-copy">
-          <span className="control-label">Reply composer</span>
-          <p className="inbox-composer-helper">{helperCopy}</p>
-        </div>
-        <Button
-          aria-pressed={isInternalNote}
-          className={`inbox-note-toggle${isInternalNote ? " active" : ""}`}
-          onClick={onToggleInternalNote}
-          selected={isInternalNote}
-          variant="toggle"
+      <div aria-label="Reply type" className="inbox-composer-mode-tabs" role="tablist">
+        <button
+          aria-selected={!isInternalNote}
+          className={!isInternalNote ? "active" : ""}
+          onClick={() => onInternalNoteChange(false)}
+          role="tab"
+          type="button"
+        >
+          <TemplateIcon />
+          <span>WhatsApp reply</span>
+        </button>
+        <button
+          aria-selected={isInternalNote}
+          className={isInternalNote ? "active" : ""}
+          onClick={() => onInternalNoteChange(true)}
+          role="tab"
+          type="button"
         >
           <NoteIcon />
-          <span>{isInternalNote ? "Internal note" : "Public reply"}</span>
-        </Button>
+          <span>Internal note</span>
+        </button>
       </div>
 
       {showTakeoverCallout ? (
@@ -739,6 +758,7 @@ export function ReplyComposer({
           className={`composer-textarea${isInternalNote ? " note-mode" : ""}`}
           id="reply-body"
           onChange={(event) => handleBodyChange(event.target.value, event.target.selectionStart)}
+          onPaste={handleAttachmentPaste}
           onClick={(event) => {
             const caretPosition = event.currentTarget.selectionStart ?? messageBody.length;
             updateMentionQuery(messageBody, caretPosition);
@@ -857,6 +877,24 @@ export function ReplyComposer({
               />
             </article>
           ))}
+        </div>
+      ) : null}
+
+      {recordedVoiceNote ? (
+        <div className="inbox-upload-preview-grid">
+          <article className="inbox-upload-preview-card">
+            <button
+              aria-label="Remove recorded voice note"
+              className="inbox-upload-preview-remove"
+              onClick={() => onRecordedVoiceNoteChange(null)}
+              type="button"
+            >
+              <CloseIcon />
+            </button>
+            <div className="inbox-upload-preview-order">Voice</div>
+            <strong>{recordedVoiceNote.name}</strong>
+            <span>{formatMediaAssetSize(recordedVoiceNote.size)} · Sent as a voice note</span>
+          </article>
         </div>
       ) : null}
 

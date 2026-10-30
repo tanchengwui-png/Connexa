@@ -6,7 +6,7 @@ import { AttachmentPreview } from "@/components/attachment-preview";
 import { useConfirmation } from "@/components/confirmation-provider";
 import { useToast } from "@/components/toast-provider";
 import { MediaAssetKind } from "@/lib/db-types";
-import { INBOX_UPLOAD_LIMITS_HELPER, UPLOAD_PROXY_LIMIT_ERROR } from "@/lib/inbox-upload";
+import { INBOX_UPLOAD_LIMITS, UPLOAD_PROXY_LIMIT_ERROR, validateInboxUploadFile } from "@/lib/inbox-upload";
 import { buildMediaStorageExceededMessage } from "@/lib/media-library-quota";
 import {
   formatMediaAssetSize,
@@ -62,6 +62,21 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
         : 0;
   const selectedFileExceedsRemainingStorage =
     selectedFile && remainingStorageBytes !== null ? selectedFile.size > remainingStorageBytes : false;
+  const selectedFileValidationError = useMemo(() => {
+    if (!selectedFile) return null;
+    try {
+      validateInboxUploadFile({
+        fileName: selectedFile.name,
+        mimeType: selectedFile.type,
+        sizeBytes: selectedFile.size
+      });
+      return selectedFileExceedsRemainingStorage
+        ? buildStorageExceededMessage(usedStorageBytes, limits.storageLimitBytes, selectedFile.size)
+        : null;
+    } catch (validationError) {
+      return validationError instanceof Error ? validationError.message : "This file cannot be uploaded.";
+    }
+  }, [limits.storageLimitBytes, selectedFile, selectedFileExceedsRemainingStorage, usedStorageBytes]);
   const groupedCounts = useMemo(
     () => ({
       image: assetList.filter((asset) => asset.kind === MediaAssetKind.IMAGE).length,
@@ -88,8 +103,8 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
       return;
     }
 
-    if (selectedFileExceedsRemainingStorage) {
-      setError(buildStorageExceededMessage(usedStorageBytes, limits.storageLimitBytes, selectedFile.size));
+    if (selectedFileValidationError) {
+      setError(selectedFileValidationError);
       return;
     }
 
@@ -163,7 +178,7 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
   const removeAsset = async (asset: MediaLibraryAsset) => {
     const accepted = await confirm({
       title: "Delete media asset?",
-      description: `This will remove ${asset.title} from the shared library.`,
+      description: `This will remove ${asset.originalName || asset.title} from the shared library.`,
       confirmLabel: "Delete media",
       tone: "danger"
     });
@@ -192,23 +207,29 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
     });
   };
 
+  const selectFile = (file: File | null) => {
+    setSelectedFile(file);
+    setError(null);
+  };
+
   return (
-    <section className="media-library-layout">
+    <section className="media-library-layout media-library-content">
       <section className="media-library-overview">
         <article className="content-card media-library-upload-card">
-          <div className="card-header">
+          <div className="card-header media-panel-header">
             <div>
-              <h3 className="card-title">Upload media</h3>
+              <h2 className="card-title">Upload media</h2>
               <p className="muted">Keep approved WhatsApp images, audio clips, videos, and documents here for automation reuse.</p>
             </div>
-            <div className="media-library-capacity">
-              <strong>{storageUsagePercentage ?? "∞"}{storageUsagePercentage !== null ? "%" : ""}</strong>
-              <span>{storageHeadline}</span>
+            <div className="media-library-capacity media-storage-summary">
+              <span>Storage used</span>
+              <strong>{storageHeadline}</strong>
             </div>
           </div>
 
           <div
-            className={`media-library-upload-dropzone${isDragActive ? " dragging" : ""}${selectedFile ? " filled" : ""}`}
+            className={`media-library-upload-dropzone${isDragActive ? " dragging" : ""}${selectedFile ? " filled" : ""}${selectedFileValidationError ? " invalid" : ""}`}
+            aria-label="Choose a media file to upload"
             onClick={() => fileInputRef.current?.click()}
             onDragEnter={(event) => {
               event.preventDefault();
@@ -227,7 +248,7 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
             onDrop={(event) => {
               event.preventDefault();
               setIsDragActive(false);
-              setSelectedFile(event.dataTransfer.files?.[0] ?? null);
+              selectFile(event.dataTransfer.files?.[0] ?? null);
             }}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
@@ -240,56 +261,76 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
           >
             <input
               accept={getMediaAssetAccept()}
+              aria-label="Choose a media file to upload"
               className="inbox-hidden-file-input"
-              onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
+              onChange={(event) => selectFile(event.target.files?.[0] ?? null)}
               ref={fileInputRef}
               type="file"
             />
-            <div className="media-library-upload-hero">
-              <strong>Drag in a file or choose one manually</strong>
+            <div className="media-library-upload-hero media-dropzone__copy">
+              <strong>Drag files here or choose a file</strong>
               <span>Supported: images, videos, audio, and documents.</span>
             </div>
-            <button className="button button-secondary" onClick={() => fileInputRef.current?.click()} type="button">
+            <button
+              className="button button-secondary"
+              onClick={(event) => {
+                event.stopPropagation();
+                fileInputRef.current?.click();
+              }}
+              type="button"
+            >
               Choose file
             </button>
           </div>
 
           <div className="media-library-upload-meta">
-            <span>{INBOX_UPLOAD_LIMITS_HELPER}</span>
-            <span>{storageRemainingLabel}</span>
+            <span>
+              Images {formatMediaAssetSize(INBOX_UPLOAD_LIMITS.IMAGE)} · Documents {formatMediaAssetSize(INBOX_UPLOAD_LIMITS.DOCUMENT)} · Audio {formatMediaAssetSize(INBOX_UPLOAD_LIMITS.AUDIO)} · Videos {formatMediaAssetSize(INBOX_UPLOAD_LIMITS.VIDEO)}
+            </span>
           </div>
 
           {!limits.isStorageUnlimited && limits.storageLimitBytes !== null ? (
-            <div className="media-library-storage-meter" aria-label="Media Library storage usage">
+            <div
+              aria-label="Media Library storage usage"
+              aria-valuemax={limits.storageLimitBytes}
+              aria-valuemin={0}
+              aria-valuenow={usedStorageBytes}
+              className="media-library-storage-meter"
+              role="progressbar"
+            >
               <div className="media-library-storage-meter-bar" aria-hidden="true">
                 <span style={{ width: `${Math.max(storageUsagePercentage ?? 0, assetList.length ? 4 : 0)}%` }} />
               </div>
               <div className="media-library-storage-meter-copy">
-                <span>{storageHeadline}</span>
                 <span>{storageRemainingLabel}</span>
               </div>
             </div>
           ) : null}
 
           {selectedFile ? (
-            <div className="media-library-selected-file">
-              <div className="media-library-selected-file-copy">
-                <strong>{selectedFile.name}</strong>
-                <span>{formatMediaAssetSize(selectedFile.size)}</span>
+            <>
+              <div className="media-library-selected-file">
+                <div className="media-library-selected-file-copy">
+                  <strong>{selectedFile.name}</strong>
+                  <span>
+                    {getSelectedFileTypeLabel(selectedFile)} · {formatMediaAssetSize(selectedFile.size)} · {selectedFileValidationError ? "Needs attention" : "Ready to upload"}
+                  </span>
+                </div>
+                <button
+                  className="inbox-search-tool"
+                  onClick={() => {
+                    selectFile(null);
+                    if (fileInputRef.current) {
+                      fileInputRef.current.value = "";
+                    }
+                  }}
+                  type="button"
+                >
+                  Remove
+                </button>
               </div>
-              <button
-                className="inbox-search-tool"
-                onClick={() => {
-                  setSelectedFile(null);
-                  if (fileInputRef.current) {
-                    fileInputRef.current.value = "";
-                  }
-                }}
-                type="button"
-              >
-                Remove
-              </button>
-            </div>
+              {selectedFileValidationError ? <div className="form-error" role="alert">{selectedFileValidationError}</div> : null}
+            </>
           ) : null}
 
           {uploadProgress !== null ? (
@@ -316,7 +357,7 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                 isPending ||
                 uploadProgress !== null ||
                 !selectedFile ||
-                selectedFileExceedsRemainingStorage
+                Boolean(selectedFileValidationError)
               }
               onClick={() => {
                 void uploadAsset();
@@ -331,48 +372,44 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
         </article>
 
         <article className="content-card media-library-summary-card">
-          <div className="card-header">
+          <div className="card-header media-summary-header">
             <div>
-              <h3 className="card-title">Library summary</h3>
+              <h2 className="card-title">Library summary</h2>
               <p className="muted">A quick view of the reusable media your team can attach to automation.</p>
             </div>
           </div>
 
           <div className="media-library-stats-grid">
             <div className="media-library-stat-tile">
-              <span>Total assets</span>
               <strong>{assetList.length}</strong>
+              <span>Total assets</span>
             </div>
             <div className="media-library-stat-tile kind-image">
-              <span>Images</span>
               <strong>{groupedCounts.image}</strong>
+              <span>Images</span>
             </div>
             <div className="media-library-stat-tile kind-audio">
-              <span>Audio</span>
               <strong>{groupedCounts.audio}</strong>
+              <span>Audio</span>
             </div>
             <div className="media-library-stat-tile kind-video">
-              <span>Videos</span>
               <strong>{groupedCounts.video}</strong>
+              <span>Videos</span>
             </div>
             <div className="media-library-stat-tile">
-              <span>Documents</span>
               <strong>{groupedCounts.document}</strong>
+              <span>Documents</span>
             </div>
           </div>
 
-          <div className="media-library-stats">
-            <span>Shared across automation rules</span>
-            <span>No inline uploads from rules</span>
-            <span>Central limit control</span>
-          </div>
+          <p className="media-library-summary-note">Assets are shared across automation rules and quick replies.</p>
         </article>
       </section>
 
       <article className="content-card media-library-collection-card">
-        <div className="card-header">
+        <div className="card-header media-library-collection-head media-library-header">
           <div>
-            <h3 className="card-title">Library</h3>
+            <h2 className="card-title">Library</h2>
             <p className="muted">Reusable WhatsApp-ready assets for automation messages.</p>
           </div>
           <span className="product-catalog-count">
@@ -393,7 +430,7 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                   <div className="media-library-preview">
                     <AttachmentPreview
                       fileName={asset.originalName || asset.title}
-                      fit="cover"
+                      fit="contain"
                       mimeType={asset.mimeType}
                       openLabel="Open attachment"
                       sizeLabel={formatMediaAssetSize(asset.sizeBytes)}
@@ -421,21 +458,26 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
                         </div>
                       </div>
                     ) : (
-                      <strong>{asset.title}</strong>
+                      <strong title={asset.title}>{asset.title}</strong>
                     )}
                   </div>
-                  <p className="muted">{asset.originalName}</p>
+                  {asset.originalName && asset.originalName !== asset.title ? <p className="muted" title={asset.originalName}>{asset.originalName}</p> : null}
                   <div className="media-library-card-meta">
-                    <span>{formatMediaAssetSize(asset.sizeBytes)}</span>
-                    <span>{asset.uploadedByName ? `by ${asset.uploadedByName}` : "Uploaded"}</span>
+                    <span>{getMediaKindLabel(asset.kind, asset.mimeType)} · {getAssetExtension(asset)}</span>
                   </div>
                 </div>
 
+                <div className="media-library-card-size">{formatMediaAssetSize(asset.sizeBytes)}</div>
+                <div className="media-library-card-upload">
+                  <span>{asset.uploadedByName ?? "—"}</span>
+                  <span>{formatAssetUploadedAt(asset.createdAtIso)}</span>
+                </div>
+
                 <div className="media-library-card-actions">
-                  <button className="inbox-search-tool" onClick={() => startRename(asset)} type="button">
+                  <button aria-label={`Rename ${asset.title}`} className="button button-secondary media-library-action-rename" disabled={isPending} onClick={() => startRename(asset)} type="button">
                     Rename
                   </button>
-                  <button className="button button-secondary" onClick={() => removeAsset(asset)} type="button">
+                  <button aria-label={`Delete ${asset.title}`} className="button button-secondary media-library-action-delete" disabled={isPending} onClick={() => removeAsset(asset)} type="button">
                     Delete
                   </button>
                 </div>
@@ -451,6 +493,26 @@ export function MediaLibraryManager({ assets, limits }: MediaLibraryManagerProps
       </article>
     </section>
   );
+}
+
+function getAssetExtension(asset: MediaLibraryAsset) {
+  const source = asset.originalName || asset.title;
+  const extension = source.split(".").pop()?.trim();
+  return extension && extension !== source ? extension.toUpperCase() : asset.mimeType;
+}
+
+function getSelectedFileTypeLabel(file: File) {
+  const extension = file.name.split(".").pop()?.trim();
+  return extension ? extension.toUpperCase() : "File";
+}
+
+function formatAssetUploadedAt(value: string) {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "Date unavailable";
+  return new Intl.DateTimeFormat("en-MY", {
+    dateStyle: "medium",
+    timeZone: "Asia/Kuala_Lumpur"
+  }).format(new Date(timestamp));
 }
 
 function uploadMediaLibraryFileWithProgress(file: File, onProgress: (progress: number) => void) {

@@ -9,7 +9,7 @@ import {
 } from "@/lib/workspace-package-management";
 import { PACKAGE_BILLING_PERIOD, type PackageBillingPeriod } from "@/lib/package-pricing";
 
-type UpgradeInvoice = {
+export type UpgradeInvoice = {
   id: string;
   invoiceNumber: string;
   operationType: "UPGRADE" | "RENEWAL" | "DOWNGRADE";
@@ -33,7 +33,7 @@ type UpgradeInvoice = {
   updatedAt: string;
 };
 
-type WorkspacePackageOption = {
+export type WorkspacePackageOption = {
   key: string;
   name: string;
   operationType: "UPGRADE" | "RENEWAL" | "DOWNGRADE";
@@ -306,6 +306,7 @@ export function WorkspacePackageUpgradeCard({
       invoice.status === "PAYMENT_FAILED"
   );
   const openInvoice = activeInvoices[0] ?? null;
+  const canPayOpenInvoice = openInvoice?.status === "ISSUED" || openInvoice?.status === "PAYMENT_FAILED";
   const historyStatusLabel = activeInvoices.length
     ? `${activeInvoices.length} awaiting payment`
     : "No open invoice";
@@ -315,7 +316,7 @@ export function WorkspacePackageUpgradeCard({
     : "You can downgrade after your current plan expires.";
 
   const invoiceHistory = !invoices.length ? (
-    <p className="table-subtle">No package invoices yet.</p>
+    <p className="table-subtle">No package payment requests yet.</p>
   ) : (
     <div className="account-package-upgrade-list account-package-upgrade-list-history">
       {invoices.map((invoice) => (
@@ -390,9 +391,29 @@ export function WorkspacePackageUpgradeCard({
       {message ? <p className="form-success">{message}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
       {openInvoice ? (
-        <p className="table-subtle">
-          Current pending selection: {openInvoice.operationType} to {openInvoice.targetPackageLabel} on {getBillingIntervalText(openInvoice.billingPeriod)} billing.
-        </p>
+        <div className="account-package-pending-selection">
+          <p className="table-subtle">
+            Current pending selection: {openInvoice.operationType} to {openInvoice.targetPackageLabel} on {getBillingIntervalText(openInvoice.billingPeriod)} billing.
+          </p>
+          {canPayOpenInvoice ? (
+            <button
+              className="button button-primary"
+              disabled={pendingAction !== null}
+              onClick={() => void handlePayInvoice(openInvoice.id)}
+              type="button"
+            >
+              {pendingAction === `pay:${openInvoice.id}`
+                ? "Opening..."
+                : openInvoice.status === "PAYMENT_FAILED"
+                  ? "Retry payment"
+                  : "Pay now"}
+            </button>
+          ) : openInvoice.status === "PAYMENT_PROCESSING" ? (
+            <span className="table-subtle account-package-pending-payment">
+              Invoice payment is currently pending.
+            </span>
+          ) : null}
+        </div>
       ) : null}
 
       {!options.length ? (
@@ -485,7 +506,7 @@ export function WorkspacePackageUpgradeCard({
       <div className="account-package-upgrade-invoices">
         <div className="account-package-history-summary">
           <div className="account-package-upgrade-head">
-            <strong>Package Invoice History</strong>
+            <strong>Package Payment Requests</strong>
             <span className="table-subtle">{historyStatusLabel}</span>
           </div>
           <button
@@ -494,7 +515,7 @@ export function WorkspacePackageUpgradeCard({
             ref={historyTriggerRef}
             type="button"
           >
-            View package history
+            View payment requests
           </button>
         </div>
       </div>

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getAppBaseUrl } from "@/lib/app-url";
 import { BillingPeriod, PaymentStatus, SubscriptionStatus, normalizeWorkspacePackageKey, recordWorkspacePayment } from "@/lib/billing";
-import { createBillplzBill, verifyBillplzCallbackSignature, verifyBillplzRedirectSignature } from "@/lib/billplz";
+import { createBillplzBill, deleteBillplzBill, getBillplzBill, verifyBillplzCallbackSignature, verifyBillplzRedirectSignature } from "@/lib/billplz";
 import {
   createPendingWorkspacePackageUpgrade,
   createWorkspacePackageSubscription,
@@ -12,15 +12,15 @@ import {
   findPendingWorkspacePackageUpgradeByIdForWorkspaceForUpdate,
   findPendingWorkspacePackageUpgradeByProviderReference,
   findPendingWorkspacePackageUpgradeByProviderReferenceForUpdate,
-  findWorkspaceById,
   findWorkspaceByIdForUpdate,
   listActivePendingWorkspacePackageUpgradesByWorkspaceForUpdate,
   listPendingWorkspacePackageUpgradesByWorkspace,
   updatePendingWorkspacePackageUpgradeProvider,
   updatePendingWorkspacePackageUpgradeStatus,
-  updateWorkspacePlan
+  updateWorkspacePlan,
+  type PendingWorkspacePackageUpgradeRow
 } from "@/lib/db-auth";
-import { queryMany, queryOne, transaction } from "@/lib/db";
+import { execute, queryMany, queryOne, transaction } from "@/lib/db";
 import { getPackageChargeAmount, normalizePackageBillingPeriod, PACKAGE_BILLING_PERIOD, type PackageBillingPeriod } from "@/lib/package-pricing";
 import { getPlatformConfig } from "@/lib/platform-config";
 import { getPlatformPackageSettings, getResolvedPublicPackageDefinition } from "@/lib/platform-packages";
@@ -28,8 +28,7 @@ import { getPublicPackageDefinition, publicPackageKeys, type PublicPackageKey } 
 import {
   createPaidInvoice,
   finalizeInvoiceDocumentAndEmail,
-  sendInvoiceIssuedEmail,
-  sendInvoiceIssuedEmailFromSnapshot
+  sendInvoiceIssuedEmail
 } from "@/lib/billing-management";
 import { getCurrentSubscriptionOverview } from "@/lib/billing-management";
 
@@ -43,6 +42,8 @@ const WORKSPACE_PACKAGE_RANK: Record<PublicPackageKey, number> = {
 const UPGRADE_INVOICE_STATUS = {
   ISSUED: "ISSUED",
   PAYMENT_PROCESSING: "PAYMENT_PROCESSING",
+  PAYMENT_EXPIRED: "PAYMENT_EXPIRED",
+  PAYMENT_REVIEW_REQUIRED: "PAYMENT_REVIEW_REQUIRED",
   PAID: "PAID",
   CANCELLED: "CANCELLED",
   SUPERSEDED: "SUPERSEDED",
@@ -52,6 +53,16 @@ const UPGRADE_INVOICE_STATUS = {
 
 type UpgradeInvoiceStatus = (typeof UPGRADE_INVOICE_STATUS)[keyof typeof UPGRADE_INVOICE_STATUS];
 type PlanChangeOperationType = "UPGRADE" | "RENEWAL" | "DOWNGRADE";
+
+const PAYMENT_PROCESSING_TIMEOUT_MINUTES = Math.max(
+  1,
+  Number.parseInt(process.env.PAYMENT_PROCESSING_TIMEOUT_MINUTES ?? "20", 10) || 20
+);
+const PAYMENT_RECONCILIATION_BATCH_SIZE = Math.max(
+  1,
+  Math.min(100, Number.parseInt(process.env.PAYMENT_RECONCILIATION_BATCH_SIZE ?? "25", 10) || 25)
+);
+const PAYMENT_RECONCILIATION_LEASE_MS = 2 * 60 * 1000;
 
 function getWorkspacePackageRank(plan: string | null | undefined) {
   return WORKSPACE_PACKAGE_RANK[normalizeWorkspacePackageKey(plan)];
@@ -67,6 +78,27 @@ function isFailedPlanChangeStatus(status: string) {
 
 function isPaymentProcessingStatus(status: string) {
   return status === UPGRADE_INVOICE_STATUS.PAYMENT_PROCESSING;
+}
+
+function getPaymentExpiresAt(paymentStartedAt: Date) {
+  // Malaysia is GMT+8 year-round. Adding a duration to the stored instant is
+  // timezone-safe while the source timestamp is presented and audited in GMT+8.
+  return new Date(paymentStartedAt.getTime() + PAYMENT_PROCESSING_TIMEOUT_MINUTES * 60 * 1000);
+}
+
+async function recordPaymentReconciliationActivity(input: {
+  upgradeId: string;
+  action: string;
+  reason?: string | null;
+  gatewayState?: string | null;
+  executor?: Parameters<typeof execute>[2];
+}) {
+  await execute(
+    `INSERT INTO "WorkspacePackagePaymentReconciliation" (id, "upgradeId", action, reason, "gatewayState", "createdAt")
+     VALUES ($1, $2, $3, $4, $5, NOW())`,
+    [randomUUID().replace(/-/g, ""), input.upgradeId, input.action, input.reason ?? null, input.gatewayState ?? null],
+    input.executor
+  );
 }
 
 function isReplaceablePlanChangeStatus(status: string) {
@@ -362,9 +394,216 @@ async function markPendingWorkspacePackageUpgradePaymentFailed(providerReference
     return updatePendingWorkspacePackageUpgradeStatus({
       upgradeId: invoice.id,
       status: UPGRADE_INVOICE_STATUS.PAYMENT_FAILED,
+      paymentReconciledAt: new Date(),
+      paymentGatewayState: "unpaid",
+      paymentReconciliationReason: "Billplz callback or redirect confirmed the payment was not completed.",
+      clearPaymentReconciliationLease: true,
       executor: client
     });
   });
+}
+
+async function claimExpiredWorkspacePackagePayment(upgradeId: string, now: Date) {
+  return transaction(async (client) => {
+    const invoice = await queryOne<PendingWorkspacePackageUpgradeRow>(
+      `SELECT * FROM "PendingWorkspacePackageUpgrade" WHERE id = $1 FOR UPDATE`,
+      [upgradeId],
+      client
+    );
+    if (!invoice || !isPaymentProcessingStatus(invoice.status) || !invoice.providerReference) {
+      return null;
+    }
+
+    const paymentStartedAt = invoice.paymentStartedAt ?? invoice.createdAt;
+    const paymentExpiresAt = invoice.paymentExpiresAt ?? getPaymentExpiresAt(paymentStartedAt);
+    if (paymentExpiresAt.getTime() > now.getTime()) {
+      return null;
+    }
+    if (invoice.paymentReconciliationLeaseUntil && invoice.paymentReconciliationLeaseUntil.getTime() > now.getTime()) {
+      return null;
+    }
+
+    await execute(
+      `UPDATE "PendingWorkspacePackageUpgrade"
+       SET "paymentExpiresAt" = $2, "paymentReconciliationLeaseUntil" = $3, "updatedAt" = NOW()
+       WHERE id = $1`,
+      [invoice.id, paymentExpiresAt, new Date(now.getTime() + PAYMENT_RECONCILIATION_LEASE_MS)],
+      client
+    );
+    await recordPaymentReconciliationActivity({
+      upgradeId: invoice.id,
+      action: "RECONCILIATION_CLAIMED",
+      reason: "Payment processing timeout reached.",
+      executor: client
+    });
+    return { ...invoice, paymentExpiresAt };
+  });
+}
+
+async function markExpiredWorkspacePackagePayment(input: {
+  upgradeId: string;
+  gatewayState: string;
+  reason: string;
+  now: Date;
+}) {
+  return transaction(async (client) => {
+    const invoice = await queryOne<PendingWorkspacePackageUpgradeRow>(
+      `SELECT * FROM "PendingWorkspacePackageUpgrade" WHERE id = $1 FOR UPDATE`,
+      [input.upgradeId],
+      client
+    );
+    if (!invoice || !isPaymentProcessingStatus(invoice.status)) {
+      return invoice;
+    }
+    const updated = await updatePendingWorkspacePackageUpgradeStatus({
+      upgradeId: invoice.id,
+      status: UPGRADE_INVOICE_STATUS.PAYMENT_EXPIRED,
+      completedAt: input.now,
+      paymentReconciledAt: input.now,
+      paymentGatewayState: input.gatewayState,
+      paymentReconciliationReason: input.reason,
+      clearPaymentReconciliationLease: true,
+      executor: client
+    });
+    await recordPaymentReconciliationActivity({
+      upgradeId: invoice.id,
+      action: "PAYMENT_EXPIRED",
+      reason: input.reason,
+      gatewayState: input.gatewayState,
+      executor: client
+    });
+    return updated;
+  });
+}
+
+async function releaseWorkspacePackagePaymentReconciliationLease(upgradeId: string, reason: string) {
+  await transaction(async (client) => {
+    const invoice = await queryOne<PendingWorkspacePackageUpgradeRow>(
+      `SELECT * FROM "PendingWorkspacePackageUpgrade" WHERE id = $1 FOR UPDATE`,
+      [upgradeId],
+      client
+    );
+    if (!invoice || !isPaymentProcessingStatus(invoice.status)) return;
+    await execute(
+      `UPDATE "PendingWorkspacePackageUpgrade"
+       SET "paymentReconciliationLeaseUntil" = NULL, "paymentReconciliationReason" = $2, "updatedAt" = NOW()
+       WHERE id = $1`,
+      [upgradeId, reason],
+      client
+    );
+    await recordPaymentReconciliationActivity({ upgradeId, action: "RECONCILIATION_DEFERRED", reason, executor: client });
+  });
+}
+
+export async function reconcileWorkspacePackagePayment(input: {
+  upgradeId: string;
+  now?: Date;
+  source: "scheduled" | "preflight" | "manual";
+}) {
+  await ensurePendingWorkspacePackageUpgradeStore();
+  const now = input.now ?? new Date();
+  const invoice = await claimExpiredWorkspacePackagePayment(input.upgradeId, now);
+  if (!invoice) return { status: "SKIPPED" as const };
+
+  let config;
+  try {
+    config = await getBillplzCheckoutConfig();
+  } catch (error) {
+    await releaseWorkspacePackagePaymentReconciliationLease(
+      invoice.id,
+      `Billplz configuration could not be loaded: ${error instanceof Error ? error.message.slice(0, 180) : "unknown error"}`
+    );
+    return { status: "DEFERRED" as const };
+  }
+  let bill;
+  try {
+    bill = await getBillplzBill(config, invoice.providerReference!);
+  } catch (error) {
+    await releaseWorkspacePackagePaymentReconciliationLease(
+      invoice.id,
+      `Billplz status could not be confirmed: ${error instanceof Error ? error.message.slice(0, 180) : "unknown error"}`
+    );
+    return { status: "DEFERRED" as const };
+  }
+
+  if (bill.paid || bill.state.toLowerCase() === "paid") {
+    const completed = await completePendingWorkspacePackageUpgrade(invoice.providerReference!, bill.paidAt ?? now);
+    await recordPaymentReconciliationActivity({
+      upgradeId: invoice.id,
+      action: "PAYMENT_COMPLETED",
+      reason: `Confirmed paid by ${input.source} reconciliation.`,
+      gatewayState: bill.state
+    });
+    return { status: "COMPLETED" as const, invoice: completed };
+  }
+
+  if (bill.state.toLowerCase() === "deleted" && !bill.paid) {
+    return { status: "EXPIRED" as const, invoice: await markExpiredWorkspacePackagePayment({
+      upgradeId: invoice.id, gatewayState: bill.state, reason: "Billplz confirmed the unpaid bill is deleted.", now
+    }) };
+  }
+
+  if (bill.state.toLowerCase() !== "due" || bill.paid) {
+    await releaseWorkspacePackagePaymentReconciliationLease(invoice.id, `Billplz returned unhandled state: ${bill.state}`);
+    return { status: "DEFERRED" as const };
+  }
+
+  try {
+    await deleteBillplzBill(config, invoice.providerReference!);
+    const refreshedBill = await getBillplzBill(config, invoice.providerReference!);
+    if (refreshedBill.paid || refreshedBill.state.toLowerCase() === "paid") {
+      const completed = await completePendingWorkspacePackageUpgrade(invoice.providerReference!, refreshedBill.paidAt ?? now);
+      return { status: "COMPLETED" as const, invoice: completed };
+    }
+    if (refreshedBill.state.toLowerCase() === "deleted" && !refreshedBill.paid) {
+      return { status: "EXPIRED" as const, invoice: await markExpiredWorkspacePackagePayment({
+        upgradeId: invoice.id, gatewayState: refreshedBill.state, reason: "Timed out; Billplz deleted the unpaid bill.", now
+      }) };
+    }
+    await releaseWorkspacePackagePaymentReconciliationLease(invoice.id, `Billplz bill remained ${refreshedBill.state} after deletion request.`);
+  } catch (error) {
+    await releaseWorkspacePackagePaymentReconciliationLease(
+      invoice.id,
+      `Billplz deletion/status confirmation failed: ${error instanceof Error ? error.message.slice(0, 180) : "unknown error"}`
+    );
+  }
+  return { status: "DEFERRED" as const };
+}
+
+export async function reconcileExpiredWorkspacePackagePayments(input: { now?: Date; batchSize?: number } = {}) {
+  await ensurePendingWorkspacePackageUpgradeStore();
+  const now = input.now ?? new Date();
+  const rows = await queryMany<{ id: string }>(
+    `SELECT id FROM "PendingWorkspacePackageUpgrade"
+     WHERE status = 'PAYMENT_PROCESSING'
+       AND COALESCE("paymentExpiresAt", "paymentStartedAt", "createdAt") +
+           CASE WHEN "paymentExpiresAt" IS NULL THEN INTERVAL '${PAYMENT_PROCESSING_TIMEOUT_MINUTES} minutes' ELSE INTERVAL '0 minutes' END <= $1
+       AND ("paymentReconciliationLeaseUntil" IS NULL OR "paymentReconciliationLeaseUntil" <= $1)
+     ORDER BY "paymentExpiresAt" NULLS FIRST, "createdAt"
+     LIMIT $2`,
+    [now, input.batchSize ?? PAYMENT_RECONCILIATION_BATCH_SIZE]
+  );
+  const results = await Promise.all(rows.map((row) => reconcileWorkspacePackagePayment({ upgradeId: row.id, now, source: "scheduled" })));
+  return {
+    reconciledCount: results.filter((result) => result.status !== "SKIPPED").length,
+    expiredCount: results.filter((result) => result.status === "EXPIRED").length,
+    completedCount: results.filter((result) => result.status === "COMPLETED").length,
+    deferredCount: results.filter((result) => result.status === "DEFERRED").length
+  };
+}
+
+async function reconcileExpiredWorkspacePackagePaymentsForWorkspace(workspaceId: string) {
+  const now = new Date();
+  const rows = await queryMany<{ id: string }>(
+    `SELECT id FROM "PendingWorkspacePackageUpgrade"
+     WHERE "workspaceId" = $1 AND status = 'PAYMENT_PROCESSING'
+       AND COALESCE("paymentExpiresAt", "paymentStartedAt", "createdAt") +
+           CASE WHEN "paymentExpiresAt" IS NULL THEN INTERVAL '${PAYMENT_PROCESSING_TIMEOUT_MINUTES} minutes' ELSE INTERVAL '0 minutes' END <= $2`,
+    [workspaceId, now]
+  );
+  for (const row of rows) {
+    await reconcileWorkspacePackagePayment({ upgradeId: row.id, now, source: "preflight" });
+  }
 }
 
 export function isWorkspacePackageUpgrade(currentPlan: string | null | undefined, targetPlan: string) {
@@ -431,7 +670,9 @@ export async function getWorkspacePackageUpgradeOptions(currentPlan: string | nu
 export async function listWorkspacePackageUpgradeInvoices(workspaceId: string) {
   await ensurePendingWorkspacePackageUpgradeStore();
   const invoices = await listPendingWorkspacePackageUpgradesByWorkspace(workspaceId);
-  return invoices.map(buildInvoiceView);
+  // Once paid, the checkout request is represented by the finalized Invoice
+  // and must not appear as a second customer-facing invoice.
+  return invoices.filter((invoice) => invoice.status !== UPGRADE_INVOICE_STATUS.PAID).map(buildInvoiceView);
 }
 
 export async function createWorkspacePackageUpgradeInvoice(input: {
@@ -441,8 +682,9 @@ export async function createWorkspacePackageUpgradeInvoice(input: {
   billingPeriod: string;
 }) {
   await ensurePendingWorkspacePackageUpgradeStore();
+  await reconcileExpiredWorkspacePackagePaymentsForWorkspace(input.workspaceId);
 
-  const created = await transaction(async (client) => {
+  await transaction(async (client) => {
     const workspace = await findWorkspaceByIdForUpdate(input.workspaceId, client);
     const currentSubscription = await getCurrentSubscriptionOverview(input.workspaceId, client);
 
@@ -549,49 +791,6 @@ export async function createWorkspacePackageUpgradeInvoice(input: {
     return { invoiceNumber };
   });
 
-  if (created.invoiceNumber) {
-    const [workspace, requestedBy, createdInvoice] = await Promise.all([
-      findWorkspaceById(input.workspaceId),
-      queryOne<{ name: string; email: string }>(
-        `SELECT name, email FROM "Agent" WHERE id = $1 LIMIT 1`,
-        [input.requestedByAgentId]
-      ),
-      queryOne<{ targetPlan: string; amount: string | null; currency: string | null; billingPeriod: string | null }>(
-        `SELECT "targetPlan", amount, currency, "billingPeriod"
-         FROM "PendingWorkspacePackageUpgrade"
-         WHERE "invoiceNumber" = $1
-         LIMIT 1`,
-        [created.invoiceNumber]
-      )
-    ]);
-    const targetPackage = createdInvoice
-      ? await getPayablePlanChangeTargetPackage(
-          normalizeWorkspacePackageKey(createdInvoice.targetPlan),
-          normalizeSelectedPlanChangeBillingPeriod(createdInvoice.billingPeriod)
-        )
-      : null;
-    if (requestedBy?.email && workspace && targetPackage && targetPackage.priceAmount !== null) {
-      await sendInvoiceIssuedEmailFromSnapshot({
-        invoiceNo: created.invoiceNumber,
-        orderNo: created.invoiceNumber,
-        workspaceId: workspace.id,
-        customerName: requestedBy.name,
-        customerEmail: requestedBy.email,
-        packageName: targetPackage.name,
-        amount: targetPackage.selectedAmount,
-        currency: targetPackage.currency ?? "MYR",
-        billingPeriod: targetPackage.selectedBillingPeriod,
-        issueDate: new Date(),
-        dueDate: addDays(new Date(), 7),
-        status: "OPEN",
-        companyInformation: null,
-        taxInformation: null
-      }).catch((error) => {
-        console.error("[billing] unable to send issued package invoice email", error);
-      });
-    }
-  }
-
   return {
     invoices: await listWorkspacePackageUpgradeInvoices(input.workspaceId)
   };
@@ -604,6 +803,7 @@ export async function beginWorkspacePackageUpgradeInvoicePayment(input: {
   requestedByEmail: string;
 }) {
   await ensurePendingWorkspacePackageUpgradeStore();
+  await reconcileExpiredWorkspacePackagePaymentsForWorkspace(input.workspaceId);
 
   const paymentContext = await transaction(async (client) => {
     const workspace = await findWorkspaceByIdForUpdate(input.workspaceId, client);
@@ -620,7 +820,7 @@ export async function beginWorkspacePackageUpgradeInvoicePayment(input: {
       throw new Error("Upgrade invoice not found.");
     }
 
-    if (invoice.id !== activePlanChange?.id) {
+    if (activePlanChange && invoice.id !== activePlanChange.id) {
       throw new Error("INVOICE_SUPERSEDED");
     }
 
@@ -684,13 +884,15 @@ export async function beginWorkspacePackageUpgradeInvoicePayment(input: {
       throw new Error("INVOICE_NOT_PAYABLE");
     }
 
+    const paymentStartedAt = new Date();
     await updatePendingWorkspacePackageUpgradeProvider({
       upgradeId: invoice.id,
       provider: "billplz",
       providerReference: bill.id,
       providerCheckoutUrl: bill.url,
       status: UPGRADE_INVOICE_STATUS.PAYMENT_PROCESSING,
-      paymentStartedAt: new Date(),
+      paymentStartedAt,
+      paymentExpiresAt: getPaymentExpiresAt(paymentStartedAt),
       executor: client
     });
   });
@@ -988,7 +1190,12 @@ async function completePendingWorkspacePackageUpgrade(providerReference: string,
       throw new Error("INVOICE_SUPERSEDED");
     }
 
-    if (!isOpenInvoiceStatus(invoice.status) && !isPaymentProcessingStatus(invoice.status)) {
+    if (invoice.status === UPGRADE_INVOICE_STATUS.PAYMENT_REVIEW_REQUIRED) {
+      return { upgrade: invoice, invoiceId: null as string | null };
+    }
+
+    const isLateExpiredPayment = invoice.status === UPGRADE_INVOICE_STATUS.PAYMENT_EXPIRED;
+    if (!isOpenInvoiceStatus(invoice.status) && !isPaymentProcessingStatus(invoice.status) && !isLateExpiredPayment) {
       throw new Error("INVOICE_NOT_PAYABLE");
     }
 
@@ -1001,10 +1208,48 @@ async function completePendingWorkspacePackageUpgrade(providerReference: string,
     const activePlanChanges = await listActivePendingWorkspacePackageUpgradesByWorkspaceForUpdate(workspace.id, client);
     const activePlanChange = activePlanChanges[0] ?? null;
     if (invoice.id !== activePlanChange?.id) {
+      if (isLateExpiredPayment) {
+        const review = await updatePendingWorkspacePackageUpgradeStatus({
+          upgradeId: invoice.id,
+          status: UPGRADE_INVOICE_STATUS.PAYMENT_REVIEW_REQUIRED,
+          paymentReconciledAt: paidAt ?? new Date(),
+          paymentGatewayState: "paid",
+          paymentReconciliationReason: "Late confirmed payment conflicts with a newer active plan change; manual review required.",
+          clearPaymentReconciliationLease: true,
+          executor: client
+        });
+        await recordPaymentReconciliationActivity({
+          upgradeId: invoice.id,
+          action: "LATE_PAYMENT_REVIEW_REQUIRED",
+          reason: "Late confirmed payment conflicts with a newer active plan change.",
+          gatewayState: "paid",
+          executor: client
+        });
+        return { upgrade: review, invoiceId: null as string | null };
+      }
       throw new Error("INVOICE_SUPERSEDED");
     }
 
     if (workspace.plan !== invoice.currentPlan) {
+      if (isLateExpiredPayment) {
+        const review = await updatePendingWorkspacePackageUpgradeStatus({
+          upgradeId: invoice.id,
+          status: UPGRADE_INVOICE_STATUS.PAYMENT_REVIEW_REQUIRED,
+          paymentReconciledAt: paidAt ?? new Date(),
+          paymentGatewayState: "paid",
+          paymentReconciliationReason: "Late confirmed payment no longer matches the workspace plan; manual review required.",
+          clearPaymentReconciliationLease: true,
+          executor: client
+        });
+        await recordPaymentReconciliationActivity({
+          upgradeId: invoice.id,
+          action: "LATE_PAYMENT_REVIEW_REQUIRED",
+          reason: "Late confirmed payment no longer matches the workspace plan.",
+          gatewayState: "paid",
+          executor: client
+        });
+        return { upgrade: review, invoiceId: null as string | null };
+      }
       throw new Error("Workspace package changed before this invoice was paid.");
     }
 
@@ -1123,6 +1368,10 @@ async function completePendingWorkspacePackageUpgrade(providerReference: string,
       completedAt,
       receiptNumber: paidInvoice.receiptNumber,
       receiptIssuedAt: paidInvoice.receiptIssuedAt,
+      paymentReconciledAt: completedAt,
+      paymentGatewayState: "paid",
+      paymentReconciliationReason: "Billplz confirmed payment.",
+      clearPaymentReconciliationLease: true,
       executor: client
     });
     return { upgrade: updatedUpgrade, invoiceId: paidInvoice.id };

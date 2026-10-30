@@ -60,7 +60,7 @@ export async function persistWhatsAppMessageAck(input: {
   const occurredAt = input.occurredAt ?? new Date();
 
   console.info(
-    `[whatsapp-ack] received workspace=${input.workspaceId} channel=${input.channelId ?? "unknown"} providerMessageId=${providerMessageId} ack=${ack}`
+    `[whatsapp-ack] received workspace=${input.workspaceId} channel=${input.channelId ?? "unknown"} ack=${ack}`
   );
 
   await execute(
@@ -147,7 +147,7 @@ export async function persistWhatsAppMessageAck(input: {
 
   if (!target?.messageId) {
     console.info(
-      `[whatsapp-ack] stored envelope only workspace=${input.workspaceId} providerMessageId=${providerMessageId} ack=${effectiveAck} matchedMessage=false`
+      `[whatsapp-ack] stored envelope only workspace=${input.workspaceId} ack=${effectiveAck} matchedMessage=false`
     );
     return target
       ? {
@@ -163,15 +163,15 @@ export async function persistWhatsAppMessageAck(input: {
   await execute(
     `UPDATE "Message"
         SET "deliveredAt" = CASE
-              WHEN $2 >= 2 THEN COALESCE("deliveredAt", $4)
+              WHEN $2 >= 2 THEN COALESCE("deliveredAt", $3)
               ELSE "deliveredAt"
             END,
             "readAt" = CASE
-              WHEN $2 >= 3 THEN COALESCE("readAt", $4)
+              WHEN $2 >= 3 THEN COALESCE("readAt", $3)
               ELSE "readAt"
             END
       WHERE id = $1`,
-    [target.messageId, effectiveAck, effectiveDeliveryStatus, occurredAt]
+    [target.messageId, effectiveAck, occurredAt]
   );
 
   const event = {
@@ -188,7 +188,7 @@ export async function persistWhatsAppMessageAck(input: {
 
   await emitAckToInbox(event);
   console.info(
-    `[whatsapp-ack] persisted workspace=${event.workspaceId} conversation=${event.conversationId ?? "unknown"} messageId=${event.messageId ?? "unknown"} providerMessageId=${providerMessageId} ack=${effectiveAck} status=${effectiveDeliveryStatus}`
+    `[whatsapp-ack] persisted workspace=${event.workspaceId} ack=${effectiveAck} status=${effectiveDeliveryStatus}`
   );
   return {
     ...event,

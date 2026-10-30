@@ -6,7 +6,7 @@ export async function GET(request: NextRequest) {
   try {
     const agent = await requireCurrentApiAgent();
     const page = Number(request.nextUrl.searchParams.get("page") ?? 1);
-    const perPage = Number(request.nextUrl.searchParams.get("perPage") ?? 20);
+    const perPage = Number(request.nextUrl.searchParams.get("perPage") ?? 5);
     const billing = await getSubscriberBillingOverview(agent.workspaceId, page, perPage);
     return NextResponse.json(billing);
   } catch (error) {

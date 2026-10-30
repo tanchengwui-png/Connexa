@@ -10,6 +10,8 @@ npm-debug.log
 .env.test.local
 .env.production.local
 .wwebjs_auth
+data
+data/**
 public/uploads
 public/uploads/**
 public/whatsapp-media

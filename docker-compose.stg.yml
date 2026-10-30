@@ -18,6 +18,7 @@ services:
     restart: unless-stopped
 
   sender:
+    image: connexa-stg-sender:develop
     build:
       context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
@@ -26,18 +27,27 @@ services:
     working_dir: /app
     env_file:
       - .env.staging
+    environment:
+      INBOX_REALTIME_RELAY_URL: http://web:3000
     command: sh -lc "npm run sender:service"
     ports:
       - "127.0.0.1:3101:3101"
     volumes:
-      - ../data/wwebjs_auth:/app/.wwebjs_auth
+      - ./data/wwebjs_auth:/app/.wwebjs_auth
       - ./public/uploads:/app/public/uploads
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3101/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
     restart: unless-stopped
 
   web:
+    image: connexa-stg-web:develop
     build:
       context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
@@ -62,6 +72,7 @@ services:
     restart: unless-stopped
 
   worker:
+    image: connexa-stg-worker:develop
     build:
       context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
@@ -81,6 +92,7 @@ services:
     restart: unless-stopped
 
   billing-worker:
+    image: connexa-stg-billing-worker:develop
     build:
       context: /srv/recurvos/staging/connexa/repo
       dockerfile: Dockerfile
@@ -90,7 +102,7 @@ services:
     env_file:
       - .env.staging
     environment:
-      BILLING_CLEANUP_INTERVAL_MS: "86400000"
+      BILLING_CLEANUP_INTERVAL_MS: "60000"
     command: sh -lc "npm run worker:billing-cleanup"
     depends_on:
       postgres:
@@ -99,5 +111,31 @@ services:
         condition: service_started
     restart: unless-stopped
 
+  caddy:
+    image: caddy:2-alpine
+    container_name: connexa-stg-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - connexa-stg-caddy-data:/data
+      - connexa-stg-caddy-config:/config
+    networks:
+      - default
+    depends_on:
+      web:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   connexa_stg_postgres_data:
+    name: connexa-stg-postgres-data
+  connexa-stg-caddy-data:
+    name: connexa-stg-caddy-data
+  connexa-stg-caddy-config:
+    name: connexa-stg-caddy-config
+
+networks:
+  default:
+    name: connexa-stg-network

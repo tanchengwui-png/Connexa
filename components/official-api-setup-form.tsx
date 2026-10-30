@@ -1,7 +1,11 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { HelpNotice } from "@/components/help-notice";
+import {
+  parseMetaEmbeddedSignupEvent,
+  type MetaEmbeddedSignupEvent
+} from "@/lib/meta-embedded-signup-event";
 import { getPreferredWhatsAppChannelLabel } from "@/lib/whatsapp-channel-label";
 
 declare global {
@@ -58,6 +62,12 @@ type EmbeddedSignupPhoneNumber = {
   platformType: string | null;
 };
 
+type ActiveEmbeddedSignup = {
+  attemptId: string;
+  sessionInfo: MetaEmbeddedSignupEvent | null;
+  terminalEvent: "CANCEL" | "ERROR" | null;
+};
+
 export function OfficialApiSetupForm({
   channelId,
   connectionName,
@@ -96,6 +106,7 @@ export function OfficialApiSetupForm({
   const [feedbackTone, setFeedbackTone] = useState<"success" | "error">("success");
   const [hasServerManagedConnection, setHasServerManagedConnection] = useState(Boolean(initialValues?.accessTokenLastFour));
   const [connectionPhase, setConnectionPhase] = useState(initialValues?.connectionStatus ?? "DISCONNECTED");
+  const activeEmbeddedSignupRef = useRef<ActiveEmbeddedSignup | null>(null);
 
   const isComplete = Object.values(values).every((value) => value.trim().length > 0);
   const hasSavedAccessToken = Boolean(initialValues?.accessTokenLastFour);
@@ -139,7 +150,8 @@ export function OfficialApiSetupForm({
       return;
     }
 
-    window.fbAsyncInit = () => {
+    const previousFbAsyncInit = window.fbAsyncInit;
+    const initializeFacebookSdk = () => {
       window.FB?.init({
         appId: metaEmbeddedSignup.appId,
         autoLogAppEvents: true,
@@ -150,17 +162,63 @@ export function OfficialApiSetupForm({
       setFacebookSdkReady(true);
     };
 
-    const script = document.createElement("script");
-    script.async = true;
-    script.defer = true;
-    script.crossOrigin = "anonymous";
-    script.src = "https://connect.facebook.net/en_US/sdk.js";
-    document.body.appendChild(script);
+    window.fbAsyncInit = () => {
+      previousFbAsyncInit?.();
+      initializeFacebookSdk();
+    };
+
+    let script = document.getElementById("facebook-jssdk") as HTMLScriptElement | null;
+    if (!script) {
+      script = document.createElement("script");
+      script.id = "facebook-jssdk";
+      script.async = true;
+      script.defer = true;
+      script.crossOrigin = "anonymous";
+      script.src = "https://connect.facebook.net/en_US/sdk.js";
+      document.body.appendChild(script);
+    }
 
     return () => {
-      window.fbAsyncInit = undefined;
+      window.fbAsyncInit = previousFbAsyncInit;
     };
   }, [metaEmbeddedSignup]);
+
+  useEffect(() => {
+    const handleEmbeddedSignupMessage = (message: MessageEvent) => {
+      const signupEvent = parseMetaEmbeddedSignupEvent({
+        origin: message.origin,
+        data: message.data
+      });
+      const activeSignup = activeEmbeddedSignupRef.current;
+      if (!signupEvent || !activeSignup) {
+        return;
+      }
+
+      if (signupEvent.event === "FINISH") {
+        activeSignup.sessionInfo = signupEvent;
+        return;
+      }
+
+      activeSignup.terminalEvent = signupEvent.event;
+      void fetch("/api/integrations/meta/embedded-signup/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ attemptId: activeSignup.attemptId, channelId })
+      }).catch(() => null);
+      setFeedbackTone("error");
+      setFeedback(
+        signupEvent.event === "CANCEL"
+          ? "Meta signup was cancelled. No WhatsApp account was connected."
+          : "Meta could not complete Embedded Signup. No WhatsApp account was connected."
+      );
+      setIsEmbeddedSignupPending(false);
+    };
+
+    window.addEventListener("message", handleEmbeddedSignupMessage);
+    return () => {
+      window.removeEventListener("message", handleEmbeddedSignupMessage);
+    };
+  }, [channelId]);
 
   function updateValue(field: keyof typeof values, nextValue: string) {
     setValues((current) => ({
@@ -322,19 +380,39 @@ export function OfficialApiSetupForm({
       body: JSON.stringify({ channelId, mode: onboardingMode })
     }).catch(() => null);
     const startPayload = startResponse
-      ? ((await startResponse.json().catch(() => null)) as { state?: string; error?: string } | null)
+      ? ((await startResponse.json().catch(() => null)) as {
+          attemptId?: string;
+          state?: string;
+          error?: string;
+        } | null)
       : null;
-    if (!startResponse?.ok || !startPayload?.state) {
+    if (!startResponse?.ok || !startPayload?.attemptId || !startPayload.state) {
       setFeedbackTone("error");
       setFeedback(startPayload?.error ?? "Unable to start a secure Meta signup session.");
       setIsEmbeddedSignupPending(false);
       return;
     }
+    const onboardingAttemptId = startPayload.attemptId;
     const onboardingState = startPayload.state;
+    activeEmbeddedSignupRef.current = {
+      attemptId: onboardingAttemptId,
+      sessionInfo: null,
+      terminalEvent: null
+    };
     window.FB.login(
       (response) => {
+        const activeSignup = activeEmbeddedSignupRef.current;
+        if (!activeSignup || activeSignup.attemptId !== onboardingAttemptId || activeSignup.terminalEvent) {
+          return;
+        }
         const code = response.authResponse?.code?.trim() || "";
         if (!code) {
+          activeEmbeddedSignupRef.current = null;
+          void fetch("/api/integrations/meta/embedded-signup/cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ attemptId: onboardingAttemptId, channelId })
+          });
           setFeedbackTone("error");
           setFeedback("Meta signup was cancelled or did not return an authorization code.");
           setIsEmbeddedSignupPending(false);
@@ -351,7 +429,9 @@ export function OfficialApiSetupForm({
             state: onboardingState,
             workspaceId,
             channelId,
-            connectionName: values.connectionName
+            connectionName: values.connectionName,
+            wabaId: activeSignup.sessionInfo?.wabaId,
+            phoneNumberId: activeSignup.sessionInfo?.phoneNumberId
           })
         })
           .then(async (signupResponse) => {
@@ -390,6 +470,9 @@ export function OfficialApiSetupForm({
             setFeedback("Unable to finish Meta Embedded Signup.");
           })
           .finally(() => {
+            if (activeEmbeddedSignupRef.current?.attemptId === onboardingAttemptId) {
+              activeEmbeddedSignupRef.current = null;
+            }
             setIsEmbeddedSignupPending(false);
           });
       },
@@ -402,6 +485,41 @@ export function OfficialApiSetupForm({
         }
       }
     );
+  }
+
+  function handleCancelEmbeddedSignup() {
+    if (!embeddedSetupId || isFinalizingEmbeddedSignup) {
+      return;
+    }
+    setIsFinalizingEmbeddedSignup(true);
+    activeEmbeddedSignupRef.current = null;
+    void fetch("/api/integrations/meta/embedded-signup/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attemptId: embeddedSetupId, channelId })
+    })
+      .then(async (response) => {
+        const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+        if (!response.ok) {
+          setFeedbackTone("error");
+          setFeedback(payload?.error ?? "Unable to cancel Meta setup.");
+          return;
+        }
+        setEmbeddedSetupId(null);
+        setEmbeddedPhoneNumbers([]);
+        setSelectedEmbeddedPhoneNumberId("");
+        setTwoStepPin("");
+        setRegistrationConsent(false);
+        setFeedbackTone("success");
+        setFeedback("Meta setup was cancelled. You can start a new secure signup session.");
+      })
+      .catch(() => {
+        setFeedbackTone("error");
+        setFeedback("Unable to cancel Meta setup.");
+      })
+      .finally(() => {
+        setIsFinalizingEmbeddedSignup(false);
+      });
   }
 
   function handleFinalizeEmbeddedSignup() {
@@ -617,25 +735,37 @@ export function OfficialApiSetupForm({
                     : "Complete the previous steps first."}
               </p>
             </div>
-            <button
-              className="button button-primary"
-              disabled={
-                !embeddedSetupId ||
-                !selectedEmbeddedPhoneNumberId ||
-                (onboardingMode === "standard" && (!/^\d{6}$/.test(twoStepPin.trim()) || !registrationConsent)) ||
-                isFinalizingEmbeddedSignup
-              }
-              onClick={handleFinalizeEmbeddedSignup}
-              type="button"
-            >
-              {isFinalizingEmbeddedSignup ? "Completing..." : "Done"}
-            </button>
+            <div className="wa-setup-actions">
+              {embeddedSetupId ? (
+                <button
+                  className="button button-secondary"
+                  disabled={isFinalizingEmbeddedSignup}
+                  onClick={handleCancelEmbeddedSignup}
+                  type="button"
+                >
+                  Cancel setup
+                </button>
+              ) : null}
+              <button
+                className="button button-primary"
+                disabled={
+                  !embeddedSetupId ||
+                  !selectedEmbeddedPhoneNumberId ||
+                  (onboardingMode === "standard" && (!/^\d{6}$/.test(twoStepPin.trim()) || !registrationConsent)) ||
+                  isFinalizingEmbeddedSignup
+                }
+                onClick={handleFinalizeEmbeddedSignup}
+                type="button"
+              >
+                {isFinalizingEmbeddedSignup ? "Completing..." : "Done"}
+              </button>
+            </div>
           </div>
         </div>
 
         {!metaEmbeddedSignup?.enabled ? (
           <HelpNotice title="Facebook connection is not configured">
-            Connect with Facebook needs Meta app ID, app secret, config ID, redirect URI, and webhook verify token
+            Connect with Facebook needs Meta app ID, app secret, config ID, and webhook verify token
             from either platform admin settings or server environment variables before it can complete.
           </HelpNotice>
         ) : null}

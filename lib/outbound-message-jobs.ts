@@ -30,6 +30,7 @@ type EnqueueOutboundMessageInput = {
   replyToMessageId?: string | null;
   senderId?: string | null;
   source: "manual-reply" | "automation-engine";
+  idempotencyKey?: string | null;
   mediaAssetId?: string | null;
   attachmentMimeType?: string | null;
   attachmentName?: string | null;
@@ -72,7 +73,7 @@ type OutboundJobErrorCode =
   | "INVALID_RECIPIENT"
   | "UNKNOWN";
 
-type OutboundJobDisposition = "deferred" | "transient" | "permanent";
+type OutboundJobDisposition = "deferred" | "transient" | "permanent" | "ambiguous";
 
 type WorkspacePreflightResult =
   | {
@@ -87,6 +88,12 @@ type WorkspacePreflightResult =
     };
 
 export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput) {
+  const idempotencyKey = input.idempotencyKey?.trim() || null;
+  if (idempotencyKey) {
+    const existing = await findOutboundMessageByIdempotencyKey(input.workspaceId, idempotencyKey);
+    if (existing) return existing;
+  }
+
   await assertWorkspaceHasOutboundMessageCapacity(input.workspaceId);
 
   const conversation = await prisma.conversation.findFirst({
@@ -152,7 +159,9 @@ export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput)
     throw new Error("Choose either buttons or a list for this reply.");
   }
 
-  const message = await prisma.$transaction(async (tx: TransactionClient) => {
+  let message;
+  try {
+    message = await prisma.$transaction(async (tx: TransactionClient) => {
     const messageBody = buildStoredMessageBody(
       outboundBody,
       normalizedButtons,
@@ -180,7 +189,9 @@ export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput)
           sendAudioAsVoice: Boolean(input.sendAudioAsVoice)
         },
         queue: {
-          kind: input.campaignRunId ? "campaign" : "direct"
+          kind: input.campaignRunId ? "campaign" : "direct",
+          sendMode: input.availableAt ? "scheduled" : "immediate",
+          schedulingSource: input.availableAt ? "explicit_user_schedule" : "none"
         }
       })
     });
@@ -234,7 +245,8 @@ export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput)
         attachmentUrl: input.attachmentUrl ?? null,
         interactiveButtonsJson: normalizedButtons.length ? JSON.stringify(normalizedButtons) : null,
         interactiveListButtonText: normalizedListOptions.length ? normalizedListButtonText : null,
-        interactiveListOptionsJson: normalizedListOptions.length ? JSON.stringify(normalizedListOptions) : null
+        interactiveListOptionsJson: normalizedListOptions.length ? JSON.stringify(normalizedListOptions) : null,
+        idempotencyKey
       }
     });
 
@@ -242,7 +254,14 @@ export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput)
       ...createdMessage,
       senderName: sender?.name ?? null
     };
-  });
+    });
+  } catch (error) {
+    if (idempotencyKey && isOutboundMessageIdempotencyConflict(error)) {
+      const existing = await findOutboundMessageByIdempotencyKey(input.workspaceId, idempotencyKey);
+      if (existing) return existing;
+    }
+    throw error;
+  }
 
   return {
     id: message.id,
@@ -253,6 +272,34 @@ export async function enqueueOutboundMessage(input: EnqueueOutboundMessageInput)
     direction: message.direction,
     sender: message.senderName ?? "Team",
     sentAt: message.sentAt
+  };
+}
+
+function isOutboundMessageIdempotencyConflict(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "P2002";
+}
+
+async function findOutboundMessageByIdempotencyKey(workspaceId: string, idempotencyKey: string) {
+  const job = await prisma.outboundMessageJob.findFirst({
+    where: { workspaceId, idempotencyKey },
+    include: {
+      message: {
+        include: {
+          sender: { select: { name: true } }
+        }
+      }
+    }
+  });
+  if (!job?.message) return null;
+  return {
+    id: job.message.id,
+    attachmentMimeType: job.message.attachmentMimeType,
+    attachmentName: job.message.attachmentName,
+    attachmentUrl: job.message.attachmentUrl,
+    body: job.message.body,
+    direction: job.message.direction,
+    sender: job.message.sender?.name ?? "Team",
+    sentAt: job.message.sentAt
   };
 }
 
@@ -406,21 +453,37 @@ export async function processPendingOutboundMessageJobs(limit = 10, workspaceId?
           template
         });
         providerMessageId = normalizeProviderMessageId(result.providerMessageId);
+        if (!providerMessageId && result.status === "accepted") {
+          await markOutboundMessageJobAcceptedUntracked({
+            runningJob,
+            providerKind,
+            messageType,
+            usageCostEstimate,
+            template,
+            idempotencyKey,
+            providerResponse: result
+          });
+          sent += 1;
+          continue;
+        }
       } catch (error) {
         const classifiedError = classifyOutboundJobError(error);
         const attempts = runningJob.attempts;
         const shouldPreserveAttempt = classifiedError.disposition !== "deferred";
         const effectiveAttempts = shouldPreserveAttempt ? attempts : Math.max(0, attempts - 1);
         const isExhausted =
-          classifiedError.disposition === "permanent" || effectiveAttempts >= runningJob.maxAttempts;
+          classifiedError.disposition === "permanent" ||
+          classifiedError.disposition === "ambiguous" ||
+          effectiveAttempts >= runningJob.maxAttempts;
         const nextRetryAt =
           classifiedError.disposition === "deferred"
             ? new Date(Date.now() + DEFERRED_RETRY_MS)
             : new Date(Date.now() + getRetryDelayMs(effectiveAttempts));
 
-        await prisma.outboundMessageJob.update({
+        await prisma.outboundMessageJob.updateMany({
           where: {
-            id: runningJob.id
+            id: runningJob.id,
+            status: OutboundMessageJobStatus.RUNNING
           },
           data: {
             status: isExhausted ? OutboundMessageJobStatus.FAILED : OutboundMessageJobStatus.PENDING,
@@ -440,29 +503,7 @@ export async function processPendingOutboundMessageJobs(limit = 10, workspaceId?
       }
     }
 
-    if (!providerMessageId) {
-      const nextRetryAt = new Date(Date.now() + getRetryDelayMs(runningJob.attempts));
-      await prisma.outboundMessageJob.update({
-        where: {
-          id: runningJob.id
-        },
-        data: {
-          status:
-            runningJob.attempts >= runningJob.maxAttempts
-              ? OutboundMessageJobStatus.FAILED
-              : OutboundMessageJobStatus.PENDING,
-          lockedAt: null,
-          lastError: formatOutboundJobError(
-            "UNKNOWN",
-            "Provider send could not be confirmed because no provider message id was returned."
-          ),
-          availableAt:
-            runningJob.attempts >= runningJob.maxAttempts ? runningJob.availableAt : nextRetryAt
-        }
-      });
-      failed += 1;
-      continue;
-    }
+    if (!providerMessageId) continue;
 
     try {
       await persistSuccessfulOutboundMessageJob({
@@ -666,6 +707,7 @@ async function persistSuccessfulOutboundMessageJob(input: {
     id: string;
     workspaceId: string;
     channelId: string | null;
+    conversationId: string;
     messageId: string;
     createdAt: Date;
     message?: {
@@ -746,6 +788,77 @@ async function persistSuccessfulOutboundMessageJob(input: {
     ack: 1,
     occurredAt: sentAt
   }).catch(() => null);
+}
+
+async function markOutboundMessageJobAcceptedUntracked(input: {
+  runningJob: {
+    id: string;
+    workspaceId: string;
+    channelId: string | null;
+    conversationId: string;
+    messageId: string;
+    createdAt: Date;
+    message?: { rawPayload: string | null } | null;
+  };
+  providerKind: "personal" | "cloud";
+  messageType: "text" | "template" | "media" | "interactive";
+  usageCostEstimate: number;
+  template: Parameters<typeof buildSuccessfulOutboundRawPayload>[0]["template"];
+  idempotencyKey: string;
+  providerResponse: { providerMessageId: string | null; status: "accepted" };
+}) {
+  const sentAt = new Date();
+  const existingRawPayload = parseRawPayload(input.runningJob.message?.rawPayload ?? null);
+  const queue = existingRawPayload.queue && typeof existingRawPayload.queue === "object"
+    ? existingRawPayload.queue as Record<string, unknown>
+    : {};
+  const sendMode = queue.sendMode === "scheduled" ? "scheduled" : "immediate";
+  const rawPayload = {
+    ...existingRawPayload,
+    source: "outbound-worker",
+    queuedAt: input.runningJob.createdAt.toISOString(),
+    sentAt: sentAt.toISOString(),
+    delivery: "accepted_untracked",
+    idempotencyKey: input.idempotencyKey,
+    internalMessageId: input.runningJob.messageId,
+    conversationId: input.runningJob.conversationId,
+    sendMode,
+    providerResponse: input.providerResponse,
+    retryReason: null,
+    schedulingSource: typeof queue.schedulingSource === "string" ? queue.schedulingSource : "none"
+  };
+  const message = "WhatsApp accepted the message but did not return a trackable message id.";
+
+  await prisma.$transaction(async (tx: TransactionClient) => {
+    await tx.message.update({
+      where: { id: input.runningJob.messageId },
+      data: { deliveryStatus: "accepted_untracked", rawPayload: JSON.stringify(rawPayload) }
+    });
+    await tx.outboundMessageJob.update({
+      where: { id: input.runningJob.id },
+      data: { status: OutboundMessageJobStatus.SENT, lockedAt: null, lastError: `[ACCEPTED_UNTRACKED] ${message}` }
+    });
+    await tx.messageUsageLog.create({
+      data: {
+        workspaceId: input.runningJob.workspaceId,
+        accountId: input.runningJob.channelId ?? null,
+        provider: input.providerKind,
+        messageType: input.messageType,
+        costEstimate: usageCostEstimateToDecimal(input.usageCostEstimate),
+        timestamp: sentAt
+      }
+    });
+  });
+
+  console.warn("[outbound-worker][accepted_untracked]", {
+    conversationId: input.runningJob.conversationId,
+    internalMessageId: input.runningJob.messageId,
+    idempotencyKey: input.idempotencyKey,
+    providerResponse: input.providerResponse,
+    sendMode,
+    retryReason: null,
+    schedulingSource: rawPayload.schedulingSource
+  });
 }
 
 async function markOutboundMessageJobSentAfterSuccess(input: {
@@ -878,10 +991,7 @@ function buildOutboundJobIdempotencyKey(jobId: string) {
 
 function normalizeProviderMessageId(value: string | null | undefined) {
   const normalized = typeof value === "string" ? value.trim() : "";
-  if (!normalized) {
-    throw new Error("Provider send could not be confirmed because no provider message id was returned.");
-  }
-  return normalized;
+  return normalized || null;
 }
 
 export async function getOutboundMessageJobStatus(workspaceId: string, channelId?: string | null) {
@@ -987,7 +1097,12 @@ export async function retryFailedOutboundMessageJobs(workspaceId: string) {
   const result = await prisma.outboundMessageJob.updateMany({
     where: {
       workspaceId,
-      status: OutboundMessageJobStatus.FAILED
+      status: OutboundMessageJobStatus.FAILED,
+      NOT: {
+        lastError: {
+          startsWith: "[SENDER_TIMEOUT]"
+        }
+      }
     },
     data: {
       status: OutboundMessageJobStatus.PENDING,
@@ -1342,7 +1457,11 @@ async function runWorkspaceSendPreflight(
   }
 
   const connectionStatus = channel?.connectionStatus ?? "DISCONNECTED";
-  if (connectionStatus === "QR_READY" || connectionStatus === "AUTH_FAILED") {
+  if (
+    connectionStatus === "QR_READY" ||
+    connectionStatus === "AUTH_FAILED" ||
+    connectionStatus === "REAUTH_REQUIRED"
+  ) {
     return buildDeferredPreflight(
       "SESSION_RELINK_REQUIRED",
       "WhatsApp session needs relink before queued sends can continue."
@@ -1414,6 +1533,14 @@ function classifyOutboundJobError(error: unknown): {
   if (normalized.includes("timed out")) {
     return {
       code: "SENDER_TIMEOUT",
+      disposition: "ambiguous",
+      message: `${message} Automatic retry was suppressed because WhatsApp may have accepted the original request.`
+    };
+  }
+
+  if (normalized.includes("runtime was restarted after a stale-client error")) {
+    return {
+      code: "SENDER_UNAVAILABLE",
       disposition: "transient",
       message
     };

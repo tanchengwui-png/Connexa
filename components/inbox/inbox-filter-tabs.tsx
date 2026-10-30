@@ -19,6 +19,7 @@ const PRIMARY_FILTERS: Array<{ key: InboxBuiltInFilterKey; label: string }> = [
   { key: "all", label: "All" },
   { key: "mine", label: "Mine" },
   { key: "unread", label: "Unread" },
+  { key: "groups", label: "Groups" },
 ];
 
 const OVERFLOW_FILTERS: Array<{ key: InboxBuiltInFilterKey; label: string }> = [

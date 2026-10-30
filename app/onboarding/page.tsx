@@ -5,10 +5,9 @@ import { getMetaEmbeddedSignupConfig } from "@/lib/meta-whatsapp";
 import { getPreferredWhatsAppChannelLabel } from "@/lib/whatsapp-channel-label";
 import {
   ensureWorkspaceDefaultWhatsAppChannel,
-  getWorkspaceWhatsAppChannels,
-  type WorkspaceWhatsAppChannelStatus
+  getWorkspaceWhatsAppChannels
 } from "@/lib/whatsapp-channel";
-import { getWorkspaceWhatsAppHealthForPage } from "@/lib/whatsapp-health";
+import { resolveWhatsAppQrPresentation } from "@/lib/whatsapp-qr-state";
 
 type OnboardingPageProps = {
   searchParams?: Promise<{
@@ -32,21 +31,38 @@ export default async function OnboardingPage({ searchParams }: OnboardingPagePro
   const manager = await requireManager();
   const params = searchParams ? await searchParams : undefined;
   await ensureWorkspaceDefaultWhatsAppChannel(manager.workspaceId);
-  const channels = await getWorkspaceWhatsAppChannels(manager.workspaceId);
+  const [channels, embeddedSignup] = await Promise.all([
+    getWorkspaceWhatsAppChannels(manager.workspaceId),
+    getMetaEmbeddedSignupConfig(manager.workspaceId)
+  ]);
   const requestedChannelId = params?.channelId?.trim() || null;
   type WhatsAppChannel = (typeof channels)[number];
-  const selectedChannel = channels.find((channel: WhatsAppChannel) => channel.id === requestedChannelId) ?? null;
-  const health = await getWorkspaceWhatsAppHealthForPage({
-    workspaceId: manager.workspaceId,
-    agentId: manager.id,
-    channelId: selectedChannel?.id ?? null,
-    fallbackChannel: selectedChannel
+  // The guided flow normally has one channel. Select it server-side so the
+  // browser does not render once, push ?channelId, and refresh the whole page
+  // before pairing can even start.
+  const selectedChannel =
+    channels.find((channel: WhatsAppChannel) => channel.id === requestedChannelId) ??
+    (!requestedChannelId && channels.length === 1 ? channels[0] : null);
+  const runtimeStatus = selectedChannel?.connectionStatus ?? "DISCONNECTED";
+  const qr = resolveWhatsAppQrPresentation({
+    runtimePresent: runtimeStatus === "QR_READY",
+    runtimeStatus,
+    qrCodeDataUrl: selectedChannel?.qrCodeDataUrl ?? null,
+    qrCodeGeneratedAt: selectedChannel?.qrCodeUpdatedAt ?? null
   });
-  const channel = health.channel as WorkspaceWhatsAppChannelStatus | null;
-  const embeddedSignup = await getMetaEmbeddedSignupConfig(manager.workspaceId);
+  const isConnected = ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(runtimeStatus);
+  const userConnectionState = isConnected
+    ? ("connected" as const)
+    : runtimeStatus === "DISCONNECTED"
+      ? ("disconnected" as const)
+      : runtimeStatus === "REAUTH_REQUIRED"
+        ? ("reconnection_required" as const)
+        : (["ERROR", "AUTH_FAILED"].includes(runtimeStatus) ? "recovering" : "unknown") as
+            | "recovering"
+            | "unknown";
 
   return (
-    <DashboardShell currentPath="/settings">
+    <DashboardShell currentPath="/onboarding">
       <WhatsAppConnectionOnboarding
         channelSelectionBasePath="/onboarding"
         channels={channels.map((entry: WhatsAppChannel, index: number) => ({
@@ -57,30 +73,35 @@ export default async function OnboardingPage({ searchParams }: OnboardingPagePro
           phoneNumber: entry.phoneNumber ?? null
         }))}
         health={{
-          runtimeStatus: health.runtimeStatus,
-          isConnectionStalled: health.isConnectionStalled,
-          isInboxReady: health.isInboxReady,
-          isHistoryStabilizing: health.isHistoryStabilizing,
-          isHistoryStuck: health.isHistoryStuck,
-          isLiveOnlyMode: health.isLiveOnlyMode,
-          importedConversationCount: health.importedConversationCount,
-          importedMessageCount: health.importedMessageCount,
-          lastSyncError: health.lastSyncError
+          runtimeStatus,
+          runtimePresent: runtimeStatus !== "DISCONNECTED",
+          senderReachable: true,
+          senderError: null,
+          userConnectionState,
+          ...qr,
+          isConnectionStalled: false,
+          isInboxReady: isConnected,
+          isHistoryStabilizing: runtimeStatus === "SYNCING_HISTORY",
+          isHistoryStuck: false,
+          isLiveOnlyMode: false,
+          importedConversationCount: 0,
+          importedMessageCount: 0,
+          lastSyncError: selectedChannel?.lastError ?? null
         }}
         initialWebSetup={{
           id: selectedChannel?.id ?? "",
-          connectionMethod: selectedChannel?.connectionMethod ?? channel?.connectionMethod ?? "web",
-          connectionStatus: selectedChannel?.connectionStatus ?? channel?.connectionStatus ?? "DISCONNECTED",
-          connectedByAgentName: selectedChannel?.connectedByAgentName ?? channel?.connectedByAgentName ?? manager.name,
-          displayName: selectedChannel?.displayName ?? channel?.displayName ?? "",
-          phoneNumber: selectedChannel?.phoneNumber ?? channel?.phoneNumber ?? "",
+          connectionMethod: selectedChannel?.connectionMethod ?? "web",
+          connectionStatus: runtimeStatus,
+          connectedByAgentName: selectedChannel?.connectedByAgentName ?? manager.name,
+          displayName: selectedChannel?.displayName ?? "",
+          phoneNumber: selectedChannel?.phoneNumber ?? "",
           phoneNumberId: selectedChannel?.phoneNumberId ?? null,
           businessAccountId: selectedChannel?.businessAccountId ?? null,
           accessTokenLastFour: selectedChannel?.accessTokenLastFour ?? null,
           verifyTokenLastFour: selectedChannel?.verifyTokenLastFour ?? null,
-          qrCodeDataUrl: channel?.qrCodeDataUrl ?? null,
-          lastError: selectedChannel?.lastError ?? channel?.lastError ?? "",
-          connectedAt: selectedChannel?.connectedAt?.toISOString() ?? channel?.connectedAt?.toISOString() ?? null
+          qrCodeDataUrl: qr.qrCodeDataUrl,
+          lastError: selectedChannel?.lastError ?? "",
+          connectedAt: selectedChannel?.connectedAt?.toISOString() ?? null
         }}
         metaEmbeddedSignup={embeddedSignup}
         mode="guided"

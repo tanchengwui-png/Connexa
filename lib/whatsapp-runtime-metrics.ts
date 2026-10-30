@@ -1,3 +1,5 @@
+import { monitorEventLoopDelay } from "node:perf_hooks";
+
 export type WhatsAppWorkspaceRuntimeMetricSnapshot = {
   workspaceId: string;
   sessionClientId: string | null;
@@ -40,6 +42,10 @@ export type WhatsAppSenderNodeMetricsSnapshot = {
     heapUsedMb: number;
     heapTotalMb: number;
     externalMb: number;
+    cpuUserMs: number;
+    cpuSystemMs: number;
+    eventLoopLagMeanMs: number;
+    eventLoopLagP95Ms: number;
   };
   runtimes: {
     totalTracked: number;
@@ -51,6 +57,7 @@ export type WhatsAppSenderNodeMetricsSnapshot = {
     authenticated: number;
     supervisorPaused: number;
     runtimeCreates24h: number;
+    activeChromiumProcesses: number;
   };
   latencies: {
     restoreReadyAvgMs: number | null;
@@ -69,7 +76,6 @@ declare global {
   // eslint-disable-next-line no-var
   var whatsAppSenderRuntimeMetrics: WhatsAppSenderRuntimeMetricsState | undefined;
 }
-
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 const metricsState =
@@ -87,6 +93,8 @@ if (!global.whatsAppSenderRuntimeMetrics) {
 }
 
 const processStartedAt = Date.now();
+const eventLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+eventLoopDelay.enable();
 
 function pruneTimestamps(values: number[], now = Date.now()) {
   return values.filter((value) => now - value < WINDOW_MS);
@@ -220,6 +228,7 @@ export function getWhatsAppSenderNodeMetricsSnapshot(input: {
     sessionClientId: string;
     connectionStatus: string;
     isSyncingHistory: boolean;
+    chromiumPid?: number | null;
   }>;
   supervisorPausedCount: number;
 }) {
@@ -237,6 +246,12 @@ export function getWhatsAppSenderNodeMetricsSnapshot(input: {
   }
 
   const memoryUsage = process.memoryUsage();
+  const cpuUsage = process.cpuUsage();
+  const eventLoopLagMeanMs = Number.isFinite(eventLoopDelay.mean) ? eventLoopDelay.mean / 1_000_000 : 0;
+  const eventLoopLagP95Ms = eventLoopDelay.percentile(95) / 1_000_000;
+  const activeChromiumProcesses = new Set(
+    input.activeRuntimes.map((runtime) => runtime.chromiumPid).filter((pid): pid is number => typeof pid === "number")
+  ).size;
 
   return {
     process: {
@@ -245,7 +260,11 @@ export function getWhatsAppSenderNodeMetricsSnapshot(input: {
       rssMb: Math.round((memoryUsage.rss / 1024 / 1024) * 10) / 10,
       heapUsedMb: Math.round((memoryUsage.heapUsed / 1024 / 1024) * 10) / 10,
       heapTotalMb: Math.round((memoryUsage.heapTotal / 1024 / 1024) * 10) / 10,
-      externalMb: Math.round((memoryUsage.external / 1024 / 1024) * 10) / 10
+      externalMb: Math.round((memoryUsage.external / 1024 / 1024) * 10) / 10,
+      cpuUserMs: Math.round(cpuUsage.user / 1000),
+      cpuSystemMs: Math.round(cpuUsage.system / 1000),
+      eventLoopLagMeanMs: Math.round(eventLoopLagMeanMs * 10) / 10,
+      eventLoopLagP95Ms: Math.round(eventLoopLagP95Ms * 10) / 10
     },
     runtimes: {
       totalTracked: metricsState.workspaceStates.size,
@@ -258,7 +277,8 @@ export function getWhatsAppSenderNodeMetricsSnapshot(input: {
       qrReady: input.activeRuntimes.filter((runtime) => runtime.connectionStatus === "QR_READY").length,
       authenticated: input.activeRuntimes.filter((runtime) => runtime.connectionStatus === "AUTHENTICATED").length,
       supervisorPaused: input.supervisorPausedCount,
-      runtimeCreates24h: metricsState.runtimeCreatedAtTimestamps.length
+      runtimeCreates24h: metricsState.runtimeCreatedAtTimestamps.length,
+      activeChromiumProcesses
     },
     latencies: {
       restoreReadyAvgMs: average(metricsState.restoreReadyDurationsMs),

@@ -155,6 +155,33 @@ export async function completeMetaOnboardingAttempt(attemptId: string) {
   });
 }
 
+export async function cancelMetaOnboardingAttempt(input: {
+  attemptId: string;
+  workspaceId: string;
+  channelId: string;
+  initiatedByAgentId: string;
+}) {
+  const cancelledAt = new Date();
+  const cancelled = await prisma.metaOnboardingAttempt.updateMany({
+    where: {
+      id: input.attemptId,
+      workspaceId: input.workspaceId,
+      channelId: input.channelId,
+      initiatedByAgentId: input.initiatedByAgentId,
+      status: { in: ["AWAITING_META_AUTHORIZATION", "AWAITING_ASSET_SELECTION"] }
+    },
+    data: {
+      status: "CANCELLED",
+      cancelledAt,
+      authorizationCiphertext: null
+    }
+  });
+  if (cancelled.count !== 1) {
+    throw new Error("META_ONBOARDING_ATTEMPT_NOT_CANCELABLE");
+  }
+  return { cancelled: true, cancelledAt };
+}
+
 export async function failMetaOnboardingAttempt(attemptId: string, failureCode: string) {
   await prisma.metaOnboardingAttempt.updateMany({
     where: { id: attemptId },

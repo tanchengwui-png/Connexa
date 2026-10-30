@@ -24,12 +24,13 @@ type MessageLogRow = {
   contactName: string;
   phone: string;
   preview: string;
+  fullMessage: string | null;
   attachmentMimeType: string | null;
   attachmentName: string | null;
   attachmentUrl: string | null;
   direction: "Inbound" | "Outbound";
   source: "Connexa outbound" | "Inbound" | "Manual outbound";
-  status: "Canceled" | "Failed" | "Inbound" | "Processing" | "Queued" | "Sent";
+  status: "Canceled" | "Failed" | "Processing" | "Queued" | "Received" | "Sent";
   statusKey: "canceled" | "failed" | "inbound" | "processing" | "queued" | "sent";
   sentAt: string;
   sentAtIso: string;
@@ -113,15 +114,19 @@ type MessageLogRecord = Awaited<ReturnType<typeof findMessageLogRecords>>[number
 
 export async function getMessageLogsData(input?: {
   filter?: MessageLogsFilter;
+  direction?: "all" | "inbound" | "outbound";
+  status?: "all" | "canceled" | "failed" | "processing" | "queued" | "received" | "sent";
   conversationId?: string | null;
   page?: number;
   pageSize?: number;
 }) {
   const workspaceId = await requireCurrentWorkspaceId();
   const filter = input?.filter ?? "all";
+  const direction: "all" | "inbound" | "outbound" = input?.direction ?? (filter === "inbound" || filter === "outbound" ? filter : "all");
+  const status: "all" | "canceled" | "failed" | "processing" | "queued" | "received" | "sent" = input?.status ?? (["canceled", "failed", "processing", "queued", "sent"].includes(filter) ? (filter as "canceled" | "failed" | "processing" | "queued" | "sent") : "all");
   const scopedConversationId = input?.conversationId?.trim() || null;
   const pageSize = normalizePositiveInteger(input?.pageSize, DEFAULT_MESSAGE_LOGS_PAGE_SIZE, MAX_MESSAGE_LOGS_PAGE_SIZE);
-  const where = buildMessageLogsWhere(workspaceId, filter, scopedConversationId);
+  const where = buildMessageLogsWhere(workspaceId, direction, status, scopedConversationId);
   const total = await prisma.message.count({ where });
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const page = Math.min(normalizePositiveInteger(input?.page, 1), totalPages);
@@ -143,6 +148,8 @@ export async function getMessageLogsData(input?: {
 
   return {
     filter,
+    direction,
+    status,
     conversationId: scopedConversationId,
     rows,
     summary: counts,
@@ -321,6 +328,7 @@ function mapMessageLogRow(message: MessageLogRecord): MessageLogRow {
     contactName: message.conversation.contact.displayName,
     phone: message.conversation.contact.phone,
     preview,
+    fullMessage: message.body.trim() || null,
     attachmentMimeType: message.attachmentMimeType,
     attachmentName: message.attachmentName,
     attachmentUrl: message.attachmentUrl,
@@ -333,7 +341,7 @@ function mapMessageLogRow(message: MessageLogRecord): MessageLogRow {
           : "Manual outbound",
     status:
       statusKey === "inbound"
-        ? "Inbound"
+        ? "Received"
         : statusKey === "canceled"
           ? "Canceled"
           : statusKey === "failed"
@@ -378,7 +386,8 @@ function formatDateTime(date: Date) {
 
 function buildMessageLogsWhere(
   workspaceId: string,
-  filter: MessageLogsFilter,
+  direction: "all" | "inbound" | "outbound",
+  status: "all" | "canceled" | "failed" | "processing" | "queued" | "received" | "sent",
   conversationId?: string | null
 ) {
   const baseWhere = {
@@ -388,20 +397,19 @@ function buildMessageLogsWhere(
     }
   };
 
-  switch (filter) {
-    case "inbound":
-      return {
-        ...baseWhere,
-        direction: MessageDirection.INBOUND
-      };
-    case "outbound":
-      return {
-        ...baseWhere,
-        direction: MessageDirection.OUTBOUND
-      };
+  const directionWhere =
+    direction === "inbound"
+      ? { direction: MessageDirection.INBOUND }
+      : direction === "outbound"
+        ? { direction: MessageDirection.OUTBOUND }
+        : {};
+
+  switch (status) {
+    case "received":
+      return { ...baseWhere, ...directionWhere, direction: MessageDirection.INBOUND };
     case "sent":
       return {
-        ...baseWhere,
+        ...baseWhere, ...directionWhere,
         outboundJob: {
           is: {
             status: OutboundMessageJobStatus.SENT
@@ -410,7 +418,7 @@ function buildMessageLogsWhere(
       };
     case "queued":
       return {
-        ...baseWhere,
+        ...baseWhere, ...directionWhere,
         outboundJob: {
           is: {
             status: OutboundMessageJobStatus.PENDING
@@ -419,7 +427,7 @@ function buildMessageLogsWhere(
       };
     case "processing":
       return {
-        ...baseWhere,
+        ...baseWhere, ...directionWhere,
         outboundJob: {
           is: {
             status: OutboundMessageJobStatus.RUNNING
@@ -428,7 +436,7 @@ function buildMessageLogsWhere(
       };
     case "failed":
       return {
-        ...baseWhere,
+        ...baseWhere, ...directionWhere,
         outboundJob: {
           is: {
             status: OutboundMessageJobStatus.FAILED
@@ -437,16 +445,15 @@ function buildMessageLogsWhere(
       };
     case "canceled":
       return {
-        ...baseWhere,
+        ...baseWhere, ...directionWhere,
         outboundJob: {
           is: {
             status: OutboundMessageJobStatus.CANCELED
           }
         }
       };
-    case "all":
     default:
-      return baseWhere;
+      return { ...baseWhere, ...directionWhere };
   }
 }
 

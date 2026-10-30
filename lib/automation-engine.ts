@@ -55,6 +55,13 @@ export async function processInboundAutomation(input: {
     return;
   }
 
+  // Rules, workflows, and their follow-ups are private-chat automation only.
+  // Keep group messages visible in the inbox, but never let them enter an
+  // automated reply flow or schedule an outbound automation job.
+  if (conversation.whatsAppRemoteId?.trim().toLowerCase().endsWith("@g.us")) {
+    return;
+  }
+
   const [settings, rules, stateRecord, inboundCount, executions] = await Promise.all([
     getOrCreateAutomationSettings(input.workspaceId),
     prisma.automationRule.findMany({
@@ -420,6 +427,7 @@ export async function applyHumanTakeoverPause(input: {
   workspaceId: string;
   conversationId: string;
   pausedAt?: Date;
+  cancelPendingAutomation?: boolean;
 }) {
   const settings = await getOrCreateAutomationSettings(input.workspaceId);
   const pausedAt = input.pausedAt ?? new Date();
@@ -438,6 +446,46 @@ export async function applyHumanTakeoverPause(input: {
       automationPausedUntil: pausedUntil
     }
   });
+
+  if (input.cancelPendingAutomation) {
+    await cancelPendingAutomationOnHumanTakeover({
+      conversationId: input.conversationId,
+      pausedAt
+    });
+  }
+}
+
+async function cancelPendingAutomationOnHumanTakeover(input: {
+  conversationId: string;
+  pausedAt: Date;
+}) {
+  await prisma.$transaction([
+    prisma.automationJob.updateMany({
+      where: {
+        conversationId: input.conversationId,
+        status: AutomationJobStatus.PENDING,
+        jobType: AutomationJobType.FOLLOW_UP_MESSAGE
+      },
+      data: {
+        status: AutomationJobStatus.CANCELED,
+        lastError: `Canceled after human reply at ${input.pausedAt.toISOString()}.`
+      }
+    }),
+    prisma.conversationAutomationState.updateMany({
+      where: {
+        conversationId: input.conversationId,
+        activeFlowKey: "CONVERSATION_WORKFLOW"
+      },
+      data: {
+        activeFlowKey: null,
+        activeFlowStep: null,
+        flowStateJson: JSON.stringify({
+          endedAt: input.pausedAt.toISOString(),
+          endReason: "HUMAN_TAKEOVER"
+        })
+      }
+    })
+  ]);
 }
 
 export async function processPendingAutomationJobs(limit = 10, workspaceId?: string) {

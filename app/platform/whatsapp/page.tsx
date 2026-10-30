@@ -367,7 +367,7 @@ export default async function PlatformWhatsAppPage() {
                                 {channel.phoneNumber && channel.phoneNumber !== channel.label ? (
                                   <span>{channel.phoneNumber}</span>
                                 ) : null}
-                                <span>{channel.connectionMethod === "api" ? "Cloud API" : "QR session"}</span>
+                                <span>Link method: {channel.linkedVia}</span>
                                 <span>{channel.connectedBy ?? "Unknown connector"}</span>
                                 <span>{formatDateTime(channel.connectedAt)}</span>
                               </div>

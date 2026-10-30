@@ -19,18 +19,24 @@ import {
 } from "@/lib/db-types";
 import {
   createConversationNoteRecord,
+  countConversationRows,
   createOutboundMessageRecord,
+  deleteConversationNoteRecord,
   findConversationContactPhone,
   findConversationForWorkspace,
   findConversationHeader,
   listConversationMessages,
   listConversationNotes,
   listConversationRows,
+  listConversationRowsPage,
+  listConversationTeammatesByConversationIds,
   listConversationTeammatesByWorkspace,
   setConversationTeammates,
   updateConversationRecord,
+  updateConversationNoteRecord,
   updateConversationTagsRecord
 } from "@/lib/db-conversations";
+import { decodeInboxCursor, encodeInboxCursor } from "@/lib/inbox-pagination";
 import { findPropertyLeadConversation, upsertPropertyLeadForConversationRecord } from "@/lib/db-leads";
 import { getLeadCustomString, parseLeadCustomData } from "@/lib/lead-custom-fields";
 import { prisma } from "@/lib/prisma";
@@ -97,11 +103,94 @@ export async function listConversations() {
   }));
 }
 
-export async function getConversationDetail(conversationId: string) {
+export async function listConversationsPage(input: {
+  channelId?: string | null;
+  cursor?: string | null;
+  limit?: number;
+} = {}) {
   const workspaceId = await requireCurrentWorkspaceId();
-  const [conversation, messages, notes, auditEvents, lead, teammateRows, automationState] = await Promise.all([
+  const limit = Math.max(1, Math.min(100, input.limit ?? 50));
+  const decodedCursor = decodeInboxCursor(input.cursor);
+  const [rows, totalCount] = await Promise.all([
+    listConversationRowsPage({
+      workspaceId,
+      channelId: input.channelId ?? null,
+      cursor: decodedCursor
+        ? { lastMessageAt: decodedCursor.timestamp, id: decodedCursor.id }
+        : null,
+      limit: limit + 1
+    }),
+    countConversationRows({ workspaceId, channelId: input.channelId ?? null })
+  ]);
+  const hasMore = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const teammateRows = await listConversationTeammatesByConversationIds(
+    workspaceId,
+    pageRows.map((row) => row.id)
+  );
+  const teammatesByConversationId = new Map<string, Array<{ id: string; name: string }>>();
+  for (const teammate of teammateRows) {
+    const existing = teammatesByConversationId.get(teammate.conversationId) ?? [];
+    existing.push({ id: teammate.agentId, name: teammate.agentName });
+    teammatesByConversationId.set(teammate.conversationId, existing);
+  }
+
+  const conversations = pageRows.map((conversation) => ({
+    id: conversation.id,
+    channelId: conversation.channelId,
+    channelLabel: conversation.channelLabel,
+    contactName: conversation.contactName,
+    photoUrl: conversation.photoUrl,
+    phone: conversation.phone,
+    isGroup: conversation.isGroup,
+    tags: splitTags(conversation.tags),
+    status: conversation.status,
+    snoozedUntil: conversation.snoozedUntil,
+    snoozeReason: conversation.snoozeReason,
+    snoozeStatus: conversation.snoozeStatus,
+    snoozedBy:
+      conversation.snoozedById && conversation.snoozedByName
+        ? { id: conversation.snoozedById, name: conversation.snoozedByName }
+        : null,
+    isMuted: conversation.isMuted,
+    muteExpiration: conversation.muteExpiration,
+    isArchived: conversation.isArchived,
+    isPinned: conversation.isPinned,
+    isSnoozed: isConversationSnoozed(conversation),
+    unreadCount: conversation.unreadCount,
+    assignee: conversation.assigneeId
+      ? { id: conversation.assigneeId, name: conversation.assigneeName ?? "Unknown" }
+      : null,
+    teammates: teammatesByConversationId.get(conversation.id) ?? [],
+    isHotLead: conversation.isHotLead,
+    lastMessagePreview: conversation.lastMessagePreview,
+    lastMessageDirection: conversation.lastMessageDirection,
+    lastMessageAt: conversation.lastMessageAt
+  }));
+  const last = pageRows[pageRows.length - 1];
+  return {
+    conversations,
+    page: {
+      hasMore,
+      nextCursor: hasMore && last ? encodeInboxCursor({ timestamp: last.lastMessageAt, id: last.id }) : null,
+      totalCount
+    }
+  };
+}
+
+export async function getConversationDetail(
+  conversationId: string,
+  options: { messageCursor?: string | null; messageLimit?: number } = {}
+) {
+  const workspaceId = await requireCurrentWorkspaceId();
+  const messageLimit = Math.max(1, Math.min(100, options.messageLimit ?? 50));
+  const decodedMessageCursor = decodeInboxCursor(options.messageCursor);
+  const [conversation, messageRows, notes, auditEvents, lead, teammateRows, automationState] = await Promise.all([
     findConversationHeader(conversationId, workspaceId),
-    listConversationMessages(conversationId),
+    listConversationMessages(conversationId, {
+      cursor: decodedMessageCursor ? { sentAt: decodedMessageCursor.timestamp, id: decodedMessageCursor.id } : null,
+      limit: messageLimit + 1
+    }),
     listConversationNotes(conversationId),
     prisma.conversationAuditEvent.findMany({
       where: {
@@ -156,7 +245,7 @@ export async function getConversationDetail(conversationId: string) {
         lastActivityAt: "desc"
       }
     }),
-    listConversationTeammatesByWorkspace(workspaceId),
+    listConversationTeammatesByConversationIds(workspaceId, [conversationId]),
     prisma.conversationAutomationState.findUnique({
       where: {
         conversationId
@@ -174,6 +263,10 @@ export async function getConversationDetail(conversationId: string) {
   if (!conversation) {
     return null;
   }
+
+  const hasMoreMessages = messageRows.length > messageLimit;
+  const messages = hasMoreMessages ? messageRows.slice(1) : messageRows;
+  const oldestMessage = messages[0];
 
   const teammates = teammateRows
     .filter((teammate: (typeof teammateRows)[number]) => teammate.conversationId === conversation.id)
@@ -282,6 +375,7 @@ export async function getConversationDetail(conversationId: string) {
     channelId: conversation.channelId,
     channelLabel: conversation.channelLabel,
     contactName: conversation.contactName,
+    whatsappPushName: conversation.whatsappPushName,
     photoUrl: conversation.photoUrl,
     lead: lead
       ? {
@@ -349,6 +443,13 @@ export async function getConversationDetail(conversationId: string) {
           lastMatchedRuleName: matchedRule?.name ?? null
         }
       : null,
+    messagePage: {
+      hasMore: hasMoreMessages,
+      nextCursor:
+        hasMoreMessages && oldestMessage
+          ? encodeInboxCursor({ timestamp: oldestMessage.sentAt, id: oldestMessage.id })
+          : null
+    },
     messages: messages.map((message: (typeof messages)[number]) => ({
       id: message.id,
       attachmentMimeType: message.attachmentMimeType,
@@ -748,7 +849,8 @@ export async function createOutboundMessage(input: {
   await applyHumanTakeoverPause({
     workspaceId,
     conversationId: input.conversationId,
-    pausedAt: message.sentAt
+    pausedAt: message.sentAt,
+    cancelPendingAutomation: true
   });
 
   return {
@@ -795,6 +897,45 @@ export async function createConversationNote(input: {
     author: note.author,
     createdAt: note.createdAt
   };
+}
+
+export async function updateConversationNote(input: {
+  conversationId: string;
+  noteId: string;
+  body: string;
+}) {
+  const agent = await requireCurrentAgent();
+  const normalizedBody = input.body.trim();
+
+  if (!normalizedBody) {
+    throw new Error("Note body is required.");
+  }
+
+  const note = await updateConversationNoteRecord({
+    workspaceId: agent.workspaceId,
+    conversationId: input.conversationId,
+    noteId: input.noteId,
+    body: normalizedBody
+  });
+
+  if (!note) {
+    throw new Error("Note not found.");
+  }
+
+  return note;
+}
+
+export async function deleteConversationNote(input: { conversationId: string; noteId: string }) {
+  const agent = await requireCurrentAgent();
+  const note = await deleteConversationNoteRecord({
+    workspaceId: agent.workspaceId,
+    conversationId: input.conversationId,
+    noteId: input.noteId
+  });
+
+  if (!note) {
+    throw new Error("Note not found.");
+  }
 }
 
 function resolveConversationAuditEventType(input: {

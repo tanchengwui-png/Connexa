@@ -36,7 +36,7 @@ type OutboundMessagePayload = {
 };
 
 export type OutboundMessageResult = {
-  providerMessageId: string;
+  providerMessageId: string | null;
   status: "accepted";
 };
 

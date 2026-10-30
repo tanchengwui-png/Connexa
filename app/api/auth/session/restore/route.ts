@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { restoreSessionFromRemember } from "@/lib/auth/session";
 import { getAppBaseUrl } from "@/lib/app-url";
-
-function getSafeReturnTo(value: string | null) {
-  return value?.startsWith("/") && !value.startsWith("//") ? value : "/inbox";
-}
+import { getSafeReturnTo } from "@/lib/auth/return-to";
 
 export async function GET(request: NextRequest) {
   const returnTo = request.nextUrl.searchParams.get("returnTo") || "/inbox";

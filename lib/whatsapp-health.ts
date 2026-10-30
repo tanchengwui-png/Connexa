@@ -4,7 +4,6 @@ import { MessageDirection } from "@/lib/db-types";
 import type { WorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
 import { getWhatsAppChannelStatusById, getWorkspaceWhatsAppChannelStatus } from "@/lib/whatsapp-channel";
 import {
-  isWhatsAppConnectedRuntimeStatus,
   isWhatsAppDisconnectedRuntimeStatus
 } from "@/lib/whatsapp-runtime-status";
 import { getWorkspaceWhatsAppRuntimeStatus } from "@/lib/whatsapp-runtime";
@@ -37,7 +36,7 @@ function getDateTimestamp(value: Date | string | null | undefined) {
   return Number.isNaN(parsed.getTime()) ? null : parsed.getTime();
 }
 
-export async function getWorkspaceWhatsAppHealth(input: {
+async function loadWorkspaceWhatsAppHealth(input: {
   workspaceId: string;
   agentId: string;
   channelId?: string | null;
@@ -54,13 +53,33 @@ export async function getWorkspaceWhatsAppHealth(input: {
 
       return {
         channel: fallbackChannel,
-        runtimeStatus: "DISCONNECTED",
+        runtimeStatus: fallbackChannel?.connectionStatus ?? "DISCONNECTED",
+        runtimePresent: false,
+        userConnectionState: "unknown" as const,
+        runtimeHealthStatus: fallbackChannel?.runtimeHealthStatus ?? "UNKNOWN",
+        lastHealthCheckAt: fallbackChannel?.latestHealthCheckAt?.toISOString() ?? null,
+        lastHealthyAt: fallbackChannel?.lastHealthyAt?.toISOString() ?? null,
+        nextRecoveryAt: fallbackChannel?.nextRecoveryAt?.toISOString() ?? null,
+        senderReachable: false,
+        senderError:
+          error instanceof Error
+            ? error.message
+            : "Unable to reach WhatsApp runtime status.",
+        qrCodeDataUrl: null,
+        qrCodeGeneratedAt: null,
+        qrCodeExpiresAt: null,
+        qrCodeExpired: fallbackChannel?.connectionStatus === "QR_READY",
         lastError:
           error instanceof Error
             ? error.message
             : "Unable to reach WhatsApp runtime status.",
         connectedByCurrentAgent: fallbackChannel?.connectedByAgentId === input.agentId,
         isSyncingHistory: false,
+        historySyncFullyCaughtUp: false,
+        historySyncCursor: 0,
+        historySyncTotal: null,
+        historySyncProgressAt: null,
+        historySync: null,
         supervisor: null
       };
     }),
@@ -113,26 +132,49 @@ export async function getWorkspaceWhatsAppHealth(input: {
 
   const channel = runtime.channel as WorkspaceWhatsAppChannelStatus | null;
   const runtimeStatus = runtime.runtimeStatus ?? channel?.connectionStatus ?? "DISCONNECTED";
+  const historySync = runtime.historySync;
+  const historySyncTotalChats = historySync?.totalChats ?? runtime.historySyncTotal ?? null;
+  const historySyncProcessedChats = Math.max(0, historySync?.processedChats ?? runtime.historySyncCursor ?? 0);
+  const historySyncFullyCaughtUp = historySync
+    ? historySync.phase === "idle" && Boolean(historySync.lastSuccessfulSyncAt)
+    : runtime.historySyncFullyCaughtUp === true;
+  const isHistorySyncInProgress = historySync?.active === true;
+  const lastSyncError = historySync?.lastError ?? runtime.lastError ?? channel?.lastError ?? null;
+  const hasDeferredHistory = historySync?.phase === "deferred";
   const isDisconnectedRuntime = isWhatsAppDisconnectedRuntimeStatus(runtimeStatus);
   const isIntermediateRuntime = runtimeStatus === "INITIALIZING" || runtimeStatus === "AUTHENTICATED";
   const hasImportedHistory = conversationCount > 0 || messageCount > 0;
   const connectedAtTime = getDateTimestamp(channel?.connectedAt);
   const updatedAtTime = getDateTimestamp(channel?.updatedAt);
-  const referenceTime = connectedAtTime ?? updatedAtTime;
+  const historySyncProgressAtTime = getDateTimestamp(historySync?.progressAt ?? runtime.historySyncProgressAt);
+  // Channel writes happen at batch boundaries, while a large batch can spend
+  // minutes importing individual chats. Runtime progress is the authoritative
+  // signal that the importer is still moving and prevents false stuck alerts.
+  const referenceTimes = [connectedAtTime, updatedAtTime, historySyncProgressAtTime].filter(
+    (value): value is number => value !== null
+  );
+  const referenceTime = referenceTimes.length > 0 ? Math.max(...referenceTimes) : null;
   const intermediateReferenceTime = updatedAtTime ?? connectedAtTime;
   const isConnectionStalled =
     isIntermediateRuntime &&
     intermediateReferenceTime !== null &&
     Date.now() - intermediateReferenceTime >= WHATSAPP_CONNECTION_STALL_MS;
-  const isLiveRuntime = isWhatsAppConnectedRuntimeStatus(runtimeStatus);
+  const userConnectionState = runtime.userConnectionState ?? "unknown";
+  const isLiveRuntime = userConnectionState === "connected";
   const isHistoryStabilizing =
-    !isDisconnectedRuntime && (runtimeStatus === "CONNECTED" || runtimeStatus === "SYNCING_HISTORY") && !hasImportedHistory;
+    !isDisconnectedRuntime &&
+    !hasDeferredHistory &&
+    isHistorySyncInProgress;
   const isHistoryStuck =
+    !hasDeferredHistory &&
     isHistoryStabilizing &&
     referenceTime !== null &&
     Date.now() - referenceTime >= WHATSAPP_HISTORY_STUCK_MS;
-  const isLiveOnlyMode = false;
-  const isInboxReady = !isDisconnectedRuntime && (runtimeStatus === "READY" || hasImportedHistory);
+  const isLiveOnlyMode = !isDisconnectedRuntime && hasDeferredHistory && !hasImportedHistory;
+  const isInboxReady =
+    userConnectionState === "connected" &&
+    !isDisconnectedRuntime &&
+    (["CONNECTED", "READY", "SYNCING_HISTORY"].includes(runtimeStatus) || hasImportedHistory || isLiveOnlyMode);
   const hasRecentInbound = Boolean(lastInboundMessage);
   const hasRecentOutbound = Boolean(lastOutboundMessage);
   const verificationState =
@@ -146,12 +188,36 @@ export async function getWorkspaceWhatsAppHealth(input: {
 
   return {
     runtimeStatus,
+    runtimePresent: runtime.runtimePresent === true,
+    userConnectionState,
+    runtimeHealthStatus: runtime.runtimeHealthStatus ?? channel?.runtimeHealthStatus ?? "UNKNOWN",
+    lastHealthCheckAt: runtime.lastHealthCheckAt ?? channel?.latestHealthCheckAt?.toISOString() ?? null,
+    lastHealthyAt: runtime.lastHealthyAt ?? channel?.lastHealthyAt?.toISOString() ?? null,
+    nextRecoveryAt: runtime.nextRecoveryAt ?? channel?.nextRecoveryAt?.toISOString() ?? null,
+    senderReachable: runtime.senderReachable !== false,
+    senderError: runtime.senderError ?? null,
+    qrCodeDataUrl: runtime.qrCodeDataUrl ?? null,
+    qrCodeGeneratedAt: runtime.qrCodeGeneratedAt ?? null,
+    qrCodeExpiresAt: runtime.qrCodeExpiresAt ?? null,
+    qrCodeExpired: runtime.qrCodeExpired === true,
     channel,
     supervisor: runtime.supervisor ?? null,
     isLiveRuntime,
     isConnectionStalled,
     isInboxReady,
     isHistoryStabilizing,
+    historySyncFullyCaughtUp,
+    historySyncProcessedChats,
+    historySyncTotalChats,
+    historySyncPhase: historySync?.phase ?? (isDisconnectedRuntime ? "disconnected" : isHistorySyncInProgress ? "reconcile" : "idle"),
+    historySyncActive: isHistorySyncInProgress,
+    historySyncStartedAt: historySync?.startedAt ?? null,
+    historySyncProgressAt: historySync?.progressAt ?? runtime.historySyncProgressAt ?? null,
+    historySyncLastSuccessfulAt: historySync?.lastSuccessfulSyncAt ?? null,
+    historySyncNextReconciliationAt: historySync?.nextReconciliationAt ?? null,
+    historySyncRemainingChats: historySync?.remainingChats ?? 0,
+    historySyncDeferredChats: historySync?.deferredChats ?? 0,
+    historySyncNewMessages: historySync?.newMessages ?? 0,
     isHistoryStuck,
     isLiveOnlyMode,
     hasImportedHistory,
@@ -162,9 +228,35 @@ export async function getWorkspaceWhatsAppHealth(input: {
     verificationState,
     importedConversationCount: conversationCount,
     importedMessageCount: messageCount,
-    lastSyncError: runtime.lastError ?? channel?.lastError ?? null,
+    lastSyncError,
     workerStatus
   };
+}
+
+const whatsAppHealthCache = new Map<
+  string,
+  { expiresAt: number; promise: ReturnType<typeof loadWorkspaceWhatsAppHealth> }
+>();
+
+export function getWorkspaceWhatsAppHealth(input: {
+  workspaceId: string;
+  agentId: string;
+  channelId?: string | null;
+}) {
+  const ttlMs = Math.max(
+    500,
+    Number.parseInt(process.env.WHATSAPP_HEALTH_CACHE_TTL_MS ?? "5000", 10) || 5000
+  );
+  const key = `${input.workspaceId}:${input.channelId ?? "default"}:${input.agentId}`;
+  const cached = whatsAppHealthCache.get(key);
+  if (cached && cached.expiresAt > Date.now()) return cached.promise;
+
+  const promise = loadWorkspaceWhatsAppHealth(input).catch((error) => {
+    if (whatsAppHealthCache.get(key)?.promise === promise) whatsAppHealthCache.delete(key);
+    throw error;
+  });
+  whatsAppHealthCache.set(key, { expiresAt: Date.now() + ttlMs, promise });
+  return promise;
 }
 
 export type WorkspaceWhatsAppHealth = Awaited<ReturnType<typeof getWorkspaceWhatsAppHealth>>;
@@ -176,7 +268,7 @@ export async function getWorkspaceWhatsAppHealthForPage(input: {
   fallbackChannel?: WorkspaceWhatsAppChannelStatus | null;
   timeoutMs?: number;
 }): Promise<WorkspaceWhatsAppHealth> {
-  const timeoutMs = Math.max(1000, input.timeoutMs ?? WHATSAPP_PAGE_HEALTH_TIMEOUT_MS);
+  const timeoutMs = Math.max(100, input.timeoutMs ?? WHATSAPP_PAGE_HEALTH_TIMEOUT_MS);
   const healthPromise = getWorkspaceWhatsAppHealth({
     workspaceId: input.workspaceId,
     agentId: input.agentId,
@@ -214,17 +306,41 @@ function buildPageHealthFallback(
 ): WorkspaceWhatsAppHealth {
   const runtimeStatus = channel?.connectionStatus ?? "DISCONNECTED";
   const isDisconnectedRuntime = isWhatsAppDisconnectedRuntimeStatus(runtimeStatus);
-  const isLiveRuntime = isWhatsAppConnectedRuntimeStatus(runtimeStatus);
+  const isLiveRuntime = false;
   const isHistoryStabilizing = runtimeStatus === "CONNECTED" || runtimeStatus === "SYNCING_HISTORY";
 
   return {
     runtimeStatus,
+    runtimePresent: false,
+    userConnectionState: "unknown",
+    runtimeHealthStatus: channel?.runtimeHealthStatus ?? "UNKNOWN",
+    lastHealthCheckAt: channel?.latestHealthCheckAt?.toISOString() ?? null,
+    lastHealthyAt: channel?.lastHealthyAt?.toISOString() ?? null,
+    nextRecoveryAt: channel?.nextRecoveryAt?.toISOString() ?? null,
+    senderReachable: false,
+    senderError: lastSyncError,
+    qrCodeDataUrl: null,
+    qrCodeGeneratedAt: null,
+    qrCodeExpiresAt: null,
+    qrCodeExpired: channel?.connectionStatus === "QR_READY",
     channel,
     supervisor: null,
     isLiveRuntime,
     isConnectionStalled: false,
-    isInboxReady: !isDisconnectedRuntime && runtimeStatus === "READY",
+    isInboxReady: !isDisconnectedRuntime && ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(runtimeStatus),
     isHistoryStabilizing,
+    historySyncFullyCaughtUp: false,
+    historySyncProcessedChats: 0,
+    historySyncTotalChats: null,
+    historySyncPhase: isDisconnectedRuntime ? "disconnected" : "idle",
+    historySyncActive: false,
+    historySyncStartedAt: null,
+    historySyncProgressAt: null,
+    historySyncLastSuccessfulAt: null,
+    historySyncNextReconciliationAt: null,
+    historySyncRemainingChats: 0,
+    historySyncDeferredChats: 0,
+    historySyncNewMessages: 0,
     isHistoryStuck: false,
     isLiveOnlyMode: false,
     hasImportedHistory: false,

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { useConfirmation } from "@/components/confirmation-provider";
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
   const [searchValue, setSearchValue] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const deleteRequestInFlight = useRef(false);
 
   const filteredReplies = useMemo(() => {
     const query = searchValue.trim().toLowerCase();
@@ -39,14 +40,20 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
   }, [quickReplies, searchValue, selectedCategory]);
 
   const deleteReply = async (reply: QuickReplyRecord) => {
+    if (deleteRequestInFlight.current) {
+      return;
+    }
+
+    deleteRequestInFlight.current = true;
     const accepted = await confirm({
-      title: "Delete quick reply?",
+      title: `Delete “${reply.title}”?`,
       description: `This will remove ${reply.title} from the shared library.`,
       confirmLabel: "Delete reply",
       tone: "danger"
     });
 
     if (!accepted) {
+      deleteRequestInFlight.current = false;
       return;
     }
 
@@ -67,6 +74,7 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
         success("Quick reply deleted", `${reply.title} has been removed.`);
         router.refresh();
       } finally {
+        deleteRequestInFlight.current = false;
         setDeletingId((current) => (current === reply.id ? null : current));
       }
     });
@@ -74,10 +82,10 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
 
   return (
     <section className="quick-replies-list-shell">
-      <article className="content-card quick-replies-overview-band">
+      <article className="content-card quick-replies-overview-band quick-reply-summary">
         <div className="quick-replies-overview-copy">
           <span className="quick-replies-overview-kicker">Quick reply library</span>
-          <h3 className="card-title">Manage the team&apos;s saved replies from one clear list</h3>
+          <h2 className="card-title">Manage the team&apos;s saved replies from one clear list</h2>
           <p className="muted">
             Search, review, edit, and delete saved replies here. Open create or edit pages only when you need the full editor.
           </p>
@@ -98,30 +106,36 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
         </div>
       </article>
 
-      <article className="content-card quick-replies-list-card">
-        <div className="card-header quick-replies-list-card-head">
+      <article className="content-card quick-replies-list-card quick-reply-library">
+        <header className="quick-replies-list-card-head">
           <div>
-            <h3 className="card-title">Reply library</h3>
+            <h2 className="card-title">Reply library</h2>
             <p className="muted">This list is the saved quick-reply library. Use search and category filters to narrow it down.</p>
           </div>
-          <a className="button button-primary" href="/quick-replies/new">
+          <a className="button button-secondary quick-replies-context-create" href="/quick-replies/new">
             Create New Quick Reply
           </a>
-        </div>
+        </header>
 
         {quickReplies.length ? (
           <>
-            <div className="quick-replies-library-tools quick-replies-list-tools">
-              <label className="inbox-search-field quick-replies-search" htmlFor="quick-replies-search">
+            <div className="quick-replies-library-tools quick-replies-list-tools quick-reply-toolbar">
+              <div className="inbox-search-field quick-replies-search">
+                <label className="visually-hidden" htmlFor="quick-replies-search">Search quick replies</label>
                 <input
                   className="inbox-search-input"
                   id="quick-replies-search"
                   onChange={(event) => setSearchValue(event.target.value)}
-                  placeholder="Search title, shortcut, category, or reply body"
+                  placeholder="Search by title, shortcut, category, or reply content"
                   type="text"
                   value={searchValue}
                 />
-              </label>
+                {searchValue ? (
+                  <button aria-label="Clear quick reply search" className="quick-replies-search-clear" onClick={() => setSearchValue("")} type="button">
+                    Clear
+                  </button>
+                ) : null}
+              </div>
 
               <div className="quick-replies-category-chips">
                 {["All", ...categories].map((category) => (
@@ -129,6 +143,7 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
                     className={`inbox-search-tool${selectedCategory === category ? " active" : ""}`}
                     key={category}
                     onClick={() => setSelectedCategory(category)}
+                    aria-pressed={selectedCategory === category}
                     type="button"
                   >
                     {category}
@@ -137,7 +152,7 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
               </div>
             </div>
 
-            <div className="quick-replies-list-table-shell">
+            <div className="quick-replies-list-table-shell quick-reply-table-wrapper">
               <table className="quick-replies-list-table">
                 <thead>
                   <tr>
@@ -159,23 +174,23 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
                         <tr key={item.id}>
                           <td>
                             <div className="quick-replies-list-primary-cell">
-                              <strong>{item.title}</strong>
+                              <strong title={item.title}>{item.title}</strong>
                               {item.mediaAssetIds.length ? (
-                                <span className="quick-replies-meta-badge">Media x{item.mediaAssetIds.length}</span>
+                                <span className="quick-replies-meta-badge">Media · {item.mediaAssetIds.length}</span>
                               ) : null}
                             </div>
                           </td>
-                          <td>{truncateReplyPreview(item.body)}</td>
-                          <td>{item.category}</td>
-                          <td>{item.shortcut}</td>
-                          <td>{formatQuickReplyTimestamp(item.createdAt)}</td>
-                          <td>{formatQuickReplyTimestamp(item.updatedAt)}</td>
+                          <td><p className="quick-replies-list-preview" title={item.body}>{truncateReplyPreview(item.body) || "No reply content"}</p></td>
+                          <td><span className="quick-replies-category-badge">{item.category || "—"}</span></td>
+                          <td><code className="quick-replies-shortcut">{item.shortcut || "—"}</code></td>
+                          <td><QuickReplyTimestamp value={item.createdAt} /></td>
+                          <td><QuickReplyTimestamp value={item.updatedAt} /></td>
                           <td>
                             <div className="quick-replies-list-actions">
-                              <a className="button button-secondary" href={`/quick-replies/${item.id}/edit`}>
+                              <a aria-label={`Edit ${item.title}`} className="button button-secondary" href={`/quick-replies/${item.id}/edit`}>
                                 Edit
                               </a>
-                              <Button disabled={isDeleting} onClick={() => void deleteReply(item)} variant="danger">
+                              <Button aria-label={`Delete ${item.title}`} disabled={isPending} onClick={() => void deleteReply(item)} variant="danger">
                                 {isDeleting ? "Deleting..." : "Delete"}
                               </Button>
                             </div>
@@ -197,10 +212,7 @@ export function QuickReplyList({ categories, quickReplies, summary }: QuickReply
         ) : (
           <div className="quick-replies-list-empty">
             <strong>No quick replies yet.</strong>
-            <span>Create the first quick reply to populate the shared reply library.</span>
-            <a className="button button-primary" href="/quick-replies/new">
-              Create New Quick Reply
-            </a>
+            <span>Create your first saved reply to start building the shared library.</span>
           </div>
         )}
       </article>
@@ -218,16 +230,21 @@ function truncateReplyPreview(value: string, maxLength = 120) {
   return `${normalized.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
-function formatQuickReplyTimestamp(value: string) {
+function QuickReplyTimestamp({ value }: { value: string }) {
   const timestamp = Date.parse(value);
 
   if (!Number.isFinite(timestamp)) {
-    return "Not available";
+    return <span className="quick-replies-timestamp">Not available</span>;
   }
 
-  return new Intl.DateTimeFormat("en-MY", {
+  const date = new Intl.DateTimeFormat("en-MY", {
     dateStyle: "medium",
+    timeZone: "Asia/Kuala_Lumpur"
+  }).format(new Date(timestamp));
+  const time = new Intl.DateTimeFormat("en-MY", {
     timeStyle: "short",
     timeZone: "Asia/Kuala_Lumpur"
   }).format(new Date(timestamp));
+
+  return <time className="quick-replies-timestamp" dateTime={value} title={new Date(timestamp).toISOString()}><span>{date}</span><span>{time}</span></time>;
 }

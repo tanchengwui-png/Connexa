@@ -165,7 +165,7 @@ export default async function ConnexaLandingPage() {
             <ConnexaLogo priority />
             <span className="connexa-brand-copy">
               <strong>Shared inbox for modern teams</strong>
-              <span>By Recurvos</span>
+              <span>By Sysnex Technology</span>
             </span>
           </div>
 

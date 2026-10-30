@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 
 type BillingDocument = {
   id: string;
@@ -46,18 +47,6 @@ type BillingOverview = {
 
 type AccountBillingManagerProps = {
   canManage: boolean;
-  profile: {
-    billingName: string;
-    billingEmail: string;
-    contactNumber: string;
-    billingAddress1: string;
-    billingAddress2: string | null;
-    billingCity: string;
-    billingState: string;
-    billingPostcode: string;
-    billingCountry: string;
-    taxNumber: string | null;
-  };
   initialOverview: BillingOverview;
   subscription: {
     id: string;
@@ -70,16 +59,17 @@ type AccountBillingManagerProps = {
   } | null;
   limits: Array<{ label: string; value: string }>;
   cleanupWarning: string | null;
+  isSubscriptionExpired: boolean;
   initialMessage?: string | null;
 };
 
 export function AccountBillingManager({
   canManage,
-  profile,
   initialOverview,
   subscription,
   limits,
   cleanupWarning,
+  isSubscriptionExpired,
   initialMessage = null
 }: AccountBillingManagerProps) {
   const [overview, setOverview] = useState(initialOverview);
@@ -126,37 +116,6 @@ export function AccountBillingManager({
     window.location.href = data.paymentUrl;
   }
 
-  async function saveProfile(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setPending("profile");
-    setMessage(null);
-    setError(null);
-    const formData = new FormData(event.currentTarget);
-    const response = await fetch("/api/account/billing/profile", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        billingName: String(formData.get("billingName") ?? ""),
-        billingEmail: String(formData.get("billingEmail") ?? ""),
-        billingPhoneNumber: String(formData.get("billingPhoneNumber") ?? ""),
-        billingAddressLine1: String(formData.get("billingAddressLine1") ?? ""),
-        billingAddressLine2: String(formData.get("billingAddressLine2") ?? ""),
-        billingCity: String(formData.get("billingCity") ?? ""),
-        billingState: String(formData.get("billingState") ?? ""),
-        billingPostcode: String(formData.get("billingPostcode") ?? ""),
-        billingCountry: String(formData.get("billingCountry") ?? ""),
-        billingTaxId: String(formData.get("billingTaxId") ?? "")
-      })
-    });
-    const data = (await response.json()) as { error?: string };
-    setPending(null);
-    if (!response.ok) {
-      setError(data.error ?? "Unable to save billing information.");
-      return;
-    }
-    setMessage("Billing information saved.");
-  }
-
   async function cancelSubscription() {
     setPending("cancel");
     setMessage(null);
@@ -180,27 +139,29 @@ export function AccountBillingManager({
     overview.pagination.page * overview.pagination.perPage,
     overview.pagination.total
   );
-  const showReminder =
+  const showReminder = !isSubscriptionExpired && (
     overview.summary.openInvoices > 0 ||
-    currentPackage?.status === "grace_period" ||
-    currentPackage?.status === "expired";
+    currentPackage?.status === "grace_period"
+  );
 
   return (
     <div className="subscriber-billing-page">
       <header className="subscriber-billing-header">
-        <span>Subscriber billing</span>
-        <h1>My plan</h1>
-        <p>See your current package, settle outstanding invoices, and download your billing documents.</p>
+        <div className="subscriber-billing-header-content">
+          <span>Subscriber billing</span>
+          <h1>My plan</h1>
+          <p>{isSubscriptionExpired ? "See your previous package and access your invoices and receipts." : "Manage your subscription and access your billing documents."}</p>
+        </div>
       </header>
 
-      {cleanupWarning ? <div className="billing-expiry-warning">{cleanupWarning}</div> : null}
+      {cleanupWarning ? <section className="billing-expiry-warning billing-expired-summary" aria-labelledby="expired-subscription-heading"><div><span className="subscriber-status-badge is-expired">Subscription expired</span><h2 id="expired-subscription-heading">Your subscription has expired</h2><strong>{currentPackage?.name || "Previous package"}</strong>{currentPackage && Number.isFinite(currentPackage.price) ? <p className="billing-expired-package-price">{formatMoney(currentPackage.price, currentPackage.currency)} <i /> {formatBillingCycle(currentPackage.billingCycle)}</p> : null}<p>Select “Continue subscription” to choose a package and restore access to Connexa.</p></div><Link className="button button-primary" href="/account-settings/billing/plans?source=expired">Continue subscription</Link></section> : null}
       {message ? <p className="form-success">{message}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
 
-      <section className="subscriber-plan-card">
+      {!isSubscriptionExpired ? <section className="subscriber-plan-card subscriber-active-plan-card">
         <div className="subscriber-plan-topline">
           <div>
-            <span className="subscriber-section-label">Current package</span>
+            <span className="subscriber-section-label">Current plan</span>
             <h2>{currentPackage?.name ?? "No active package"}</h2>
             {currentPackage ? (
               <p>
@@ -209,6 +170,7 @@ export function AccountBillingManager({
                 {formatBillingCycle(currentPackage.billingCycle)}
               </p>
             ) : null}
+            {subscription?.nextBillingAtIso ? <p className="subscriber-plan-renewal">Expired on {formatDate(subscription.nextBillingAtIso)}</p> : subscription?.endsAtIso ? <p className="subscriber-plan-renewal">Ends on {formatDate(subscription.endsAtIso)}</p> : null}
           </div>
           {currentPackage ? (
             <span className={`subscriber-status-badge is-${currentPackage.status}`}>
@@ -216,18 +178,39 @@ export function AccountBillingManager({
             </span>
           ) : null}
         </div>
-        <div className="subscriber-summary-grid">
+        <div className="subscriber-active-plan-limits">
+          {limits.map((limit) => <SummaryStat key={limit.label} label={compactLimitLabel(limit.label)} value={limit.value} />)}
+        </div>
+        {canManage ? <div className="subscriber-active-plan-actions">
+          <Link className="button button-primary" href="/account-settings/billing/plans">Change plan</Link>
+          <Link className="button button-secondary" href="/account-settings/billing/plans">Manage subscription</Link>
+          <details className="subscriber-subscription-more">
+            <summary>More <span aria-hidden="true">⋯</span></summary>
+            <div>
+              <button
+                className="subscriber-subscription-cancel"
+                disabled={pending === "cancel" || !subscription?.autoRenew}
+                onClick={() => void cancelSubscription()}
+                type="button"
+              >
+                {pending === "cancel" ? "Updating..." : "Unsubscribe plan"}
+              </button>
+            </div>
+          </details>
+        </div> : null}
+      </section> : <section className="subscriber-plan-card subscriber-plan-card-compact" aria-label="Billing summary">
+        <div className="subscriber-summary-grid subscriber-summary-grid-compact">
           <SummaryStat label="Open invoices" value={String(overview.summary.openInvoices)} />
-          <SummaryStat
-            label="Outstanding"
-            value={formatMoney(
-              overview.summary.outstandingAmount,
-              currentPackage?.currency ?? "MYR"
-            )}
-          />
+          <SummaryStat label="Outstanding" value={formatMoney(overview.summary.outstandingAmount, currentPackage?.currency ?? "MYR")} />
           <SummaryStat label="Receipts ready" value={String(overview.summary.receiptsReady)} />
         </div>
-      </section>
+      </section>}
+
+      {!isSubscriptionExpired ? <section className="subscriber-billing-summary" aria-label="Billing summary">
+        <SummaryStat label="Open invoices" value={String(overview.summary.openInvoices)} />
+        <SummaryStat label="Outstanding" value={formatMoney(overview.summary.outstandingAmount, currentPackage?.currency ?? "MYR")} />
+        <SummaryStat label="Receipts ready" value={String(overview.summary.receiptsReady)} />
+      </section> : null}
 
       {showReminder ? <PaymentReminder overview={overview} /> : null}
 
@@ -236,6 +219,7 @@ export function AccountBillingManager({
           <div>
             <span className="subscriber-section-label">Documents</span>
             <h2>Invoices and receipts</h2>
+            <p>{isSubscriptionExpired ? "View and download your previous billing documents." : "View and download your billing documents."}</p>
           </div>
           <div className="subscriber-documents-tools">
             <span className="subscriber-document-count">
@@ -317,24 +301,29 @@ export function AccountBillingManager({
                       ) : (
                         null
                       )}
-                      {document.invoiceAvailable ? (
+                      {document.invoiceAvailable && document.receiptAvailable ? (
+                        <details className="subscriber-document-download-menu">
+                          <summary>Download</summary>
+                          <div>
+                            <a href={documentUrl(document.id, "invoice")}>Download invoice</a>
+                            <a href={documentUrl(document.id, "receipt")}>Download receipt</a>
+                          </div>
+                        </details>
+                      ) : document.invoiceAvailable ? (
                         <a
                           className="subscriber-action-secondary"
                           href={documentUrl(document.id, "invoice")}
                         >
                           Download invoice
                         </a>
-                      ) : null}
-                      {document.receiptAvailable ? (
+                      ) : document.receiptAvailable ? (
                         <a
                           className="subscriber-action-secondary"
                           href={documentUrl(document.id, "receipt")}
                         >
                           Download receipt
                         </a>
-                      ) : (
-                        null
-                      )}
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -342,7 +331,7 @@ export function AccountBillingManager({
               {!overview.documents.length ? (
                 <tr>
                   <td className="subscriber-empty-documents" colSpan={8}>
-                    No invoices or receipts have been issued yet.
+                    No invoices or receipts are available yet.
                   </td>
                 </tr>
               ) : null}
@@ -358,6 +347,7 @@ export function AccountBillingManager({
               value={overview.pagination.perPage}
               onChange={(event) => void loadOverview(1, Number(event.target.value))}
             >
+              <option value={5}>5</option>
               <option value={10}>10</option>
               <option value={20}>20</option>
               <option value={50}>50</option>
@@ -381,97 +371,50 @@ export function AccountBillingManager({
         </footer>
       </section>
 
-      <div className="subscriber-section-break">
-        <span className="subscriber-section-label">Workspace billing controls</span>
-        <h2>Billing settings and package controls</h2>
-        <p>Manage invoice contact details, package limits, and subscription actions in separate sections below.</p>
-      </div>
+      <AccountBillingSettingsCard />
 
-      {canManage ? <section className="content-card settings-dark-panel subscriber-settings-card subscriber-settings-section">
-        <div className="card-header settings-dark-panel-head">
-          <div>
-            <h3 className="card-title">Billing information</h3>
-            <p className="muted">Used as the billing source of truth for invoices, receipts, and payment confirmations.</p>
-          </div>
-        </div>
-        <form className="availability-settings-form" onSubmit={saveProfile}>
-          <div className="platform-settings-field-grid compact">
-            <label className="control-block">
-              <span className="control-label">Billing name / company name</span>
-              <input className="control-input" defaultValue={profile.billingName} name="billingName" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Billing Email</span>
-              <input className="control-input" defaultValue={profile.billingEmail} name="billingEmail" required type="email" />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Phone number</span>
-              <input className="control-input" defaultValue={profile.contactNumber} name="billingPhoneNumber" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Tax ID / SST number</span>
-              <input className="control-input" defaultValue={profile.taxNumber ?? ""} name="billingTaxId" />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Billing address line 1</span>
-              <input className="control-input" defaultValue={profile.billingAddress1} name="billingAddressLine1" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Billing address line 2</span>
-              <input className="control-input" defaultValue={profile.billingAddress2 ?? ""} name="billingAddressLine2" />
-            </label>
-            <label className="control-block">
-              <span className="control-label">City</span>
-              <input className="control-input" defaultValue={profile.billingCity} name="billingCity" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">State</span>
-              <input className="control-input" defaultValue={profile.billingState} name="billingState" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Postcode</span>
-              <input className="control-input" defaultValue={profile.billingPostcode} name="billingPostcode" pattern="[0-9]{5}" required />
-            </label>
-            <label className="control-block">
-              <span className="control-label">Country</span>
-              <input className="control-input" defaultValue={profile.billingCountry} name="billingCountry" required />
-            </label>
-          </div>
-          <div className="panel-row">
-            <button className="button button-primary" disabled={pending === "profile"} type="submit">
-              {pending === "profile" ? "Saving..." : "Save"}
-            </button>
-          </div>
-        </form>
-      </section> : null}
-
-      <section className="content-card settings-dark-panel subscriber-settings-card subscriber-settings-section">
-        <div className="card-header settings-dark-panel-head">
-          <div>
-            <h3 className="card-title">Package limits and controls</h3>
-            <p className="muted">Review package capacity or change the current subscription.</p>
-          </div>
-        </div>
-        <div className="billing-limit-grid">
-          {limits.map((limit) => <SummaryStat key={limit.label} label={limit.label} value={limit.value} />)}
-        </div>
-        {canManage ? (
-          <div className="panel-row">
-            <a className="button button-primary" href="#package-management">Upgrade plan</a>
-            <a className="button button-secondary" href="#package-management">Manage subscription</a>
-            <button
-              className="button button-secondary"
-              disabled={pending === "cancel" || !subscription?.autoRenew}
-              onClick={() => void cancelSubscription()}
-              type="button"
-            >
-              {pending === "cancel" ? "Updating..." : "Unsubscribe plan"}
-            </button>
-          </div>
-        ) : null}
-      </section>
     </div>
   );
+}
+
+export function AccountBillingSettingsCard() {
+  return <section className="subscriber-account-settings-card" aria-labelledby="account-billing-settings-heading">
+    <div className="subscriber-account-settings-intro">
+      <span className="subscriber-account-settings-icon" aria-hidden="true"><SettingsIcon /></span>
+      <div>
+        <h2 id="account-billing-settings-heading">Account and billing settings</h2>
+        <p>Manage your billing information and account settings.</p>
+      </div>
+    </div>
+    <nav aria-label="Account and billing settings" className="subscriber-account-settings-links">
+      <SettingsNavigationItem description="Update your billing information" href="/account-settings/billing/details" icon="billing" title="Manage billing details" />
+      <SettingsNavigationItem description="Manage your data and account" href="/account-settings/data-and-account" icon="account" title="Data and account" />
+    </nav>
+  </section>;
+}
+
+function SettingsNavigationItem({ description, href, icon, title }: { description: string; href: string; icon: "billing" | "account"; title: string }) {
+  return <Link className="subscriber-account-settings-link" href={href}>
+    <span className="subscriber-account-settings-item-icon" aria-hidden="true">{icon === "billing" ? <BillingDetailsIcon /> : <DataAndAccountIcon />}</span>
+    <span className="subscriber-account-settings-copy"><strong>{title}</strong><span>{description}</span></span>
+    <ChevronRightIcon />
+  </Link>;
+}
+
+function SettingsIcon() {
+  return <svg fill="none" height="20" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="20"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.12 2.12-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V20h-3v-.08A1.7 1.7 0 0 0 10.68 18.36a1.7 1.7 0 0 0-1.88.34l-.06.06-2.12-2.12.06-.06A1.7 1.7 0 0 0 7.02 14.7 1.7 1.7 0 0 0 5.46 13.67H5v-3h.08A1.7 1.7 0 0 0 6.64 9.64 1.7 1.7 0 0 0 6.3 7.76l-.06-.06 2.12-2.12.06.06a1.7 1.7 0 0 0 1.88.34A1.7 1.7 0 0 0 11.33 4.42V4h3v.08a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.12 2.12-.06.06a1.7 1.7 0 0 0-.34 1.88 1.7 1.7 0 0 0 1.56 1.03H20v3h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>;
+}
+
+function BillingDetailsIcon() {
+  return <svg fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="18"><rect height="16" rx="2" width="14" x="5" y="4" /><path d="M8 8h8M8 12h8M8 16h5" /></svg>;
+}
+
+function DataAndAccountIcon() {
+  return <svg fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" viewBox="0 0 24 24" width="18"><path d="M12 3 5 6v5c0 4.5 2.9 8.6 7 10 4.1-1.4 7-5.5 7-10V6l-7-3Z" /><path d="M9.5 12 11 13.5l3.5-3.5" /></svg>;
+}
+
+function ChevronRightIcon() {
+  return <svg aria-hidden="true" fill="none" height="18" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" viewBox="0 0 24 24" width="18"><path d="m9 18 6-6-6-6" /></svg>;
 }
 
 function SummaryStat({ label, value }: { label: string; value: string }) {
@@ -545,6 +488,16 @@ function formatMoney(amount: number, currency: string) {
 
 function formatBillingCycle(value: string) {
   return value.toUpperCase() === "YEARLY" ? "Every year" : "Every month";
+}
+
+function compactLimitLabel(label: string) {
+  const labels: Record<string, string> = {
+    "Maximum Channels": "Channels",
+    "Maximum Users": "Users",
+    "Maximum Message Flows": "Message flows",
+    "Message Quota": "Messages"
+  };
+  return labels[label] ?? label;
 }
 
 function formatStatus(value: string) {

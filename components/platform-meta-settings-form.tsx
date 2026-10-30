@@ -35,7 +35,7 @@ export function PlatformMetaSettingsForm({ initialValues }: PlatformMetaSettings
         metaAppId: String(formData.get("metaAppId") ?? ""),
         metaAppSecret: String(formData.get("metaAppSecret") ?? ""),
         metaConfigId: String(formData.get("metaConfigId") ?? ""),
-        metaGraphVersion: String(formData.get("metaGraphVersion") ?? "v23.0"),
+        metaGraphVersion: String(formData.get("metaGraphVersion") ?? "v26.0"),
         metaRedirectUri: String(formData.get("metaRedirectUri") ?? ""),
         metaWebhookVerifyToken: String(formData.get("metaWebhookVerifyToken") ?? "")
       })
@@ -62,7 +62,7 @@ export function PlatformMetaSettingsForm({ initialValues }: PlatformMetaSettings
           </span>
           <h3 className="card-title">Meta WhatsApp Embedded Signup</h3>
           <p className="muted">
-            Save the Facebook app, config, redirect, and webhook values here if you want to manage them in Connexa.
+            Save the Facebook app, config, optional redirect, and webhook values here if you want to manage them in Connexa.
             If the same values are already set in server environment variables, this screen is optional.
           </p>
         </div>
@@ -121,13 +121,13 @@ export function PlatformMetaSettingsForm({ initialValues }: PlatformMetaSettings
                   className="control-input"
                   defaultValue={initialValues.metaGraphVersion}
                   name="metaGraphVersion"
-                  placeholder="v23.0"
+                  placeholder="v26.0"
                   type="text"
                 />
               </label>
 
               <label className="control-block platform-settings-field-span-2">
-                <span className="control-label">Redirect URI</span>
+                <span className="control-label">Redirect URI (optional for the JavaScript SDK code flow)</span>
                 <input
                   className="control-input"
                   defaultValue={initialValues.metaRedirectUri}

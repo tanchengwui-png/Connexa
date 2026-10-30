@@ -214,3 +214,44 @@ export function CloseIcon(props: IconProps) {
     </BaseIcon>
   );
 }
+
+export function PlusIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </BaseIcon>
+  );
+}
+
+export function SyncIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M20 7h-5V2" />
+      <path d="M4 17h5v5" />
+      <path d="M18.4 17a8 8 0 0 1-13.1 1.7L4 17" />
+      <path d="M5.6 7A8 8 0 0 1 18.7 5.3L20 7" />
+    </BaseIcon>
+  );
+}
+
+export function DesktopAlertIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <rect height="13" rx="2" width="18" x="3" y="4" />
+      <path d="M8 21h8M12 17v4" />
+      <path d="M15.5 9.5a3.5 3.5 0 0 0-7 0c0 2-1 2.5-1 2.5h9s-1-.5-1-2.5Z" />
+    </BaseIcon>
+  );
+}
+
+export function IncognitoIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M3 11h18" />
+      <path d="m6 11 2-5h8l2 5" />
+      <circle cx="8" cy="15" r="3" />
+      <circle cx="16" cy="15" r="3" />
+      <path d="M11 15h2" />
+    </BaseIcon>
+  );
+}

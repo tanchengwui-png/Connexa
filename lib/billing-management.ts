@@ -19,6 +19,7 @@ import { sendEmail } from "@/lib/mail";
 import { addMalaysiaDays, getMalaysiaDateKey } from "@/lib/malaysia-time";
 import { getPlatformConfig, getPlatformSubscriptionConfig, getResolvedPlatformEmailConfig } from "@/lib/platform-config";
 import { getResolvedPublicPackageDefinition } from "@/lib/platform-packages";
+import { createBillingReminderManageUrl } from "@/lib/billing-reminder-link";
 
 const INVOICE_UPLOAD_DIR = path.join(process.cwd(), "public", "uploads", "invoices");
 const DOCUMENT_COMPANY_NAME = "Recurvos Connexa";
@@ -171,6 +172,7 @@ type ExpiryReminderCandidateRow = {
   nextBillingAt: Date | null;
   autoRenew: boolean;
   managerId: string | null;
+  managerAccountId: string | null;
   managerName: string | null;
   managerEmail: string | null;
   managerStatus: string | null;
@@ -186,6 +188,8 @@ type ExpiryReminderCandidate = {
   packageName: string;
   recipientName: string;
   recipientEmail: string;
+  recipientAgentId: string;
+  recipientAccountId: string | null;
   kind: ExpiryReminderKind;
   periodEnd: Date;
   startedAt: Date | null;
@@ -207,6 +211,7 @@ type ExpiryReminderEmailPayload = {
   renewalLabel: string | null;
   actionLabel: string;
   introLine: string;
+  nextStepCopy: string;
   panelTitle: string;
   summaryLines: string[];
 };
@@ -863,14 +868,11 @@ export async function listBillingHistory(workspaceId: string, page = 1, pageSize
 }
 
 export async function getBillingPageData(workspaceId: string, fallbackName: string, fallbackEmail: string) {
-  const [subscription, profile, history, config] = await Promise.all([
+  const [subscription, profile, history] = await Promise.all([
     getCurrentSubscriptionOverview(workspaceId),
     getBillingProfile(workspaceId),
-    listBillingHistory(workspaceId),
-    getPlatformSubscriptionConfig()
+    listBillingHistory(workspaceId)
   ]);
-  const expiredAt = subscription?.expiryDate ?? subscription?.endedAt ?? null;
-  const cleanupAt = expiredAt ? addDays(expiredAt, config.expiredAccountCleanupDays) : null;
 
   return {
     profile: profile ?? {
@@ -890,9 +892,7 @@ export async function getBillingPageData(workspaceId: string, fallbackName: stri
       updatedAt: new Date()
     },
     subscription,
-    history,
-    cleanupDays: config.expiredAccountCleanupDays,
-    cleanupAt
+    history
   };
 }
 
@@ -925,7 +925,7 @@ const BILLING_OVERVIEW_TIMEOUT_MS = Math.max(
 export async function getSubscriberBillingOverview(
   workspaceId: string,
   page = 1,
-  perPage = 20
+  perPage = 5
 ) {
   await Promise.all([
     ensureBillingManagementStore(),
@@ -956,6 +956,7 @@ export async function getSubscriberBillingOverview(
       `SELECT id, "invoiceNumber", "targetPlan", "currentPlan", "operationType", amount, currency, status, "createdAt", "updatedAt", "receiptNumber", "receiptIssuedAt"
        FROM "PendingWorkspacePackageUpgrade"
        WHERE "workspaceId" = $1
+         AND status <> 'PAID'
        ORDER BY "createdAt" DESC`,
       [workspaceId]
     )
@@ -1032,7 +1033,9 @@ export async function getSubscriberBillingOverview(
         row.status === "CANCELLED" ||
         row.status === "SUPERSEDED" ||
         row.status === "SCHEDULED" ||
-        row.status === "EXPIRED";
+        row.status === "EXPIRED" ||
+        row.status === "PAYMENT_EXPIRED" ||
+        row.status === "PAYMENT_REVIEW_REQUIRED";
       const processing = row.status === "PAYMENT_PROCESSING";
       const paid = row.status === "PAID";
       const status = inactive
@@ -1057,7 +1060,9 @@ export async function getSubscriberBillingOverview(
         total: toNumber(row.amount),
         balance: inactive || paid ? 0 : toNumber(row.amount),
         currency: row.currency ?? "MYR",
-        invoiceAvailable: true,
+        // A plan-change row is a checkout/payment request. The official invoice
+        // is created only after the payment succeeds.
+        invoiceAvailable: false,
         receiptAvailable: paid && Boolean(row.receiptNumber),
         paymentPending: processing,
         payable:
@@ -1136,7 +1141,7 @@ export async function getBillingPageDataForPage(
 export async function getSubscriberBillingOverviewForPage(
   workspaceId: string,
   page = 1,
-  perPage = 20,
+  perPage = 5,
   timeoutMs = BILLING_OVERVIEW_TIMEOUT_MS
 ): Promise<SubscriberBillingOverview> {
   const safePage = Math.max(1, Math.floor(page));
@@ -1189,9 +1194,7 @@ function buildBillingPageDataFallback(
       page: 1,
       pageSize: 10,
       total: 0
-    },
-    cleanupDays: 60,
-    cleanupAt: null
+    }
   };
 }
 
@@ -2097,6 +2100,7 @@ export async function sendSubscriptionExpiryReminderEmails(input?: {
   releaseEventImpl?: (eventKey: string) => Promise<void>;
   resolvePackageImpl?: (packageKey: ReturnType<typeof normalizeWorkspacePackageKey>) => Promise<ReminderPackageDefinition>;
   sendReminderEmailImpl?: (payload: ExpiryReminderEmailPayload) => Promise<void>;
+  createManageUrlImpl?: (candidate: ExpiryReminderCandidate) => string;
 }) {
   const isUsingDefaultStore =
     !input?.listCandidatesImpl ||
@@ -2115,6 +2119,7 @@ export async function sendSubscriptionExpiryReminderEmails(input?: {
   const releaseEvent = input?.releaseEventImpl ?? releaseEmailLogEvent;
   const resolvePackage = input?.resolvePackageImpl ?? getResolvedPublicPackageDefinition;
   const sendReminderEmail = input?.sendReminderEmailImpl ?? sendSubscriptionExpiryReminderEmail;
+  const createManageUrl = input?.createManageUrlImpl ?? createExpiryReminderManageUrl;
 
   let eligibleCount = 0;
   let sentCount = 0;
@@ -2149,7 +2154,7 @@ export async function sendSubscriptionExpiryReminderEmails(input?: {
       const packageDefinition = await resolvePackage(
         candidate.kind === "trial" ? "starter" : normalizeWorkspacePackageKey(candidate.packageCode)
       );
-      await sendReminderEmail(buildExpiryReminderEmailPayload(candidate, packageDefinition));
+      await sendReminderEmail(buildExpiryReminderEmailPayload(candidate, packageDefinition, createManageUrl));
       await markSent(eventKey);
       sentCount += 1;
     } catch (error) {
@@ -2174,28 +2179,6 @@ export async function sendSubscriptionExpiryReminderEmails(input?: {
   } satisfies SubscriptionExpiryReminderJobResult;
 }
 
-export async function cleanupExpiredWorkspaces() {
-  const config = await getPlatformSubscriptionConfig();
-  await ensureBillingManagementStore();
-  const rows = await queryMany<{ workspaceId: string }>(
-    `SELECT DISTINCT s."workspaceId"
-     FROM "WorkspacePackageSubscription" s
-     WHERE (
-       s.status = 'EXPIRED'
-       OR (s.status = 'TRIAL' AND s."trialEndsAt" IS NOT NULL AND s."trialEndsAt" <= NOW())
-       OR (s.status IN ('ACTIVE', 'PAST_DUE') AND s."nextBillingAt" IS NOT NULL AND s."nextBillingAt" <= NOW())
-     )
-     AND COALESCE(s."endedAt", s."trialEndsAt", s."nextBillingAt") <= NOW() - ($1::text || ' days')::interval`,
-    [config.expiredAccountCleanupDays]
-  );
-
-  for (const row of rows) {
-    await execute(`DELETE FROM "Workspace" WHERE id = $1`, [row.workspaceId]);
-  }
-
-  return { deletedWorkspaceCount: rows.length };
-}
-
 async function listSubscriptionExpiryReminderCandidates() {
   return queryMany<ExpiryReminderCandidateRow>(
     `SELECT
@@ -2215,6 +2198,7 @@ async function listSubscriptionExpiryReminderCandidates() {
         s."nextBillingAt",
         s."autoRenew",
         manager.id AS "managerId",
+        manager."accountId" AS "managerAccountId",
         manager.name AS "managerName",
         manager.email AS "managerEmail",
         manager.status AS "managerStatus"
@@ -2222,7 +2206,7 @@ async function listSubscriptionExpiryReminderCandidates() {
       INNER JOIN "Workspace" w ON w.id = s."workspaceId"
       INNER JOIN "Package" p ON p.id = s."packageId"
       LEFT JOIN LATERAL (
-        SELECT a.id, a.name, a.email, a.status
+        SELECT a.id, a."accountId", a.name, a.email, a.status
         FROM "Agent" a
         WHERE a."workspaceId" = w.id
           AND a.role = 'MANAGER'
@@ -2238,7 +2222,7 @@ async function listSubscriptionExpiryReminderCandidates() {
 function toExpiryReminderCandidate(row: ExpiryReminderCandidateRow, now: Date) {
   const recipientEmail = normalizeReminderEmail(row.managerEmail);
   const recipientName = row.managerName?.trim() || row.workspaceName.trim();
-  if (!recipientEmail || !recipientName) {
+  if (!recipientEmail || !recipientName || !row.managerId) {
     return null;
   }
 
@@ -2261,6 +2245,8 @@ function toExpiryReminderCandidate(row: ExpiryReminderCandidateRow, now: Date) {
     packageName: row.packageName,
     recipientName,
     recipientEmail,
+    recipientAgentId: row.managerId,
+    recipientAccountId: row.managerAccountId,
     kind,
     periodEnd,
     startedAt: row.startedAt,
@@ -2319,9 +2305,10 @@ function buildExpiryReminderEventKey(candidate: ExpiryReminderCandidate) {
 
 function buildExpiryReminderEmailPayload(
   candidate: ExpiryReminderCandidate,
-  packageDefinition: ReminderPackageDefinition
+  packageDefinition: ReminderPackageDefinition,
+  createManageUrl: (candidate: ExpiryReminderCandidate) => string
 ): ExpiryReminderEmailPayload {
-  const appUrl = `${getAppBaseUrl()}/account-settings/billing`;
+  const appUrl = createManageUrl(candidate);
   const benefits = (packageDefinition.features.length ? packageDefinition.features : packageDefinition.highlights)
     .slice(0, 4);
   const resolvedCurrency = candidate.currency ?? packageDefinition.currency ?? "MYR";
@@ -2352,6 +2339,7 @@ function buildExpiryReminderEmailPayload(
       renewalLabel: null,
       actionLabel: "Open Connexa",
       introLine: "Your free trial expires tomorrow. Upgrade to Starter to continue using Connexa without interruption.",
+      nextStepCopy: "To continue enjoying your workspace without interruption, please review your plan before the trial expiry date.",
       panelTitle: "Here's what you'll get with Starter",
       summaryLines: [
         `Free trial expiry: ${renewalLabel}`,
@@ -2362,7 +2350,6 @@ function buildExpiryReminderEmailPayload(
     };
   }
 
-  const renewsTomorrow = candidate.autoRenew;
   return {
     candidate,
     appUrl,
@@ -2372,31 +2359,36 @@ function buildExpiryReminderEmailPayload(
     startDateLabel: null,
     renewalLabel,
     actionLabel: "Open Connexa",
-    introLine: renewsTomorrow
-      ? `Your current ${escapeHtml(candidate.packageName)} plan renews tomorrow.`
-      : `Your current ${escapeHtml(candidate.packageName)} plan expires tomorrow.`,
+    introLine: `Your current ${escapeHtml(candidate.packageName)} plan expires tomorrow.`,
+    nextStepCopy: "To continue enjoying your benefits without interruption, please visit the Billing and Subscription page to renew your plan.",
     panelTitle: `Here's what you'll keep with ${candidate.packageName}`,
     summaryLines: [
       priceLabel ? `Current plan price: ${priceLabel}` : null,
       cycleLabel ? `Billing cycle: ${cycleLabel}` : null,
-      `${renewsTomorrow ? "Renews" : "Expires"}: ${renewalLabel}`
+      `Expires: ${renewalLabel}`
     ].filter(Boolean) as string[]
   };
+}
+
+function createExpiryReminderManageUrl(candidate: ExpiryReminderCandidate) {
+  return createBillingReminderManageUrl({
+    recipientAgentId: candidate.recipientAgentId,
+    recipientAccountId: candidate.recipientAccountId,
+    recipientEmail: candidate.recipientEmail,
+    workspaceId: candidate.workspaceId,
+    subscriptionId: candidate.subscriptionId
+  });
 }
 
 async function sendSubscriptionExpiryReminderEmail(payload: ExpiryReminderEmailPayload) {
   const { candidate } = payload;
   const logoPath = path.join(process.cwd(), "public", "recurvos_connexa_transparent.png");
   const expiryLabel = payload.renewalLabel ?? formatDate(candidate.periodEnd);
-  const expiryHeading = candidate.autoRenew && candidate.kind === "plan" ? "PLAN RENEWAL" : "PLAN EXPIRY";
+  const expiryHeading = "PLAN EXPIRY";
   const detailRows = [
     `Plan: ${candidate.packageName}`,
     payload.priceLabel ? `Current plan price: ${payload.priceLabel}` : null
   ].filter(Boolean) as string[];
-  const nextStepCopy =
-    candidate.kind === "trial"
-      ? "To continue enjoying your workspace without interruption, please review your plan before the trial expiry date."
-      : "To continue enjoying your benefits without interruption, please review your plan before the expiry date.";
   const bodyHtml = `
     <div style="margin:0 0 22px;padding:24px;border:1px solid rgba(45,212,191,0.28);border-radius:22px;background:linear-gradient(180deg,rgba(16,38,53,0.72),rgba(15,23,42,0.82));box-shadow:inset 0 0 0 1px rgba(34,211,238,0.06)">
       <div style="margin:0 0 8px;font-size:13px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#7debdc">${expiryHeading}</div>
@@ -2413,7 +2405,7 @@ async function sendSubscriptionExpiryReminderEmail(payload: ExpiryReminderEmailP
         .join("")}
     </div>
     <div style="margin:0 0 22px;padding:24px;border:1px solid rgba(148,163,184,0.24);border-radius:22px;background:linear-gradient(180deg,rgba(15,23,42,0.72),rgba(11,18,32,0.78))">
-      <div style="margin:0 0 18px;color:#e2e8f0;font-size:17px;line-height:1.6">${escapeHtml(nextStepCopy)}</div>
+      <div style="margin:0 0 18px;color:#e2e8f0;font-size:17px;line-height:1.6">${escapeHtml(payload.nextStepCopy)}</div>
       <p style="margin:0 0 4px">
         <a
           href="${payload.appUrl}"
@@ -2438,14 +2430,14 @@ async function sendSubscriptionExpiryReminderEmail(payload: ExpiryReminderEmailP
   const subject =
     candidate.kind === "trial"
       ? "Reminder: Your Connexa trial expires tomorrow"
-      : `Reminder: Your Connexa ${candidate.packageName} plan ${candidate.autoRenew ? "renews" : "expires"} tomorrow`;
+      : `Reminder: Your Connexa ${candidate.packageName} plan expires tomorrow`;
   const text = [
     payload.introLine.replace(/&[#A-Za-z0-9]+;/g, ""),
     "",
     `${expiryHeading}: ${expiryLabel}`,
     ...detailRows,
     "",
-    nextStepCopy,
+    payload.nextStepCopy,
     ...payload.benefits.map((benefit) => `- ${benefit}`),
     "",
     `Manage plan: ${payload.appUrl}`
@@ -2455,12 +2447,12 @@ async function sendSubscriptionExpiryReminderEmail(payload: ExpiryReminderEmailP
     preheader:
       candidate.kind === "trial"
         ? "Your Connexa free trial ends tomorrow. Continue with Starter without interruption."
-        : `Your ${candidate.packageName} plan ${candidate.autoRenew ? "renews" : "expires"} tomorrow.`,
+        : `Your ${candidate.packageName} plan expires tomorrow.`,
     eyebrow: candidate.kind === "trial" ? "Free trial reminder" : "Plan reminder",
     title:
       candidate.kind === "trial"
         ? "Your trial expires tomorrow"
-        : `Your ${candidate.packageName} plan ${candidate.autoRenew ? "renews" : "expires"} tomorrow`,
+        : `Your ${candidate.packageName} plan expires tomorrow`,
     intro: `Hi ${escapeHtml(candidate.recipientName)},`,
     logoSrc: "cid:connexa-logo",
     introHtml: `
@@ -2616,7 +2608,7 @@ function buildBusinessDocumentPdf(context: InvoiceDocumentContext) {
     contentWidth: page.width - page.margin * 2,
     headerTop: 36,
     headerGap: 26,
-    headerMetaWidth: 246,
+    headerMetaWidth: 248,
     topSectionGap: 14,
     sectionGap: 16
   };
@@ -2730,12 +2722,19 @@ type DocumentTableColumn = {
   align: "left" | "right" | "center";
 };
 
-const DOCUMENT_META_LABEL_WIDTH = 84;
-const DOCUMENT_META_LABEL_VALUE_GAP = 12;
-const DOCUMENT_SUMMARY_LABEL_WIDTH = 116;
-const DOCUMENT_SUMMARY_LABEL_VALUE_GAP = 12;
+const DOCUMENT_META_LABEL_WIDTH = 92;
+const DOCUMENT_META_LABEL_VALUE_GAP = 10;
+const DOCUMENT_META_PADDING = 16;
+const DOCUMENT_META_TITLE_LINE_HEIGHT = 34;
+const DOCUMENT_META_TITLE_DIVIDER_GAP = 14;
+const DOCUMENT_META_DIVIDER_ROWS_GAP = 18;
+const DOCUMENT_META_ROW_GAP = 14;
+const DOCUMENT_META_ROW_LINE_HEIGHT = 14;
+const DOCUMENT_SUMMARY_LABEL_WIDTH = 88;
+const DOCUMENT_SUMMARY_LABEL_VALUE_GAP = 10;
 const DOCUMENT_TABLE_HORIZONTAL_PADDING = 16;
 const DOCUMENT_TABLE_CELL_PADDING = 8;
+const DOCUMENT_MIN_IDENTIFIER_FONT_SIZE = 8.6;
 
 function getFixedColumns(totalWidth: number, definitions: Array<{ label: string; width: number; align: "left" | "right" | "center" }>) {
   let consumedWidth = 0;
@@ -2769,41 +2768,49 @@ function renderMetadataBox(
     colors: DocumentBoxColors;
   }
 ) {
-  const paddingX = 16;
+  const padding = DOCUMENT_META_PADDING;
   const labelWidth = DOCUMENT_META_LABEL_WIDTH;
   const labelValueGap = DOCUMENT_META_LABEL_VALUE_GAP;
-  const valueWidth = Math.max(96, input.width - paddingX * 2 - labelWidth - labelValueGap);
-  const labelX = input.x + paddingX;
+  const valueWidth = Math.max(96, input.width - padding * 2 - labelWidth - labelValueGap);
+  const labelX = input.x + padding;
   const valueRightX = labelX + labelWidth + labelValueGap + valueWidth;
-  const headingTop = input.top + 16;
-  const dividerTop = input.top + 64;
-  const rowStartTop = dividerTop + 20;
-  const rowHeights = input.rows.map((row) => {
-    const valueLines = wrapIdentifierText(row.value, valueWidth, 10.8);
-    return Math.max(28, valueLines.length * 14 + 8);
+  const headingTop = input.top + padding;
+  const dividerTop = headingTop + DOCUMENT_META_TITLE_LINE_HEIGHT + DOCUMENT_META_TITLE_DIVIDER_GAP;
+  const rowStartTop = dividerTop + DOCUMENT_META_DIVIDER_ROWS_GAP;
+  const rows = input.rows.map((row) => {
+    const valueFontSize = getIdentifierFontSize(row.value, valueWidth, 10.8);
+    const valueLines = wrapIdentifierText(row.value, valueWidth, valueFontSize);
+    return {
+      ...row,
+      valueFontSize,
+      valueLines,
+      height: Math.max(DOCUMENT_META_ROW_LINE_HEIGHT, valueLines.length * DOCUMENT_META_ROW_LINE_HEIGHT)
+    };
   });
-  const panelHeight = rowStartTop - input.top + rowHeights.reduce((sum, height) => sum + height, 0) + 12;
+  const detailsHeight = rows.reduce((height, row, index) => {
+    return height + row.height + (index < rows.length - 1 ? DOCUMENT_META_ROW_GAP : 0);
+  }, 0);
+  const panelHeight = rowStartTop - input.top + detailsHeight + padding;
   canvas.rect(input.x, input.top, input.width, panelHeight, input.colors.border);
-  canvas.text(input.title, input.x + input.width - paddingX, headingTop, {
+  canvas.text(input.title, input.x + input.width - padding, headingTop, {
     align: "right",
     font: "bold",
-    size: 34,
+    size: getIdentifierFontSize(input.title, input.width - padding * 2 - 8, 34, true, 28),
     color: input.colors.text
   });
-  canvas.line(input.x + paddingX, dividerTop, input.x + input.width - paddingX, dividerTop, input.colors.border);
+  canvas.line(input.x + padding, dividerTop, input.x + input.width - padding, dividerTop, input.colors.border);
 
   let rowTop = rowStartTop;
-  input.rows.forEach((row, index) => {
-    const valueLines = wrapIdentifierText(row.value, valueWidth, 10.8);
+  rows.forEach((row, index) => {
     canvas.text(row.label, labelX, rowTop, { size: 10.8, color: input.colors.label });
-    valueLines.forEach((line, lineIndex) => {
+    row.valueLines.forEach((line, lineIndex) => {
       canvas.text(line, valueRightX, rowTop + lineIndex * 14, {
-        size: 10.8,
+        size: row.valueFontSize,
         color: input.colors.text,
         align: "right"
       });
     });
-    rowTop += rowHeights[index] ?? 24;
+    rowTop += row.height + (index < rows.length - 1 ? DOCUMENT_META_ROW_GAP : 0);
   });
   return panelHeight;
 }
@@ -2821,24 +2828,74 @@ function renderInfoBox(
   }
 ) {
   canvas.rect(input.x, input.top, input.width, input.height, input.colors.border);
-  canvas.text(input.title, input.x + 18, input.top + 20, {
+  const paddingX = 18;
+  const labelWidth = 54;
+  const valueGap = 8;
+  const labelX = input.x + paddingX;
+  const valueX = labelX + labelWidth + valueGap;
+  const valueWidth = input.width - paddingX * 2 - labelWidth - valueGap;
+  canvas.text(input.title, labelX, input.top + 20, {
     font: "bold",
     size: 11.5,
     color: input.colors.label
   });
   let lineTop = input.top + 56;
+  let addressMode = false;
   input.lines.forEach((line, index) => {
-    const fontSize = index === 0 ? 12.5 : 10.8;
-    const wrappedLines = wrapText(line, input.width - 36, fontSize, index === 0);
+    if (index === 0) {
+      const wrappedLines = wrapText(line, input.width - paddingX * 2, 12.5, true);
+      wrappedLines.forEach((wrappedLine, wrappedIndex) => {
+        canvas.text(wrappedLine, labelX, lineTop + wrappedIndex * 15, {
+          size: 12.5,
+          color: input.colors.text,
+          font: "bold"
+        });
+      });
+      lineTop += wrappedLines.length * 15 + 4;
+      return;
+    }
+
+    const parsedLine = parseInfoLine(line, addressMode);
+    addressMode = parsedLine.isAddress || (addressMode && parsedLine.continuesAddress);
+    const parsedValueWidth =
+      parsedLine.label || parsedLine.continuesAddress ? valueWidth : input.width - paddingX * 2;
+    const wrappedLines = wrapText(parsedLine.value, parsedValueWidth, 10.8);
+    if (parsedLine.label) {
+      canvas.text(parsedLine.label, labelX, lineTop, {
+        size: 10.8,
+        color: input.colors.label
+      });
+    }
     wrappedLines.forEach((wrappedLine, wrappedIndex) => {
-      canvas.text(wrappedLine, input.x + 18, lineTop + wrappedIndex * 15, {
-        size: fontSize,
+      canvas.text(wrappedLine, parsedLine.label || parsedLine.continuesAddress ? valueX : labelX, lineTop + wrappedIndex * 15, {
+        size: 10.8,
         color: input.colors.text,
-        font: index === 0 ? "bold" : "regular"
+        font: "regular"
       });
     });
     lineTop += wrappedLines.length * 15 + 2;
   });
+}
+
+function parseInfoLine(line: string, addressMode: boolean) {
+  const separatorIndex = line.indexOf(":");
+  if (separatorIndex > 0) {
+    const label = line.slice(0, separatorIndex + 1);
+    const value = line.slice(separatorIndex + 1).trim() || "-";
+    return {
+      label,
+      value,
+      isAddress: label.toLowerCase() === "address:",
+      continuesAddress: false
+    };
+  }
+
+  return {
+    label: null,
+    value: line,
+    isAddress: false,
+    continuesAddress: addressMode
+  };
 }
 
 function renderSummaryBox(
@@ -2869,7 +2926,8 @@ function renderSummaryBox(
     const isReceiptStatus = row.label === "Payment Status";
     const isTotalRow = row.highlight;
     const valueText = row.text ?? formatMoney(row.amount ?? 0, input.currency);
-    const valueLines = wrapIdentifierText(valueText, valueWidth, 10.8, Boolean(isTotalRow));
+    const valueFontSize = getIdentifierFontSize(valueText, valueWidth, 10.8, Boolean(isTotalRow));
+    const valueLines = wrapIdentifierText(valueText, valueWidth, valueFontSize, Boolean(isTotalRow));
     canvas.text(row.label, labelX, rowTop, {
       size: 10.8,
       color: isTotalRow ? input.colors.text : input.colors.muted,
@@ -2877,7 +2935,7 @@ function renderSummaryBox(
     });
     valueLines.forEach((line, lineIndex) => {
       canvas.text(line, valueRightX, rowTop + lineIndex * 14, {
-        size: 10.8,
+        size: valueFontSize,
         color: input.colors.text,
         font: isTotalRow ? "bold" : "regular",
         align: "right"
@@ -2930,7 +2988,11 @@ function renderItemsTable(
     const amountLines = wrapIdentifierText(
       amountValue,
       columns[columns.length - 1].width - DOCUMENT_TABLE_CELL_PADDING * 2,
-      10.5
+      getIdentifierFontSize(
+        amountValue,
+        columns[columns.length - 1].width - DOCUMENT_TABLE_CELL_PADDING * 2,
+        10.5
+      )
     );
     return Math.max(30, Math.max(descriptionLines.length, amountLines.length) * 14 + 10);
   });
@@ -3019,7 +3081,9 @@ function renderItemsTable(
   canvas.line(startX, rowTop + 4, startX + totalWidth, rowTop + 4, input.colors.border);
   const totalLabel = input.type === "invoice" ? "Total" : "Total Received:";
   const totalText = formatMoney(input.items.reduce((sum, item) => sum + item.lineTotal, 0), input.currency);
-  const totalValueWidth = estimateTextWidth(totalText, 11.5, true);
+  const totalColumnWidth = columns[columns.length - 1].width - DOCUMENT_TABLE_CELL_PADDING * 2;
+  const totalFontSize = getIdentifierFontSize(totalText, totalColumnWidth, 11.5, true, 9);
+  const totalValueWidth = estimateTextWidth(totalText, totalFontSize, true);
   const totalAmountLeftX = lastColumnRightEdge - totalValueWidth;
   canvas.text(totalLabel, totalAmountLeftX - 12, rowTop + 24, {
     font: "bold",
@@ -3029,7 +3093,7 @@ function renderItemsTable(
   });
   canvas.text(totalText, lastColumnRightEdge, rowTop + 24, {
     font: "bold",
-    size: 11.5,
+    size: totalFontSize,
     color: input.colors.text,
     align: "right"
   });
@@ -3038,9 +3102,21 @@ function renderItemsTable(
 
 function measureInfoBoxHeight(lines: string[], width: number) {
   let contentHeight = 56;
+  const paddingX = 18;
+  const labelWidth = 54;
+  const valueGap = 8;
+  const valueWidth = width - paddingX * 2 - labelWidth - valueGap;
+  let addressMode = false;
   lines.forEach((line, index) => {
-    const fontSize = index === 0 ? 12.5 : 10.8;
-    const wrappedLines = wrapText(line, width - 36, fontSize, index === 0);
+    if (index === 0) {
+      const wrappedLines = wrapText(line, width - paddingX * 2, 12.5, true);
+      contentHeight += wrappedLines.length * 15 + 4;
+      return;
+    }
+
+    const parsedLine = parseInfoLine(line, addressMode);
+    addressMode = parsedLine.isAddress || (addressMode && parsedLine.continuesAddress);
+    const wrappedLines = wrapText(parsedLine.value, parsedLine.label || parsedLine.continuesAddress ? valueWidth : width - paddingX * 2, 10.8);
     contentHeight += wrappedLines.length * 15 + 2;
   });
   return Math.max(148, contentHeight + 8);
@@ -3051,7 +3127,8 @@ function measureSummaryBoxHeight(rows: DocumentAmountRow[], width: number, curre
   const valueWidth = width - 16 * 2 - DOCUMENT_SUMMARY_LABEL_WIDTH - DOCUMENT_SUMMARY_LABEL_VALUE_GAP;
   rows.forEach((row) => {
     const valueText = row.text ?? formatMoney(row.amount ?? 0, currency);
-    const valueLines = wrapIdentifierText(valueText, valueWidth, 10.8, Boolean(row.highlight));
+    const valueFontSize = getIdentifierFontSize(valueText, valueWidth, 10.8, Boolean(row.highlight));
+    const valueLines = wrapIdentifierText(valueText, valueWidth, valueFontSize, Boolean(row.highlight));
     contentHeight += Math.max(28, valueLines.length * 14 + 8);
   });
   return Math.max(148, contentHeight + 8);
@@ -3151,15 +3228,36 @@ function renderRightAlignedWrappedText(
     font?: "regular" | "bold";
   }
 ) {
-  const lines = wrapIdentifierText(value, maxWidth, options.size, options.font === "bold");
+  const fontSize = getIdentifierFontSize(value, maxWidth, options.size, options.font === "bold");
+  const lines = wrapIdentifierText(value, maxWidth, fontSize, options.font === "bold");
   lines.forEach((line, index) => {
     canvas.text(line, rightX, top + index * 14, {
-      size: options.size,
+      size: fontSize,
       color: options.color,
       font: options.font,
       align: "right"
     });
   });
+}
+
+function getIdentifierFontSize(
+  value: string,
+  maxWidth: number,
+  preferredSize: number,
+  isBold = false,
+  minSize = DOCUMENT_MIN_IDENTIFIER_FONT_SIZE
+) {
+  const normalized = value.trim();
+  if (!normalized) {
+    return preferredSize;
+  }
+
+  if (estimateTextWidth(normalized, preferredSize, isBold) <= maxWidth) {
+    return preferredSize;
+  }
+
+  const fittedSize = Math.floor((maxWidth / estimateTextWidth(normalized, 1, isBold)) * 10) / 10;
+  return Math.max(minSize, Math.min(preferredSize, fittedSize));
 }
 
 function formatDate(value: Date | null) {
@@ -3495,11 +3593,24 @@ function wrapIdentifierText(value: string, maxWidth: number, fontSize: number, i
     if (current) lines.push(current);
     return lines.flatMap((line) =>
       estimateTextWidth(line, fontSize, isBold) > maxWidth
-        ? splitLongToken(line, maxWidth, fontSize, isBold)
+        ? splitIdentifierToken(line, maxWidth, fontSize, isBold)
         : [line]
     );
   }
-  return splitLongToken(normalized, maxWidth, fontSize, isBold);
+  return splitIdentifierToken(normalized, maxWidth, fontSize, isBold);
+}
+
+function splitIdentifierToken(value: string, maxWidth: number, fontSize: number, isBold: boolean) {
+  if (estimateTextWidth(value, fontSize, isBold) <= maxWidth) {
+    return [value];
+  }
+
+  const maxCharacters = Math.max(10, Math.floor(maxWidth / Math.max(fontSize * (isBold ? 0.6 : 0.56), 1)));
+  const fragments: string[] = [];
+  for (let index = 0; index < value.length; index += maxCharacters) {
+    fragments.push(value.slice(index, index + maxCharacters));
+  }
+  return fragments;
 }
 
 function splitLongToken(value: string, maxWidth: number, fontSize: number, isBold: boolean) {

@@ -1,4 +1,6 @@
 import { DashboardTopbar } from "@/components/dashboard-topbar";
+import { DashboardHeaderOffset } from "@/components/dashboard-header-offset";
+import { WhatsAppAuthenticationNotice } from "@/components/whatsapp-authentication-notice";
 import { requireCurrentAgent } from "@/lib/auth/current-user";
 import {
   activateFreeTrialAfterVerification,
@@ -23,17 +25,28 @@ export async function DashboardShell({
     subscription?.status === "TRIAL" && currentPath !== "/account-settings/billing"
       ? await getSubscriberBillingOverviewForPage(agent.workspaceId, 1, 5)
       : null;
-  if (subscription?.isExpired && currentPath !== "/account-settings/billing") {
+  if (subscription?.isExpired && currentPath !== "/account-settings/billing" && currentPath !== "/account-settings") {
     redirect("/account-settings/billing?expired=1");
   }
   const isInboxLayout = currentPath === "/inbox";
+  const isOnboardingLayout = currentPath === "/onboarding";
   const trialInvoice = billingOverview?.documents.find((document) => document.source === "invoice" && document.payable) ?? null;
+  const inboxBillingReminder =
+    isInboxLayout && trialInvoice
+      ? {
+          href: "/account-settings/billing",
+          label: `Payment due in ${formatReminderTimeLeft(trialInvoice.dueDateIso)}`,
+          title: `Package payment is pending until ${formatReminderDateTime(trialInvoice.dueDateIso)}.`
+        }
+      : null;
 
   return (
-    <div className={`shell shell-topbar${isInboxLayout ? " shell-inbox" : ""}`}>
-      <DashboardTopbar currentPath={currentPath} />
+    <div className={`shell shell-topbar${isInboxLayout ? " shell-inbox" : ""}${isOnboardingLayout ? " shell-onboarding" : ""}`}>
+      <DashboardTopbar billingReminder={inboxBillingReminder} currentPath={currentPath} />
+      <DashboardHeaderOffset />
+      <WhatsAppAuthenticationNotice workspaceId={agent.workspaceId} />
       <main className={`app-main${isInboxLayout ? " app-main-inbox" : ""}`}>
-        {currentPath !== "/account-settings/billing" && billingOverview && billingOverview.summary.openInvoices > 0 && trialInvoice ? (
+        {!isInboxLayout && currentPath !== "/account-settings/billing" && billingOverview && billingOverview.summary.openInvoices > 0 && trialInvoice ? (
           <section className="subscriber-payment-reminder account-payment-reminder">
             <span className="subscriber-section-label">Account reminder</span>
             <div className="panel-row dashboard-payment-reminder-row">

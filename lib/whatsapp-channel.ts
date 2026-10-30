@@ -34,6 +34,16 @@ export type WorkspaceWhatsAppChannelStatus = {
   disconnectedAt: Date | null;
   lastSeenAt: Date | null;
   lastWebhookAt: Date | null;
+  latestHealthCheckAt: Date | null;
+  lastHealthyAt: Date | null;
+  runtimeDegradedAt: Date | null;
+  nextRecoveryAt: Date | null;
+  reauthRequiredAt: Date | null;
+  runtimeDesiredState: string;
+  runtimeHealthStatus: string;
+  consecutiveHealthFailures: number;
+  recoveryAttemptCount: number;
+  lastErrorCode: string | null;
   updatedAt: Date;
 };
 
@@ -195,6 +205,16 @@ function mapLegacyChannelRow(row: LegacyWhatsAppChannelRow) {
     disconnectedAt: row.disconnectedAt,
     lastSeenAt: row.lastSeenAt,
     lastWebhookAt: row.lastWebhookAt,
+    latestHealthCheckAt: null,
+    lastHealthyAt: null,
+    runtimeDegradedAt: null,
+    nextRecoveryAt: null,
+    reauthRequiredAt: null,
+    runtimeDesiredState: "STOPPED",
+    runtimeHealthStatus: "UNKNOWN",
+    consecutiveHealthFailures: 0,
+    recoveryAttemptCount: 0,
+    lastErrorCode: null,
     updatedAt: row.updatedAt,
     createdAt: row.createdAt
   };
@@ -304,6 +324,16 @@ function mapChannelStatus(
         disconnectedAt?: Date | null;
         lastSeenAt: Date | null;
         lastWebhookAt?: Date | null;
+        latestHealthCheckAt?: Date | null;
+        lastHealthyAt?: Date | null;
+        runtimeDegradedAt?: Date | null;
+        nextRecoveryAt?: Date | null;
+        reauthRequiredAt?: Date | null;
+        runtimeDesiredState?: string | null;
+        runtimeHealthStatus?: string | null;
+        consecutiveHealthFailures?: number | null;
+        recoveryAttemptCount?: number | null;
+        lastErrorCode?: string | null;
         updatedAt: Date;
       })
     | null
@@ -341,6 +371,16 @@ function mapChannelStatus(
     disconnectedAt: channel.disconnectedAt ?? null,
     lastSeenAt: channel.lastSeenAt,
     lastWebhookAt: channel.lastWebhookAt ?? null,
+    latestHealthCheckAt: channel.latestHealthCheckAt ?? null,
+    lastHealthyAt: channel.lastHealthyAt ?? null,
+    runtimeDegradedAt: channel.runtimeDegradedAt ?? null,
+    nextRecoveryAt: channel.nextRecoveryAt ?? null,
+    reauthRequiredAt: channel.reauthRequiredAt ?? null,
+    runtimeDesiredState: channel.runtimeDesiredState ?? "STOPPED",
+    runtimeHealthStatus: channel.runtimeHealthStatus ?? "UNKNOWN",
+    consecutiveHealthFailures: channel.consecutiveHealthFailures ?? 0,
+    recoveryAttemptCount: channel.recoveryAttemptCount ?? 0,
+    lastErrorCode: channel.lastErrorCode ?? null,
     updatedAt: channel.updatedAt
   } satisfies WorkspaceWhatsAppChannelStatus;
 }
@@ -699,15 +739,17 @@ export async function saveWhatsAppChannelConnection(input: SaveWhatsAppChannelCo
             .then((agent) => agent?.id ?? null)
         : null;
 
-  const existing =
-    (input.channelId
-      ? await prisma.whatsAppChannel.findFirst({
+  const selected = input.channelId
+    ? await prisma.whatsAppChannel.findFirst({
           where: {
             id: input.channelId,
             workspaceId: input.workspaceId
           }
         })
-      : null) ?? (await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId));
+    : null;
+  const existing = input.channelId
+    ? selected
+    : await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId);
 
   if (!existing) {
     return null;
@@ -738,6 +780,62 @@ export async function saveWhatsAppChannelConnection(input: SaveWhatsAppChannelCo
   });
 }
 
+export async function saveWhatsAppChannelConnectionIfSessionCurrent(
+  input: SaveWhatsAppChannelConnectionInput & {
+    channelId: string;
+    expectedSessionClientId: string;
+  }
+) {
+  const existing = await prisma.whatsAppChannel.findFirst({
+    where: {
+      id: input.channelId,
+      workspaceId: input.workspaceId,
+      sessionClientId: input.expectedSessionClientId
+    }
+  });
+  if (!existing) return null;
+
+  const connectedByAgentId =
+    input.agentId === undefined
+      ? undefined
+      : input.agentId
+        ? await prisma.agent
+            .findFirst({
+              where: { id: input.agentId, workspaceId: input.workspaceId },
+              select: { id: true }
+            })
+            .then((agent) => agent?.id ?? null)
+        : null;
+
+  const result = await prisma.whatsAppChannel.updateMany({
+    where: {
+      id: existing.id,
+      workspaceId: input.workspaceId,
+      sessionClientId: input.expectedSessionClientId
+    },
+    data: {
+      connectedByAgentId:
+        connectedByAgentId !== undefined ? connectedByAgentId : existing.connectedByAgentId,
+      connectionStatus: input.connectionStatus,
+      displayName:
+        input.displayName !== undefined
+          ? sanitizeWhatsAppChannelDisplayName(input.displayName)
+          : existing.displayName,
+      phoneNumber: input.phoneNumber !== undefined ? input.phoneNumber : existing.phoneNumber,
+      qrCodeDataUrl: input.qrCodeDataUrl !== undefined ? input.qrCodeDataUrl : existing.qrCodeDataUrl,
+      qrCodeUpdatedAt:
+        input.qrCodeUpdatedAt !== undefined ? input.qrCodeUpdatedAt : existing.qrCodeUpdatedAt,
+      lastError: input.lastError !== undefined ? input.lastError : existing.lastError,
+      connectedAt: input.connectedAt !== undefined ? input.connectedAt : existing.connectedAt,
+      provider: null,
+      channelType: "web",
+      lastSeenAt: new Date()
+    }
+  });
+
+  return result.count === 1 ? { id: existing.id } : null;
+}
+
 export async function saveWorkspaceWhatsAppChannelConnection(
   input: SaveWhatsAppChannelConnectionInput
 ) {
@@ -750,15 +848,17 @@ export async function clearWhatsAppChannelSession(input: {
   lastError?: string | null;
   authPath?: string | null;
 }) {
-  const existing =
-    (input.channelId
-      ? await prisma.whatsAppChannel.findFirst({
+  const selected = input.channelId
+    ? await prisma.whatsAppChannel.findFirst({
           where: {
             id: input.channelId,
             workspaceId: input.workspaceId
           }
         })
-      : null) ?? (await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId));
+    : null;
+  const existing = input.channelId
+    ? selected
+    : await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId);
 
   if (!existing) {
     if (input.authPath) {
@@ -800,15 +900,17 @@ export async function clearWorkspaceWhatsAppSession(
 export async function markWhatsAppChannelDisconnected(
   input: MarkWhatsAppChannelDisconnectedInput
 ) {
-  const existing =
-    (input.channelId
-      ? await prisma.whatsAppChannel.findFirst({
+  const selected = input.channelId
+    ? await prisma.whatsAppChannel.findFirst({
           where: {
             id: input.channelId,
             workspaceId: input.workspaceId
           }
         })
-      : null) ?? (await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId));
+    : null;
+  const existing = input.channelId
+    ? selected
+    : await ensureWorkspaceDefaultWhatsAppChannel(input.workspaceId);
 
   if (!existing) {
     return null;

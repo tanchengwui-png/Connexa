@@ -1,7 +1,8 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
 import {
   DEFAULT_BILLING_COUNTRY,
   getBillingDetailsErrorMessage,
@@ -9,6 +10,19 @@ import {
   type BillingDetailsErrors,
   validateBillingDetails
 } from "@/lib/billing-details";
+
+type RegisterFormControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
+
+export function findFirstInvalidFormControl(form: HTMLFormElement) {
+  return Array.from(form.elements).find(
+    (element): element is RegisterFormControl =>
+      (element instanceof HTMLInputElement ||
+        element instanceof HTMLSelectElement ||
+        element instanceof HTMLTextAreaElement) &&
+      element.willValidate &&
+      !element.checkValidity()
+  ) ?? null;
+}
 
 export function RegisterForm({
   selectedPlan,
@@ -20,14 +34,100 @@ export function RegisterForm({
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [confirmationOpen, setConfirmationOpen] = useState(false);
+  const [confirmationWorkspaceName, setConfirmationWorkspaceName] = useState("");
+  const [isCreating, setIsCreating] = useState(false);
   const [billingErrors, setBillingErrors] = useState<BillingDetailsErrors>({});
+  const pendingRegistrationRef = useRef<FormData | null>(null);
+  const isCreatingRef = useRef(false);
+  const submitButtonRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  useEffect(() => {
+    if (!confirmationOpen) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    cancelButtonRef.current?.focus();
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [confirmationOpen]);
+
+  useEffect(() => {
+    if (!confirmationOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (!isCreating) {
+          event.preventDefault();
+          closeConfirmation();
+        }
+        return;
+      }
+
+      if (event.key !== "Tab" || !dialogRef.current) {
+        return;
+      }
+
+      const focusableElements = getDialogFocusableElements(dialogRef.current);
+      if (!focusableElements.length) {
+        event.preventDefault();
+        return;
+      }
+
+      const firstElement = focusableElements[0];
+      const lastElement = focusableElements[focusableElements.length - 1];
+
+      if (event.shiftKey && document.activeElement === firstElement) {
+        event.preventDefault();
+        lastElement.focus();
+        return;
+      }
+
+      if (!event.shiftKey && document.activeElement === lastElement) {
+        event.preventDefault();
+        firstElement.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [confirmationOpen, isCreating]);
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setPending(true);
     setError(null);
+    const form = event.currentTarget;
+    const firstInvalidControl = findFirstInvalidFormControl(form);
 
-    const formData = new FormData(event.currentTarget);
+    if (firstInvalidControl) {
+      firstInvalidControl.scrollIntoView({
+        behavior: "smooth",
+        block: "center"
+      });
+      firstInvalidControl.focus();
+      firstInvalidControl.reportValidity();
+      return;
+    }
+
+    const formData = new FormData(form);
+    if (!validateRegistrationDetails(formData)) {
+      return;
+    }
+
+    pendingRegistrationRef.current = formData;
+    setConfirmationWorkspaceName(String(formData.get("workspaceName") ?? "").trim() || "this workspace");
+    setConfirmationOpen(true);
+  }
+
+  function validateRegistrationDetails(formData: FormData) {
     const password = String(formData.get("password") ?? "");
     const confirmPassword = String(formData.get("confirmPassword") ?? "");
     const billingDetails = normalizeBillingDetails({
@@ -47,15 +147,31 @@ export function RegisterForm({
 
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
-      setPending(false);
-      return;
+      return false;
     }
 
-    if (getBillingDetailsErrorMessage(nextBillingErrors)) {
-      setError(getBillingDetailsErrorMessage(nextBillingErrors));
-      setPending(false);
-      return;
+    const billingError = getBillingDetailsErrorMessage(nextBillingErrors);
+    if (billingError) {
+      setError(billingError);
+      return false;
     }
+
+    return true;
+  }
+
+  async function submitWorkspace(formData: FormData) {
+    const password = String(formData.get("password") ?? "");
+    const billingDetails = normalizeBillingDetails({
+      billingName: formData.get("billing_name"),
+      billingPhoneNumber: formData.get("billing_phone_number"),
+      billingAddressLine1: formData.get("billing_address_line_1"),
+      billingAddressLine2: formData.get("billing_address_line_2"),
+      billingCity: formData.get("billing_city"),
+      billingState: formData.get("billing_state"),
+      billingPostcode: formData.get("billing_postcode"),
+      billingCountry: formData.get("billing_country"),
+      billingTaxId: formData.get("billing_tax_id")
+    });
 
     const response = await fetch("/api/auth/register", {
       method: "POST",
@@ -74,18 +190,113 @@ export function RegisterForm({
       })
     });
 
-    const data = (await response.json()) as { error?: string };
+    const data = (await response.json().catch(() => null)) as { error?: string } | null;
 
     if (!response.ok) {
-      setError(data.error ?? "Unable to create workspace.");
-      setPending(false);
-      return;
+      throw new Error(data?.error ?? "Unable to create workspace. Please try again.");
     }
 
     setBillingErrors({});
     router.push("/verify-email");
     router.refresh();
   }
+
+  async function confirmWorkspaceCreation() {
+    if (isCreatingRef.current) return;
+
+    const formData = pendingRegistrationRef.current;
+    if (!formData) {
+      setError("Your registration details are no longer available. Go back and submit the form again.");
+      return;
+    }
+
+    try {
+      isCreatingRef.current = true;
+      setIsCreating(true);
+      setPending(true);
+      setError(null);
+      await submitWorkspace(formData);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Unable to create workspace. Please try again.");
+    } finally {
+      isCreatingRef.current = false;
+      setIsCreating(false);
+      setPending(false);
+    }
+  }
+
+  function closeConfirmation() {
+    if (isCreatingRef.current) {
+      return;
+    }
+
+    pendingRegistrationRef.current = null;
+    setError(null);
+    setConfirmationOpen(false);
+    submitButtonRef.current?.focus();
+  }
+
+  function handleDialogKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Enter") {
+      event.stopPropagation();
+    }
+  }
+
+  const confirmationDialog = confirmationOpen ? (
+    <div className="payment-confirmation-overlay" onClick={closeConfirmation}>
+      <div
+        aria-describedby="register-confirmation-description"
+        aria-labelledby="register-confirmation-title"
+        aria-modal="true"
+        className="payment-confirmation-dialog"
+        onClick={(event) => event.stopPropagation()}
+        onKeyDown={handleDialogKeyDown}
+        ref={dialogRef}
+        role="dialog"
+      >
+        <div className="payment-confirmation-header">
+          <h2 id="register-confirmation-title">Create this workspace?</h2>
+          <button
+            aria-label="Close confirmation"
+            className="payment-confirmation-close"
+            disabled={isCreating}
+            onClick={closeConfirmation}
+            type="button"
+          >
+            ×
+          </button>
+        </div>
+        <p className="payment-confirmation-description" id="register-confirmation-description">
+          You’re about to create {confirmationWorkspaceName}. Please confirm that your workspace and billing details are
+          correct.
+        </p>
+        {error ? (
+          <p className="payment-confirmation-error" role="alert">
+            {error}
+          </p>
+        ) : null}
+        <div className="payment-confirmation-actions">
+          <button
+            className="button button-secondary payment-confirmation-secondary"
+            disabled={isCreating}
+            onClick={closeConfirmation}
+            ref={cancelButtonRef}
+            type="button"
+          >
+            Go back
+          </button>
+          <button
+            className="button button-primary payment-confirmation-primary"
+            disabled={isCreating}
+            onClick={() => void confirmWorkspaceCreation()}
+            type="button"
+          >
+            {isCreating ? "Creating workspace…" : error ? "Try again" : "Create workspace"}
+          </button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <form autoComplete="off" className="auth-form" onSubmit={handleSubmit}>
@@ -98,12 +309,12 @@ export function RegisterForm({
 
       <label className="control-block">
         <span className="control-label">Your name</span>
-        <input autoComplete="off" className="control-input" name="name" placeholder="Farid Rahman" type="text" />
+        <input autoComplete="off" className="control-input" name="name" placeholder="Farid Rahman" required type="text" />
       </label>
 
       <label className="control-block">
         <span className="control-label">Work email</span>
-        <input autoComplete="off" className="control-input" name="email" placeholder="you@company.com" type="email" />
+        <input autoComplete="off" className="control-input" name="email" placeholder="you@company.com" required type="email" />
       </label>
 
       <label className="control-block">
@@ -113,6 +324,7 @@ export function RegisterForm({
           autoComplete="off"
           name="workspaceName"
           placeholder="Serene Peak Realty"
+          required
           type="text"
         />
       </label>
@@ -124,6 +336,7 @@ export function RegisterForm({
           autoComplete="off"
           name="password"
           placeholder="Create a password"
+          required
           type="password"
         />
       </label>
@@ -135,6 +348,7 @@ export function RegisterForm({
           autoComplete="off"
           name="confirmPassword"
           placeholder="Repeat your password"
+          required
           type="password"
         />
       </label>
@@ -264,9 +478,13 @@ export function RegisterForm({
 
       {error ? <p className="muted">{error}</p> : null}
 
-      <button className="button button-primary auth-submit" disabled={pending} type="submit">
-        {pending ? "Creating workspace..." : "Create workspace"}
+      <button className="button button-primary auth-submit" disabled={pending} ref={submitButtonRef} type="submit">
+        {pending ? "Creating workspace…" : "Create workspace"}
       </button>
+
+      {confirmationDialog && typeof document !== "undefined"
+        ? createPortal(confirmationDialog, document.body)
+        : null}
     </form>
   );
 
@@ -280,4 +498,12 @@ export function RegisterForm({
       return next;
     });
   }
+}
+
+function getDialogFocusableElements(dialog: HTMLElement) {
+  return Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter((element) => !element.hasAttribute("disabled") && element.tabIndex !== -1);
 }

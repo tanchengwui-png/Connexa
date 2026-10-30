@@ -24,6 +24,7 @@ type ServiceWorkerDisplayPayload = {
 };
 
 const ONBOARDING_NOT_NOW_PREFIX = "connexa.inboxDesktopNotificationsNotNow";
+const DESKTOP_NOTIFICATIONS_DISABLED_PREFIX = "connexa.inboxDesktopNotificationsDisabled";
 
 function canUseServiceWorker() {
   return typeof window !== "undefined" && "serviceWorker" in navigator;
@@ -58,6 +59,46 @@ export function getBrowserPushPermissionState(): BrowserPushPermissionState {
 
 export function buildInboxDesktopNotificationsNotNowKey(scope: InboxNotificationScope) {
   return `${ONBOARDING_NOT_NOW_PREFIX}:${scope.workspaceId}:${scope.agentId}`;
+}
+
+export function buildInboxDesktopNotificationsDisabledKey(scope: InboxNotificationScope) {
+  return `${DESKTOP_NOTIFICATIONS_DISABLED_PREFIX}:${scope.workspaceId}:${scope.agentId}`;
+}
+
+export function readInboxDesktopNotificationsDisabled(scope: InboxNotificationScope) {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  try {
+    return window.localStorage.getItem(buildInboxDesktopNotificationsDisabledKey(scope)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+export function persistInboxDesktopNotificationsDisabled(scope: InboxNotificationScope) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(buildInboxDesktopNotificationsDisabledKey(scope), "true");
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+export function clearInboxDesktopNotificationsDisabled(scope: InboxNotificationScope) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(buildInboxDesktopNotificationsDisabledKey(scope));
+  } catch {
+    // Ignore storage failures.
+  }
 }
 
 export function readInboxDesktopNotificationsNotNow(scope: InboxNotificationScope) {

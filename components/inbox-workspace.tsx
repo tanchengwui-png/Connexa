@@ -6,19 +6,34 @@ import { PortalDropdown } from "@/components/inbox/portal-dropdown";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/toast-provider";
 import { InboxDetailPanel } from "@/components/inbox/detail-panel";
-import { ChevronLeftIcon, MuteIcon, VolumeIcon } from "@/components/inbox/icons";
+import {
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  DesktopAlertIcon,
+  IncognitoIcon,
+  MuteIcon,
+  PlusIcon,
+  VolumeIcon
+} from "@/components/inbox/icons";
 import { NewConversationDialog } from "@/components/inbox/new-conversation-dialog";
 import { InboxQueuePanel } from "@/components/inbox/queue-panel";
+import { InboxStatusStrip } from "@/components/inbox/status-strip";
 import { SimulateInboundDialog } from "@/components/inbox/simulate-inbound-dialog";
 import { SnoozeDialog } from "@/components/inbox/snooze-dialog";
 import { InboxThreadPanel } from "@/components/inbox/thread-panel";
 import { normalizeInboxSelectedConversation } from "@/lib/inbox-message-normalization";
+import {
+  buildInboxHrefWithConversation,
+  buildInboxHrefWithoutConversation,
+  isCurrentInboxConversationResponse
+} from "@/lib/inbox-selection";
 import { useInboxBrowserNotifications } from "@/lib/use-inbox-browser-notifications";
 import { useInboxNotificationSoundPreference } from "@/lib/use-inbox-notification-sound-preference";
 import type {
   InboxAgent,
   InboxComposerAttachment,
   InboxConversation,
+  InboxConversationPage,
   InboxContactTag,
   InboxCustomFilter,
   InboxFilterCounts,
@@ -36,6 +51,7 @@ import type {
 
 type InboxWorkspaceProps = {
   conversations: InboxConversation[];
+  conversationPage: InboxConversationPage;
   contactTags: InboxContactTag[];
   quickReplies: InboxQuickReply[];
   mediaAssets: InboxMediaAsset[];
@@ -48,6 +64,7 @@ type InboxWorkspaceProps = {
 };
 
 const INBOX_NOTIFICATION_EVENT = "connexa:inbox-notification";
+const RECENT_CONVERSATION_CACHE_SIZE = 8;
 
 type InboxAckEvent = {
   workspaceId: string;
@@ -88,6 +105,7 @@ type InboxChatStateEvent = {
 const PRIMARY_TOOLBAR_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
   { key: "all", label: "All" },
   { key: "mine", label: "Mine" },
+  { key: "groups", label: "Groups" },
   { key: "unread", label: "Unread" },
   { key: "snoozed", label: "Snoozed" },
   { key: "assigned-others", label: "Assigned to others" },
@@ -97,6 +115,7 @@ const PRIMARY_TOOLBAR_FILTERS: Array<{ key: InboxFilterKey; label: string }> = [
 
 export function InboxWorkspace({
   conversations,
+  conversationPage,
   contactTags,
   quickReplies,
   mediaAssets,
@@ -109,8 +128,12 @@ export function InboxWorkspace({
 }: InboxWorkspaceProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const routeConversationId = searchParams?.get("conversationId") ?? null;
   const toast = useToast();
   const [liveConversations, setLiveConversations] = useState(conversations);
+  const [liveConversationPage, setLiveConversationPage] = useState(conversationPage);
+  const [isLoadingMoreConversations, setIsLoadingMoreConversations] = useState(false);
+  const [liveWhatsApp, setLiveWhatsApp] = useState(whatsapp);
   const [liveSelectedConversation, setLiveSelectedConversation] = useState(() =>
     normalizeInboxSelectedConversation(selectedConversation)
   );
@@ -120,6 +143,7 @@ export function InboxWorkspace({
   const [mentionCandidates, setMentionCandidates] = useState<InboxMentionCandidate[]>([]);
   const [selectedMentions, setSelectedMentions] = useState<InboxSelectedMention[]>([]);
   const [selectedAttachments, setSelectedAttachments] = useState<InboxComposerAttachment[]>([]);
+  const [recordedVoiceNote, setRecordedVoiceNote] = useState<File | null>(null);
   const [replyToMessageId, setReplyToMessageId] = useState<string | null>(null);
   const [pendingDeleteMessageId, setPendingDeleteMessageId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,11 +154,12 @@ export function InboxWorkspace({
   const [isNewConversationOpen, setIsNewConversationOpen] = useState(false);
   const [isSnoozeDialogOpen, setIsSnoozeDialogOpen] = useState(false);
   const [isPending, startTransition] = useTransition();
-  const [isRoutingPending, startRoutingTransition] = useTransition();
   const [pendingConversationId, setPendingConversationId] = useState<string | null>(null);
   const [hasHydrated, setHasHydrated] = useState(false);
   const [isDetailsVisible, setIsDetailsVisible] = useState(true);
+  const [isQueueVisible, setIsQueueVisible] = useState(true);
   const toolbarFilterButtonRef = useRef<HTMLButtonElement | null>(null);
+  const activeSendIdempotencyKeyRef = useRef<string | null>(null);
   const [isToolbarFilterOpen, setIsToolbarFilterOpen] = useState(false);
   const [isNotificationSoundPreferencePending, setIsNotificationSoundPreferencePending] = useState(false);
   const [channelStates, setChannelStates] = useState(
@@ -159,13 +184,12 @@ export function InboxWorkspace({
     permissionState: inboxDesktopPermissionState,
     pushEnabled: isInboxDesktopPushEnabled,
     subscriptionCount: inboxDesktopSubscriptionCount,
+    isLocallyDisabled: areInboxDesktopNotificationsDisabled,
     isPending: isInboxDesktopNotificationsPending,
     error: inboxDesktopNotificationsError,
-    shouldShowPrompt: shouldShowInboxDesktopNotificationsPrompt,
     setMuted: setInboxDesktopNotificationsMuted,
     enableDesktopNotifications,
-    dismissDesktopNotificationsForNow,
-    dismissDesktopNotificationsPromptPermanently
+    disableDesktopNotifications
   } = useInboxBrowserNotifications({
     agentId: currentAgent.id,
     workspaceId: currentAgent.workspaceId,
@@ -177,13 +201,17 @@ export function InboxWorkspace({
     key: string;
     promise: Promise<InboxConversation[] | null>;
   } | null>(null);
+  const conversationListEtagRef = useRef<string | null>(null);
   const selectedConversationAbortRef = useRef<AbortController | null>(null);
+  const selectedConversationCacheRef = useRef(new Map<string, NonNullable<InboxSelectedConversation>>());
+  const routeConversationIdRef = useRef(routeConversationId);
+  const inboxUsableTimingReportedRef = useRef(false);
   const hasDisconnectedWhatsAppSession =
-    whatsapp.mode !== "mock" &&
-    (whatsapp.runtimeStatus === "DISCONNECTED" || whatsapp.runtimeStatus === "AUTH_FAILED");
-  const isWhatsAppReady = whatsapp.isConfigured && !hasDisconnectedWhatsAppSession;
+    liveWhatsApp.mode !== "mock" &&
+    (liveWhatsApp.runtimeStatus === "DISCONNECTED" || liveWhatsApp.runtimeStatus === "AUTH_FAILED");
+  const isWhatsAppReady = liveWhatsApp.isConfigured && !hasDisconnectedWhatsAppSession;
   const inboxConnectionLabel =
-    whatsapp.mode === "mock"
+    liveWhatsApp.mode === "mock"
       ? "Mock mode"
       : hasDisconnectedWhatsAppSession
         ? "Connection lost"
@@ -191,26 +219,57 @@ export function InboxWorkspace({
           ? "Connected"
           : "Setup needed";
   const inboxConnectionMeta =
-    whatsapp.mode === "mock"
+    liveWhatsApp.mode === "mock"
       ? "Automation replies are simulated locally"
       : hasDisconnectedWhatsAppSession
         ? "Session is disconnected. Existing conversations stay visible until you relink WhatsApp."
-        : `Phone ID ${whatsapp.phoneNumberId ?? "Not set"}`;
+        : `Phone ID ${liveWhatsApp.phoneNumberId ?? "Not set"}`;
   const inboxWhatsAppWarning = hasDisconnectedWhatsAppSession
-    ? whatsapp.runtimeStatus === "AUTH_FAILED"
+    ? liveWhatsApp.runtimeStatus === "AUTH_FAILED"
       ? "WhatsApp session failed authentication. Existing conversations remain visible, but sending and sync are paused until you reconnect."
       : "WhatsApp session ended on the linked phone. Existing conversations remain visible, but sending and sync are paused until you reconnect."
     : null;
+  const inboxSenderWarning = liveWhatsApp.mode !== "mock" && !liveWhatsApp.senderReachable
+    ? "Connexa cannot currently reach the WhatsApp sender service. The last saved WhatsApp connection state is shown; this does not confirm that the phone session disconnected."
+    : null;
 
-  const activeConversationId = liveSelectedConversation?.id ?? liveConversations[0]?.id ?? null;
+  const activeConversationId = routeConversationId;
+  const activeConversation =
+    liveSelectedConversation?.id === activeConversationId ? liveSelectedConversation : null;
+  const shouldShowHistoryStatus =
+    (liveWhatsApp.mode !== "mock" &&
+      liveWhatsApp.channels.some((channel) => channel.connectionMethod === "web")) ||
+    liveWhatsApp.historySyncActive ||
+    liveWhatsApp.historySyncPhase === "deferred" ||
+    liveWhatsApp.historySyncPhase === "error" ||
+    liveWhatsApp.historySyncPhase === "disconnected";
+  const inboxDesktopNotificationsEnabled =
+    inboxDesktopPermissionState === "granted" &&
+    !areInboxDesktopNotificationsDisabled &&
+    (!isInboxDesktopPushEnabled || inboxDesktopSubscriptionCount > 0);
+  const inboxDesktopNotificationsUnavailable =
+    inboxDesktopPermissionState === "unsupported" || inboxDesktopPermissionState === "insecure";
+  const inboxDesktopNotificationsBlocked = inboxDesktopPermissionState === "denied";
+  const inboxDesktopNotificationsButtonLabel = isInboxDesktopNotificationsPending
+    ? "Saving..."
+    : inboxDesktopNotificationsEnabled
+      ? "Desktop alerts on"
+      : inboxDesktopNotificationsBlocked
+        ? "Desktop alerts blocked"
+        : inboxDesktopNotificationsUnavailable
+          ? "Desktop alerts unavailable"
+          : "Desktop alerts off";
   const selectedChannelId = searchParams?.get("channelId") ?? null;
   const currentSearchParams = searchParams?.toString() ?? "";
-  const singleWorkspaceChannel = whatsapp.channels.length === 1 ? whatsapp.channels[0] : null;
-  const incognitoTargetChannelId = selectedChannelId ?? singleWorkspaceChannel?.id ?? null;
   const activeConversationChannelId =
-    liveSelectedConversation?.channelId ??
+    activeConversation?.channelId ??
     liveConversations.find((conversation) => conversation.id === activeConversationId)?.channelId ??
     null;
+  const personalWhatsAppChannels = whatsapp.channels.filter((channel) => channel.connectionMethod === "web");
+  const singlePersonalWhatsAppChannel =
+    personalWhatsAppChannels.length === 1 ? personalWhatsAppChannels[0] : null;
+  const incognitoTargetChannelId =
+    selectedChannelId ?? activeConversationChannelId ?? singlePersonalWhatsAppChannel?.id ?? null;
   const selectedChannelState = incognitoTargetChannelId ? channelStates.get(incognitoTargetChannelId) ?? null : null;
   const selectedChannelSupportsIncognito = selectedChannelState?.connectionMethod === "web";
   const eligibleNewConversationChannels = whatsapp.channels.filter(
@@ -238,12 +297,31 @@ export function InboxWorkspace({
     () => mergeWorkspaceContactTags(liveContactTags, liveConversations),
     [liveContactTags, liveConversations]
   );
+
+  useEffect(() => {
+    if (!incognitoTargetChannelId || !isWhatsAppReady || inboxUsableTimingReportedRef.current) return;
+    inboxUsableTimingReportedRef.current = true;
+    const timingKey = `connexa:whatsapp-inbox-usable:${incognitoTargetChannelId}`;
+    if (window.sessionStorage.getItem(timingKey)) return;
+    window.sessionStorage.setItem(timingKey, "1");
+
+    void fetch("/api/settings/whatsapp/timing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        channelId: incognitoTargetChannelId,
+        eventType: "INBOX_USABLE",
+        observedAt: new Date().toISOString()
+      }),
+      keepalive: true
+    }).catch(() => null);
+  }, [incognitoTargetChannelId, isWhatsAppReady]);
   const activeCustomFilter = useMemo(
     () => customFilters.find((item) => item.key === filter) ?? null,
     [customFilters, filter]
   );
 
-  const refreshConversationList = async () => {
+  const refreshConversationList = async (options: { suppressNotifications?: boolean } = {}) => {
     const params = new URLSearchParams();
     if (selectedChannelId) {
       params.set("channelId", selectedChannelId);
@@ -257,25 +335,44 @@ export function InboxWorkspace({
     const refreshRequest = (async () => {
       const response = await fetch(requestPath, {
         method: "GET",
-        cache: "no-store"
+        cache: "no-store",
+        headers: conversationListEtagRef.current
+          ? { "if-none-match": conversationListEtagRef.current }
+          : undefined
       });
+
+      if (response.status === 304) {
+        return liveConversationsRef.current;
+      }
 
       if (!response.ok) {
         return null;
       }
 
       const payload = (await response.json().catch(() => null)) as
-        | { conversations?: InboxConversation[] }
+        | {
+            conversations?: InboxConversation[];
+            page?: InboxConversationPage;
+          }
         | null;
 
       if (!payload?.conversations) {
         return null;
       }
 
-      const nextConversations = sortConversationsByRecent(payload.conversations);
-      publishIncomingConversationNotifications(liveConversationsRef.current, nextConversations);
+      conversationListEtagRef.current = response.headers.get("etag");
+      const nextConversations = mergeConversationPages(
+        payload.conversations,
+        liveConversationsRef.current
+      );
+      if (!options.suppressNotifications) {
+        publishIncomingConversationNotifications(liveConversationsRef.current, nextConversations);
+      }
       liveConversationsRef.current = nextConversations;
       setLiveConversations(nextConversations);
+      if (payload.page) {
+        setLiveConversationPage(payload.page);
+      }
       return nextConversations;
     })();
 
@@ -296,10 +393,109 @@ export function InboxWorkspace({
     return refreshRequest;
   };
 
+  const loadMoreConversations = async () => {
+    if (!liveConversationPage.hasMore || !liveConversationPage.nextCursor || isLoadingMoreConversations) {
+      return;
+    }
+    setIsLoadingMoreConversations(true);
+    try {
+      const params = new URLSearchParams({ cursor: liveConversationPage.nextCursor, limit: "50" });
+      if (selectedChannelId) params.set("channelId", selectedChannelId);
+      const response = await fetch(`/api/conversations?${params.toString()}`, {
+        method: "GET",
+        cache: "no-store"
+      });
+      if (!response.ok) return;
+      const payload = (await response.json().catch(() => null)) as
+        | {
+            conversations?: InboxConversation[];
+            page?: InboxConversationPage;
+          }
+        | null;
+      if (!payload?.conversations || !payload.page) return;
+      const nextConversations = mergeConversationPages(
+        liveConversationsRef.current,
+        payload.conversations
+      );
+      liveConversationsRef.current = nextConversations;
+      setLiveConversations(nextConversations);
+      setLiveConversationPage(payload.page);
+    } finally {
+      setIsLoadingMoreConversations(false);
+    }
+  };
+
+  const refreshHistorySyncStatus = async () => {
+    const response = await fetch("/api/inbox/history-sync-status", {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (!response.ok) return null;
+    const payload = (await response.json().catch(() => null)) as
+      | {
+          channels?: Array<{
+            channelId: string;
+            runtimeStatus: string;
+            phase: InboxWhatsAppStatus["historySyncPhase"];
+            active: boolean;
+            isCaughtUp: boolean;
+            startedAt: string | null;
+            progressAt: string | null;
+            lastSuccessfulSyncAt: string | null;
+            nextReconciliationAt: string | null;
+            totalChats: number | null;
+            processedChats: number;
+            remainingChats: number;
+            deferredChats: number;
+            newMessages: number;
+            lastError: string | null;
+          }>;
+        }
+      | null;
+    const statuses = payload?.channels ?? [];
+    const preferredChannelId = selectedChannelId ?? activeConversationChannelId;
+    const status =
+      statuses.find((item) => item.channelId === preferredChannelId) ??
+      statuses.find((item) => item.active) ??
+      statuses[0];
+    if (!status) return null;
+
+    const progressAgeMs = status.progressAt ? Date.now() - new Date(status.progressAt).getTime() : 0;
+    setLiveWhatsApp((current) => ({
+      ...current,
+      channels: current.channels.map((channel) =>
+        channel.id === status.channelId ? { ...channel, runtimeStatus: status.runtimeStatus } : channel
+      ),
+      runtimeStatus: status.runtimeStatus,
+      isInboxReady: ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(status.runtimeStatus),
+      isHistoryStabilizing: status.active,
+      historySyncFullyCaughtUp: status.isCaughtUp,
+      historySyncProcessedChats: status.processedChats,
+      historySyncTotalChats: status.totalChats,
+      historySyncPhase: status.phase,
+      historySyncActive: status.active,
+      historySyncStartedAt: status.startedAt,
+      historySyncProgressAt: status.progressAt,
+      historySyncLastSuccessfulAt: status.lastSuccessfulSyncAt,
+      historySyncNextReconciliationAt: status.nextReconciliationAt,
+      historySyncRemainingChats: status.remainingChats,
+      historySyncDeferredChats: status.deferredChats,
+      historySyncNewMessages: status.newMessages,
+      isHistoryStuck: status.active && progressAgeMs > 5 * 60_000,
+      isLiveOnlyMode: status.phase === "deferred" || status.phase === "error",
+      lastSyncError: status.lastError
+    }));
+    return status;
+  };
+
   const refreshSelectedConversation = async (conversationId: string | null) => {
     if (!conversationId) {
       selectedConversationAbortRef.current?.abort();
       setLiveSelectedConversation(null);
+      return null;
+    }
+
+    if (routeConversationIdRef.current !== conversationId) {
       return null;
     }
 
@@ -335,6 +531,17 @@ export function InboxWorkspace({
       }
 
       const normalizedConversation = normalizeInboxSelectedConversation(payload.conversation ?? null);
+      if (
+        !normalizedConversation ||
+        !isCurrentInboxConversationResponse({
+          requestedConversationId: conversationId,
+          routeConversationId: routeConversationIdRef.current,
+          responseConversationId: normalizedConversation?.id ?? null
+        })
+      ) {
+        return null;
+      }
+      cacheSelectedConversation(selectedConversationCacheRef.current, normalizedConversation);
       setLiveSelectedConversation(normalizedConversation);
       return normalizedConversation;
     } catch (error) {
@@ -346,7 +553,35 @@ export function InboxWorkspace({
       if (selectedConversationAbortRef.current === abortController) {
         selectedConversationAbortRef.current = null;
       }
+      setPendingConversationId((current) => (current === conversationId ? null : current));
     }
+  };
+
+  const loadOlderMessages = async () => {
+    const current = liveSelectedConversation;
+    const cursor = current?.messagePage.nextCursor;
+    if (!current || !cursor) return;
+    const params = new URLSearchParams({ messageCursor: cursor, messageLimit: "50" });
+    if (selectedChannelId) params.set("channelId", selectedChannelId);
+    const response = await fetch(`/api/conversations/${current.id}?${params.toString()}`, {
+      method: "GET",
+      cache: "no-store"
+    });
+    if (!response.ok) return;
+    const payload = (await response.json().catch(() => null)) as
+      | { conversation?: InboxSelectedConversation | null }
+      | null;
+    const older = normalizeInboxSelectedConversation(payload?.conversation ?? null);
+    if (!older || older.id !== current.id) return;
+    setLiveSelectedConversation((latest) =>
+      latest && latest.id === older.id
+        ? normalizeInboxSelectedConversation({
+            ...latest,
+            messagePage: older.messagePage,
+            messages: [...older.messages, ...latest.messages]
+          })
+        : latest
+    );
   };
 
   useEffect(() => {
@@ -355,15 +590,15 @@ export function InboxWorkspace({
     };
   }, []);
 
-  const refreshInboxPanels = async (conversationId: string | null = activeConversationId) => {
-    const nextConversations = await refreshConversationList();
-    const nextConversationId =
-      conversationId ??
-      nextConversations?.find((conversation) => conversation.id === activeConversationId)?.id ??
-      nextConversations?.[0]?.id ??
-      null;
-
-    await refreshSelectedConversation(nextConversationId);
+  const refreshInboxPanels = async (
+    conversationId: string | null = activeConversationId,
+    suppressNotifications = false
+  ) => {
+    await Promise.all([
+      refreshConversationList({ suppressNotifications }),
+      refreshSelectedConversation(conversationId),
+      refreshHistorySyncStatus()
+    ]);
   };
 
   const toggleInboxNotificationSounds = async () => {
@@ -380,6 +615,50 @@ export function InboxWorkspace({
     } finally {
       setIsNotificationSoundPreferencePending(false);
     }
+  };
+
+  const handleDesktopNotificationsClick = async () => {
+    if (inboxDesktopNotificationsEnabled) {
+      const disabled = await disableDesktopNotifications();
+      if (!disabled) {
+        return;
+      }
+
+      setError(null);
+      toast.success(
+        "Desktop alerts disabled",
+        "This browser will no longer show desktop notifications for new Inbox messages."
+      );
+      return;
+    }
+
+    if (inboxDesktopNotificationsBlocked) {
+      const message = "Allow notifications for this site in your browser settings, then refresh Connexa.";
+      setError(message);
+      toast.error("Desktop alerts are blocked", message);
+      return;
+    }
+
+    if (inboxDesktopNotificationsUnavailable) {
+      const message =
+        inboxDesktopPermissionState === "insecure"
+          ? "Open Connexa over HTTPS to enable desktop alerts."
+          : "Desktop alerts are not supported by this browser.";
+      setError(message);
+      toast.error("Desktop alerts unavailable", message);
+      return;
+    }
+
+    const enabled = await enableDesktopNotifications();
+    if (!enabled) {
+      return;
+    }
+
+    setError(null);
+    toast.success(
+      "Desktop alerts enabled",
+      "New Inbox messages can now appear as desktop notifications."
+    );
   };
 
   useEffect(() => {
@@ -457,10 +736,43 @@ export function InboxWorkspace({
   }, []);
 
   useEffect(() => {
+    const abortController = new AbortController();
+    const loadMediaAssets = async () => {
+      const response = await fetch("/api/inbox/media-assets", {
+        cache: "no-store",
+        signal: abortController.signal
+      });
+      if (!response.ok) return;
+      const payload = (await response.json().catch(() => null)) as { assets?: InboxMediaAsset[] } | null;
+      if (payload?.assets) setLiveMediaAssets(payload.assets);
+    };
+    const timeoutId = window.setTimeout(() => void loadMediaAssets().catch(() => null), 0);
+    const metadataTimeoutId = window.setTimeout(() => {
+      void refreshConversationList({ suppressNotifications: true });
+      if (routeConversationIdRef.current) {
+        void refreshSelectedConversation(routeConversationIdRef.current);
+      }
+    }, 0);
+    return () => {
+      window.clearTimeout(timeoutId);
+      window.clearTimeout(metadataTimeoutId);
+      abortController.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     const nextConversations = sortConversationsByRecent(conversations);
     liveConversationsRef.current = nextConversations;
     setLiveConversations(nextConversations);
   }, [conversations]);
+
+  useEffect(() => {
+    setLiveConversationPage(conversationPage);
+  }, [conversationPage]);
+
+  useEffect(() => {
+    setLiveWhatsApp(whatsapp);
+  }, [whatsapp]);
 
   useEffect(() => {
     setLiveMediaAssets(mediaAssets);
@@ -485,8 +797,64 @@ export function InboxWorkspace({
   }, [liveConversations]);
 
   useEffect(() => {
-    setLiveSelectedConversation(normalizeInboxSelectedConversation(selectedConversation));
-  }, [selectedConversation]);
+    routeConversationIdRef.current = routeConversationId;
+    selectedConversationAbortRef.current?.abort();
+
+    if (!routeConversationId) {
+      setLiveSelectedConversation(null);
+      return;
+    }
+
+    const cachedConversation = selectedConversationCacheRef.current.get(routeConversationId);
+    if (cachedConversation) {
+      cacheSelectedConversation(selectedConversationCacheRef.current, cachedConversation);
+      setLiveSelectedConversation(cachedConversation);
+      void refreshSelectedConversation(routeConversationId);
+      return;
+    }
+
+    const normalizedConversation = normalizeInboxSelectedConversation(selectedConversation);
+    if (normalizedConversation?.id === routeConversationId) {
+      cacheSelectedConversation(selectedConversationCacheRef.current, normalizedConversation);
+      setLiveSelectedConversation(normalizedConversation);
+      return;
+    }
+
+    setLiveSelectedConversation(null);
+    void refreshSelectedConversation(routeConversationId);
+  }, [routeConversationId, selectedConversation]);
+
+  useEffect(() => {
+    if (!routeConversationId) {
+      return;
+    }
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || event.isComposing) {
+        return;
+      }
+
+      if (pendingDeleteMessageId) {
+        setPendingDeleteMessageId(null);
+        return;
+      }
+
+      if (document.querySelector(".inbox-portal-menu, [role='dialog'], [role='listbox']")) {
+        return;
+      }
+
+      event.preventDefault();
+      selectedConversationAbortRef.current?.abort();
+      routeConversationIdRef.current = null;
+      setPendingConversationId(null);
+      setLiveSelectedConversation(null);
+
+      window.history.pushState(null, "", buildInboxHrefWithoutConversation(currentSearchParams));
+    };
+
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [currentSearchParams, pendingDeleteMessageId, routeConversationId, router]);
 
   useEffect(() => {
     if (!filter.startsWith("custom:")) {
@@ -511,12 +879,19 @@ export function InboxWorkspace({
       void refreshInbox();
     };
 
-    const interval = window.setInterval(runRefresh, 8000);
+    let timeoutId: number | null = null;
+    const scheduleRecoveryPoll = () => {
+      timeoutId = window.setTimeout(async () => {
+        await refreshInbox();
+        scheduleRecoveryPoll();
+      }, 90_000 + Math.floor(Math.random() * 15_000));
+    };
+    scheduleRecoveryPoll();
     window.addEventListener("focus", runRefresh);
     document.addEventListener("visibilitychange", runRefresh);
 
     return () => {
-      window.clearInterval(interval);
+      if (timeoutId !== null) window.clearTimeout(timeoutId);
       window.removeEventListener("focus", runRefresh);
       document.removeEventListener("visibilitychange", runRefresh);
     };
@@ -529,9 +904,39 @@ export function InboxWorkspace({
     }
 
     const eventSource = new EventSource(`/api/inbox/events${params.toString() ? `?${params.toString()}` : ""}`);
+    let refreshTimer: number | null = null;
+    let hiddenRefreshPending = false;
+    let suppressNextNotification = false;
+    let lastErrorRecoveryAt = 0;
 
-    const handleMessage = () => {
-      void refreshInboxPanels(activeConversationId);
+    const scheduleRealtimeRefresh = (suppressNotifications = false) => {
+      suppressNextNotification = suppressNextNotification || suppressNotifications;
+      if (document.visibilityState !== "visible") {
+        hiddenRefreshPending = true;
+        return;
+      }
+      if (refreshTimer !== null) return;
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
+        const suppress = suppressNextNotification;
+        suppressNextNotification = false;
+        void refreshInboxPanels(activeConversationId, suppress);
+      }, 250);
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && hiddenRefreshPending) {
+        hiddenRefreshPending = false;
+        scheduleRealtimeRefresh(true);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
+    const handleMessage = (event: MessageEvent<string>) => {
+      const payload = parseInboxMessageEvent(event.data);
+      // A historical personal-web event still refreshes the UI, but it cannot
+      // create a tab/browser notification through this refresh path.
+      scheduleRealtimeRefresh(payload?.notificationEligible === false);
     };
 
     const handleConversation = (event: MessageEvent<string>) => {
@@ -560,7 +965,7 @@ export function InboxWorkspace({
         }
       }
 
-      void refreshInboxPanels(activeConversationId);
+      scheduleRealtimeRefresh();
     };
 
     const handleAck = (event: MessageEvent<string>) => {
@@ -610,7 +1015,7 @@ export function InboxWorkspace({
         return;
       }
 
-      void refreshInboxPanels(payload.conversationId ?? activeConversationId);
+      scheduleRealtimeRefresh();
     };
 
     eventSource.addEventListener("inbox:message", handleMessage);
@@ -619,7 +1024,9 @@ export function InboxWorkspace({
     eventSource.addEventListener("inbox:chat-state", handleChatState as EventListener);
 
     eventSource.onerror = () => {
-      void refreshInboxPanels(activeConversationId);
+      if (Date.now() - lastErrorRecoveryAt < 30_000) return;
+      lastErrorRecoveryAt = Date.now();
+      scheduleRealtimeRefresh(true);
     };
 
     return () => {
@@ -627,13 +1034,17 @@ export function InboxWorkspace({
       eventSource.removeEventListener("inbox:ack", handleAck as EventListener);
       eventSource.removeEventListener("inbox:conversation", handleConversation as EventListener);
       eventSource.removeEventListener("inbox:chat-state", handleChatState as EventListener);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
       eventSource.close();
     };
   }, [activeConversationId, selectedChannelId, toast]);
 
   useEffect(() => {
-    setPendingConversationId(null);
-  }, [activeConversationId]);
+    if (pendingConversationId && activeConversation?.id === pendingConversationId) {
+      setPendingConversationId(null);
+    }
+  }, [activeConversation?.id, pendingConversationId]);
 
   useEffect(() => {
     if (!activeConversationId) {
@@ -674,7 +1085,7 @@ export function InboxWorkspace({
   }, [activeConversationId]);
 
   useEffect(() => {
-    if (!activeConversationId || !liveSelectedConversation?.isGroup || isInternalNote) {
+    if (!activeConversationId || !activeConversation?.isGroup || isInternalNote) {
       setMentionCandidates([]);
       return;
     }
@@ -701,7 +1112,7 @@ export function InboxWorkspace({
     void loadMentionCandidates();
 
     return () => abortController.abort();
-  }, [activeConversationId, isInternalNote, liveSelectedConversation?.isGroup]);
+  }, [activeConversationId, isInternalNote, activeConversation?.isGroup]);
 
   const filterCounts = useMemo(
     () => buildFilterCounts(liveConversations, currentAgent.id, customFilters),
@@ -729,6 +1140,10 @@ export function InboxWorkspace({
         if (!conversation.teammateIds.includes(currentAgent.id)) {
           return false;
         }
+      }
+
+      if (filter === "groups" && !conversation.isGroup) {
+        return false;
       }
 
       if (filter === "unassigned" && conversation.assigneeId) {
@@ -773,28 +1188,33 @@ export function InboxWorkspace({
   }, [activeCustomFilter, currentAgent.id, filter, liveConversations, searchValue]);
 
   const displayedConversations = hasHydrated ? filteredConversations : conversations;
-  const displayedActiveConversationId = hasHydrated
-    ? activeConversationId
-    : selectedConversation?.id ?? conversations[0]?.id ?? null;
+  const displayedActiveConversationId = hasHydrated ? activeConversationId : selectedConversation?.id ?? null;
   const canReplyToSelectedConversation = Boolean(
-    !liveSelectedConversation?.assigneeId ||
-      liveSelectedConversation.assigneeId === currentAgent.id ||
+    !activeConversation?.assigneeId ||
+      activeConversation.assigneeId === currentAgent.id ||
       currentAgent.role === "MANAGER"
   );
-  const requiresTakeOverForPublicReply = Boolean(isWhatsAppReady && !canReplyToSelectedConversation && liveSelectedConversation);
+  const requiresTakeOverForPublicReply = Boolean(isWhatsAppReady && !canReplyToSelectedConversation && activeConversation);
   const canTakeOverSelectedConversation = Boolean(
-    liveSelectedConversation?.assigneeId && liveSelectedConversation.assigneeId !== currentAgent.id
+    activeConversation?.assigneeId && activeConversation.assigneeId !== currentAgent.id
   );
   const replyingToMessage =
-    liveSelectedConversation?.messages.find((message) => message.id === replyToMessageId) ?? null;
+    activeConversation?.messages.find((message) => message.id === replyToMessageId) ?? null;
 
   const openConversation = (conversationId: string) => {
+    if (conversationId === activeConversationId) {
+      return;
+    }
+
+    selectedConversationAbortRef.current?.abort();
+    routeConversationIdRef.current = conversationId;
     setPendingConversationId(conversationId);
-    startRoutingTransition(() => {
-      const params = new URLSearchParams(currentSearchParams);
-      params.set("conversationId", conversationId);
-      router.push(`/inbox?${params.toString()}`);
-    });
+    setLiveSelectedConversation(selectedConversationCacheRef.current.get(conversationId) ?? null);
+
+    // A chat selection is client state, not a full page navigation. Keeping the
+    // URL in history preserves deep links/back-forward while avoiding another
+    // run of the expensive Inbox server loader for every click.
+    window.history.pushState(null, "", buildInboxHrefWithConversation(currentSearchParams, conversationId));
   };
 
   const insertQuickReply = (quickReply: InboxQuickReply) => {
@@ -812,16 +1232,23 @@ export function InboxWorkspace({
       return;
     }
 
+    if (activeSendIdempotencyKeyRef.current) {
+      return;
+    }
+
     const trimmedBody = messageBody.trim();
     const activeMentions = selectedMentions.filter((mention) => messageBody.includes(`@${mention.label}`));
-    if (!trimmedBody && !selectedAttachments.length) {
+    if (!trimmedBody && !selectedAttachments.length && !recordedVoiceNote) {
       setError("Message body or media is required.");
       return;
     }
 
     setError(null);
 
+    const idempotencyKey = crypto.randomUUID();
+    activeSendIdempotencyKeyRef.current = idempotencyKey;
     startTransition(async () => {
+      try {
       const endpoint = isInternalNote
         ? `/api/conversations/${activeConversationId}/notes`
         : `/api/conversations/${activeConversationId}/messages`;
@@ -836,7 +1263,7 @@ export function InboxWorkspace({
               },
               body: JSON.stringify({
                 body: trimmedBody,
-                senderId: liveSelectedConversation?.assigneeId ?? null
+                senderId: activeConversation?.assigneeId ?? null
               })
             }
           : (() => {
@@ -848,6 +1275,9 @@ export function InboxWorkspace({
                   "mediaAssetIds",
                   JSON.stringify(selectedAttachments.map((attachment) => attachment.assetId))
                 );
+              }
+              if (recordedVoiceNote) {
+                formData.append("recordedVoiceNote", recordedVoiceNote);
               }
               if (activeMentions.length) {
                 formData.append("mentions", JSON.stringify(activeMentions));
@@ -861,6 +1291,9 @@ export function InboxWorkspace({
 
               return {
                 method: "POST",
+                headers: {
+                  "Idempotency-Key": idempotencyKey
+                },
                 body: formData
               };
             })()
@@ -874,10 +1307,14 @@ export function InboxWorkspace({
 
       setMessageBody("");
       setSelectedAttachments([]);
+      setRecordedVoiceNote(null);
       setSelectedMentions([]);
       setReplyToMessageId(null);
       setIsInternalNote(false);
       await refreshInboxPanels(activeConversationId);
+      } finally {
+        activeSendIdempotencyKeyRef.current = null;
+      }
     });
   };
 
@@ -938,7 +1375,17 @@ export function InboxWorkspace({
   };
 
   const toggleIncognitoMode = () => {
-    if (!incognitoTargetChannelId || !selectedChannelSupportsIncognito) {
+    if (!incognitoTargetChannelId) {
+      const message = "Select a WhatsApp number or open a conversation before changing incognito mode.";
+      setError(message);
+      toast.error("Choose a WhatsApp number", message);
+      return;
+    }
+
+    if (!selectedChannelSupportsIncognito) {
+      const message = "Incognito mode is only available for personal WhatsApp sessions.";
+      setError(message);
+      toast.error("Incognito mode unavailable", message);
       return;
     }
 
@@ -970,7 +1417,9 @@ export function InboxWorkspace({
       const nextChannel = payload?.channel;
 
       if (!response.ok || !nextChannel) {
-        setError(payload?.error ?? "Unable to update incognito mode.");
+        const message = payload?.error ?? "Unable to update incognito mode.";
+        setError(message);
+        toast.error("Incognito mode update failed", message);
         return;
       }
 
@@ -982,22 +1431,28 @@ export function InboxWorkspace({
         });
         return next;
       });
+      toast.success(
+        nextChannel.incognitoMode ? "Incognito mode enabled" : "Incognito mode disabled",
+        nextChannel.incognitoMode
+          ? "Reading chats on this number will not send seen receipts."
+          : "Reading chats on this number can send seen receipts again."
+      );
     });
   };
 
   const takeOverConversation = () => {
-    if (!liveSelectedConversation) {
+    if (!activeConversation) {
       return;
     }
 
     updateConversation({
       assigneeId: currentAgent.id,
-      teammateIds: liveSelectedConversation.teammateIds.filter((id) => id !== currentAgent.id)
+      teammateIds: activeConversation.teammateIds.filter((id) => id !== currentAgent.id)
     });
   };
 
   const addTag = (presetTag?: string) => {
-    if (!liveSelectedConversation) {
+    if (!activeConversation) {
       return;
     }
 
@@ -1009,7 +1464,7 @@ export function InboxWorkspace({
     }
 
     updateConversation({
-      tags: Array.from(new Set([...liveSelectedConversation.tags, nextTag]))
+      tags: Array.from(new Set([...activeConversation.tags, nextTag]))
     });
   };
 
@@ -1018,7 +1473,7 @@ export function InboxWorkspace({
       return;
     }
 
-    const targetMessage = liveSelectedConversation?.messages.find((message) => message.id === messageId);
+    const targetMessage = activeConversation?.messages.find((message) => message.id === messageId);
     if (!targetMessage) {
       return;
     }
@@ -1053,17 +1508,17 @@ export function InboxWorkspace({
   };
 
   const removeTag = (tagToRemove: string) => {
-    if (!liveSelectedConversation) {
+    if (!activeConversation) {
       return;
     }
 
     updateConversation({
-      tags: liveSelectedConversation.tags.filter((tag) => tag !== tagToRemove)
+      tags: activeConversation.tags.filter((tag) => tag !== tagToRemove)
     });
   };
 
   const addExistingContactTag = async (tagName: string) => {
-    if (!liveSelectedConversation) {
+    if (!activeConversation) {
       return {
         ok: false as const,
         error: "Conversation not found."
@@ -1071,7 +1526,7 @@ export function InboxWorkspace({
     }
 
     return patchConversation({
-      tags: Array.from(new Set([...liveSelectedConversation.tags, tagName]))
+      tags: Array.from(new Set([...activeConversation.tags, tagName]))
     });
   };
 
@@ -1185,47 +1640,24 @@ export function InboxWorkspace({
   };
 
   return (
-    <section className="inbox-workspace premium-inbox-workspace">
+    <section className="inbox-workspace premium-inbox-workspace inbox-reference-v2">
       <div className="inbox-workspace-chrome">
-        {shouldShowInboxDesktopNotificationsPrompt ? (
-          <div className="inbox-snooze-banner inbox-desktop-notifications-banner">
-            <div className="inbox-snooze-banner-copy">
-              <strong>Enable desktop notifications</strong>
-              <span>Enable desktop notifications to receive new Inbox alerts when this tab is in the background.</span>
-            </div>
-            <div className="inbox-snooze-banner-actions">
-              <button
-                className="button button-secondary"
-                disabled={isInboxDesktopNotificationsPending}
-                onClick={() => void enableDesktopNotifications()}
-                type="button"
-              >
-                {isInboxDesktopNotificationsPending ? "Enabling..." : "Enable desktop notifications"}
-              </button>
-              <button
-                className="button button-secondary"
-                onClick={dismissDesktopNotificationsForNow}
-                type="button"
-              >
-                Not now
-              </button>
-              <button
-                className="button button-secondary"
-                onClick={() => void dismissDesktopNotificationsPromptPermanently()}
-                type="button"
-              >
-                Don&apos;t ask again
-              </button>
-            </div>
-          </div>
-        ) : null}
-
         {inboxWhatsAppWarning ? (
           <div className="inbox-snooze-banner">
             <strong>WhatsApp connection lost</strong>
             <span>{inboxWhatsAppWarning}</span>
             <a className="button button-secondary" href="/settings/whatsapp">
               Start fresh session
+            </a>
+          </div>
+        ) : null}
+
+        {inboxSenderWarning ? (
+          <div className="inbox-snooze-banner">
+            <strong>WhatsApp sender unavailable</strong>
+            <span>{inboxSenderWarning}</span>
+            <a className="button button-secondary" href="/settings/whatsapp">
+              View connection status
             </a>
           </div>
         ) : null}
@@ -1239,12 +1671,14 @@ export function InboxWorkspace({
             <div className="inbox-reference-topbar-left">
               <button
                 aria-label="Start a new conversation"
-                className="button button-primary inbox-new-conversation-button"
+                className="button button-primary inbox-new-conversation-button inbox-toolbar-icon-action"
                 disabled={!eligibleNewConversationChannels.length || isPending}
                 onClick={() => setIsNewConversationOpen(true)}
+                title="New conversation"
                 type="button"
               >
-                New conversation
+                <PlusIcon />
+                <span className="inbox-toolbar-control-label">New conversation</span>
               </button>
               {whatsapp.channels.length ? (
                 <div className="inbox-channel-controls">
@@ -1275,17 +1709,51 @@ export function InboxWorkspace({
             </div>
 
             <div className="inbox-reference-topbar-actions">
+              {shouldShowHistoryStatus ? <InboxStatusStrip summary={summary} whatsapp={liveWhatsApp} /> : null}
+              <div
+                className={`inbox-desktop-notifications-compact${inboxDesktopNotificationsEnabled ? " is-enabled" : ""}${inboxDesktopNotificationsBlocked ? " is-blocked" : ""}`}
+              >
+                <button
+                  aria-pressed={inboxDesktopNotificationsEnabled}
+                  className="button button-secondary inbox-desktop-notifications-enable"
+                  disabled={isInboxDesktopNotificationsPending}
+                  onClick={() => void handleDesktopNotificationsClick()}
+                  aria-label={inboxDesktopNotificationsButtonLabel}
+                  title={inboxDesktopNotificationsButtonLabel}
+                  type="button"
+                >
+                  <DesktopAlertIcon />
+                  <span className="inbox-toolbar-control-label">{inboxDesktopNotificationsButtonLabel}</span>
+                </button>
+              </div>
               <Button
-                aria-label="Toggle WhatsApp incognito mode"
+                aria-label={
+                  selectedChannelState?.incognitoMode === true
+                    ? "Turn off WhatsApp incognito mode"
+                    : "Turn on WhatsApp incognito mode"
+                }
                 aria-pressed={selectedChannelState?.incognitoMode === true}
                 className={`inbox-incognito-toggle${selectedChannelState?.incognitoMode ? " active" : ""}`}
-                disabled={!incognitoTargetChannelId || !selectedChannelSupportsIncognito || isPending}
+                disabled={isPending}
                 onClick={toggleIncognitoMode}
                 selected={selectedChannelState?.incognitoMode === true}
-                title="Read chats without sending seen receipts"
+                title={
+                  !incognitoTargetChannelId
+                    ? "Select a WhatsApp number or open a conversation"
+                    : !selectedChannelSupportsIncognito
+                      ? "Available for personal WhatsApp sessions"
+                      : "Read chats without sending seen receipts"
+                }
                 variant="toggle"
               >
-                Incognito
+                <IncognitoIcon />
+                <span className="inbox-toolbar-control-label">
+                  {isPending
+                    ? "Saving..."
+                    : selectedChannelState?.incognitoMode === true
+                      ? "Incognito on"
+                      : "Incognito off"}
+                </span>
               </Button>
               <Button
                 aria-label={
@@ -1305,7 +1773,7 @@ export function InboxWorkspace({
                 variant="toggle"
               >
                 {isInboxNotificationSoundsMuted ? <MuteIcon /> : <VolumeIcon />}
-                <span>
+                <span className="inbox-toolbar-control-label">
                   {isNotificationSoundPreferencePending
                     ? "Saving..."
                     : isInboxNotificationSoundsMuted
@@ -1366,22 +1834,44 @@ export function InboxWorkspace({
       </div>
 
       <div className="inbox-workspace-body">
-        <section className={`inbox-grid premium-inbox-grid${isDetailsVisible ? "" : " details-hidden"}`}>
-          <InboxQueuePanel
-            activeConversationId={displayedActiveConversationId}
-            conversations={displayedConversations}
-            hasSearchQuery={Boolean(searchValue.trim())}
-            isFilterMenuOpen={isToolbarFilterOpen}
-            isRoutingPending={hasHydrated ? isRoutingPending : false}
-            isLoading={!hasHydrated}
-            onToggleFilterMenu={() => setIsToolbarFilterOpen((current) => !current)}
-            onOpenConversation={openConversation}
-            pendingConversationId={hasHydrated ? pendingConversationId : null}
-            searchValue={searchValue}
-            onSearchValueChange={setSearchValue}
-            toolbarFilterButtonRef={toolbarFilterButtonRef}
-            unreadCount={filterCounts.unread}
-          />
+        <section
+          className={`inbox-grid premium-inbox-grid${isDetailsVisible ? "" : " details-hidden"}${isQueueVisible ? "" : " queue-hidden"}`}
+        >
+          {isQueueVisible ? (
+            <InboxQueuePanel
+              activeConversationId={displayedActiveConversationId}
+              activeFilter={filter}
+              conversations={displayedConversations}
+              filterCounts={filterCounts}
+              loadedCount={liveConversations.length}
+              totalCount={Math.max(liveConversationPage.totalCount, liveConversations.length)}
+              hasSearchQuery={Boolean(searchValue.trim())}
+              isFilterMenuOpen={isToolbarFilterOpen}
+              isRoutingPending={hasHydrated ? pendingConversationId !== null : false}
+              isLoading={!hasHydrated}
+              hasMore={liveConversationPage.hasMore}
+              isLoadingMore={isLoadingMoreConversations}
+              onLoadMore={() => void loadMoreConversations()}
+              onHideQueue={() => setIsQueueVisible(false)}
+              onSelectFilter={setFilter}
+              onToggleFilterMenu={() => setIsToolbarFilterOpen((current) => !current)}
+              onOpenConversation={openConversation}
+              pendingConversationId={hasHydrated ? pendingConversationId : null}
+              searchValue={searchValue}
+              onSearchValueChange={setSearchValue}
+              toolbarFilterButtonRef={toolbarFilterButtonRef}
+            />
+          ) : (
+            <button
+              aria-label="Show conversation list"
+              className="inbox-queue-reopen-tab"
+              onClick={() => setIsQueueVisible(true)}
+              type="button"
+            >
+              <ChevronRightIcon />
+              <span>Chats</span>
+            </button>
+          )}
 
           <InboxThreadPanel
             agents={agents}
@@ -1404,12 +1894,18 @@ export function InboxWorkspace({
               setSelectedAttachments(attachments);
               setError(null);
             }}
+            onRecordedVoiceNoteChange={(file) => {
+              setRecordedVoiceNote(file);
+              setError(null);
+            }}
             onMediaAssetsChange={(assets) => {
               setLiveMediaAssets(assets);
             }}
             onDeleteMessage={deleteMessage}
             onInsertQuickReply={insertQuickReply}
+            onInternalNoteChange={setIsInternalNote}
             onMessageBodyChange={setMessageBody}
+            onLoadOlderMessages={loadOlderMessages}
             onSetMute={(duration) => updateConversation({ muteDuration: duration })}
             onSelectedMentionsChange={setSelectedMentions}
             onReplyToMessage={(messageId) => {
@@ -1426,20 +1922,15 @@ export function InboxWorkspace({
                   }
                 : null
             }
+            recordedVoiceNote={recordedVoiceNote}
             onScheduleMessage={(value) => void sendMessage(value)}
             onSendMessage={() => void sendMessage()}
             onSnoozeConversation={() => setIsSnoozeDialogOpen(true)}
             onTakeOverConversation={takeOverConversation}
-            onToggleInternalNote={() => {
-              setIsInternalNote((current) => !current);
-              setSelectedAttachments([]);
-              setSelectedMentions([]);
-              setError(null);
-            }}
             onUpdateConversation={updateConversation}
             quickReplies={quickReplies}
             requiresTakeOverForPublicReply={requiresTakeOverForPublicReply}
-            selectedConversation={liveSelectedConversation}
+            selectedConversation={activeConversation}
             whatsappMode={whatsapp.mode}
           />
 
@@ -1453,7 +1944,7 @@ export function InboxWorkspace({
               onRefreshConversation={() => void refreshInboxPanels(activeConversationId)}
               onRemoveTag={removeTag}
               quickReplies={quickReplies}
-              selectedConversation={liveSelectedConversation}
+              selectedConversation={activeConversation}
               workspaceIndustryType={workspaceIndustryType}
             />
           ) : (
@@ -1507,7 +1998,7 @@ export function InboxWorkspace({
         isPending={isPending}
         onClose={() => setIsSimulateInboundOpen(false)}
         onSubmit={simulateInboundMessage}
-        selectedConversation={liveSelectedConversation}
+        selectedConversation={activeConversation}
       />
 
       <NewConversationDialog
@@ -1520,8 +2011,8 @@ export function InboxWorkspace({
       />
 
       <SnoozeDialog
-        initialReason={liveSelectedConversation?.snoozeReason ?? null}
-        initialValue={liveSelectedConversation?.snoozedUntilIso ?? null}
+        initialReason={activeConversation?.snoozeReason ?? null}
+        initialValue={activeConversation?.snoozedUntilIso ?? null}
         isOpen={isSnoozeDialogOpen}
         isPending={isPending}
         onClear={() => {
@@ -1537,12 +2028,35 @@ export function InboxWorkspace({
     </section>
   );
 }
-
 function sortConversationsByRecent(conversations: InboxConversation[]) {
   return [...conversations].sort(
     (left, right) =>
       new Date(right.lastMessageAtIso).getTime() - new Date(left.lastMessageAtIso).getTime()
   );
+}
+
+function cacheSelectedConversation(
+  cache: Map<string, NonNullable<InboxSelectedConversation>>,
+  conversation: NonNullable<InboxSelectedConversation>
+) {
+  // Reinsert on access so the Map also acts as a tiny LRU. Capping this keeps
+  // media-heavy message payloads from growing with every chat opened.
+  cache.delete(conversation.id);
+  cache.set(conversation.id, conversation);
+
+  while (cache.size > RECENT_CONVERSATION_CACHE_SIZE) {
+    const oldestConversationId = cache.keys().next().value;
+    if (!oldestConversationId) break;
+    cache.delete(oldestConversationId);
+  }
+}
+
+function mergeConversationPages(primary: InboxConversation[], secondary: InboxConversation[]) {
+  const byId = new Map<string, InboxConversation>();
+  for (const conversation of [...secondary, ...primary]) {
+    byId.set(conversation.id, conversation);
+  }
+  return sortConversationsByRecent(Array.from(byId.values()));
 }
 
 function buildFilterCounts(
@@ -1555,6 +2069,7 @@ function buildFilterCounts(
     mine: conversations.filter(
       (item) => !item.isSnoozed && (item.assigneeId === currentAgentId || item.teammateIds.includes(currentAgentId))
     ).length,
+    groups: conversations.filter((item) => !item.isSnoozed && item.isGroup).length,
     "assigned-others": conversations.filter(
       (item) =>
         !item.isSnoozed &&
@@ -1723,6 +2238,15 @@ function parseInboxAckEvent(value: string) {
   }
 }
 
+function parseInboxMessageEvent(value: string) {
+  try {
+    const parsed = JSON.parse(value) as { notificationEligible?: unknown };
+    return { notificationEligible: parsed.notificationEligible === false };
+  } catch {
+    return null;
+  }
+}
+
 function parseInboxConversationEvent(value: string) {
   try {
     const parsed = JSON.parse(value) as Partial<InboxConversationEvent>;
@@ -1815,37 +2339,4 @@ function publishSnoozeReminderNotification(
       }
     })
   );
-}
-
-function getInboxDesktopNotificationStatusLabel(input: {
-  inboxDesktopPermissionState: "unsupported" | "insecure" | "default" | "granted" | "denied";
-  inboxDesktopSubscriptionCount: number;
-  isInboxDesktopPushEnabled: boolean;
-  isMuted: boolean;
-}) {
-  if (input.inboxDesktopPermissionState === "unsupported") {
-    return "Desktop notifications not supported";
-  }
-
-  if (input.inboxDesktopPermissionState === "insecure") {
-    return "Desktop notifications need HTTPS";
-  }
-
-  if (input.isMuted) {
-    return "Inbox notifications muted";
-  }
-
-  if (input.inboxDesktopPermissionState === "denied") {
-    return "Notifications blocked by browser";
-  }
-
-  if (input.inboxDesktopPermissionState === "default") {
-    return "Permission not requested";
-  }
-
-  if (input.inboxDesktopSubscriptionCount > 0) {
-    return "Desktop notifications enabled";
-  }
-
-  return "Desktop notifications enabled";
 }

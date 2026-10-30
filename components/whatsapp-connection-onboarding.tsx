@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useConfirmation } from "@/components/confirmation-provider";
@@ -9,6 +9,7 @@ import { HelpNotice } from "@/components/help-notice";
 import { OfficialApiSetupForm } from "@/components/official-api-setup-form";
 import { OnboardingLayout } from "@/components/onboarding-layout";
 import { SetupProgressCard } from "@/components/setup-progress-card";
+import { WebPhonePairingPanel } from "@/components/web-phone-pairing-panel";
 import { WebQrSetupPanel } from "@/components/web-qr-setup-panel";
 
 type WhatsAppConnectionOnboardingProps = {
@@ -43,6 +44,14 @@ type WhatsAppConnectionOnboardingProps = {
   };
   health?: {
     runtimeStatus: string;
+    runtimePresent?: boolean;
+    senderReachable?: boolean;
+    senderError?: string | null;
+    userConnectionState?: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+    qrCodeDataUrl?: string | null;
+    qrCodeGeneratedAt?: string | null;
+    qrCodeExpiresAt?: string | null;
+    qrCodeExpired?: boolean;
     isConnectionStalled?: boolean;
     isInboxReady: boolean;
     isHistoryStabilizing: boolean;
@@ -143,20 +152,35 @@ export function WhatsAppConnectionOnboarding({
   const defaultConnectionMethod: ConnectionMethod = isGuided && !hasExistingWebConnection
     ? "web"
     : initialWebSetup.connectionMethod;
-  const shouldOpenConnectionDetails = isGuided || (mode === "settings" && hasExistingWebConnection);
+  // A channel selected from Settings is already the workspace-number step.
+  // Open its connection details immediately so the default QR method is not
+  // stranded on the disabled “Step 1 of 2” state.
+  const shouldOpenConnectionDetails =
+    isGuided || (mode === "settings" && (hasExistingWebConnection || Boolean(selectedChannelId)));
   const [step, setStep] = useState<1 | 2>(shouldOpenConnectionDetails ? 2 : 1);
   const [method, setMethod] = useState<ConnectionMethod>(defaultConnectionMethod);
   const [pendingMethod, setPendingMethod] = useState<ConnectionMethod>(defaultConnectionMethod);
+  const [webLinkMethod, setWebLinkMethod] = useState<"qr" | "phone">("qr");
+  const [connectedViaPhonePairing, setConnectedViaPhonePairing] = useState(false);
+  const [liveWebConnection, setLiveWebConnection] = useState({
+    channelId: selectedChannelId,
+    connectionStatus: health?.runtimeStatus ?? initialWebSetup.connectionStatus,
+    phoneNumber: initialWebSetup.phoneNumber,
+    connectedAt: initialWebSetup.connectedAt,
+    userConnectionState: health?.userConnectionState ?? ("unknown" as const)
+  });
 
   const selectedLabel = useMemo(
     () => (method ? connectionOptions[method].title : null),
     [method]
   );
-  const readinessLabel = getPlainReadinessLabel(health, initialWebSetup);
+  const readinessLabel = liveWebConnection.userConnectionState === "connected"
+    ? "Ready for live conversations"
+    : getPlainReadinessLabel(health, initialWebSetup);
   const issueLabel = getIssueLabel(health);
   const hasSelectedChannel = Boolean(selectedChannelId);
   const selectedChannel = channels.find((channel) => channel.id === selectedChannelId) ?? null;
-  const channelRuntimeStatus = health?.runtimeStatus ?? initialWebSetup.connectionStatus;
+  const channelRuntimeStatus = liveWebConnection.connectionStatus || health?.runtimeStatus || initialWebSetup.connectionStatus;
   const isLinkedChannel =
     Boolean(initialWebSetup.connectedAt) ||
     Boolean(initialWebSetup.phoneNumber) ||
@@ -165,13 +189,16 @@ export function WhatsAppConnectionOnboarding({
     LINKED_CHANNEL_STATUSES.includes(initialWebSetup.connectionStatus as (typeof LINKED_CHANNEL_STATUSES)[number]) ||
     LINKED_CHANNEL_STATUSES.includes(selectedChannel?.connectionStatus as (typeof LINKED_CHANNEL_STATUSES)[number]);
   const isConnected =
-    Boolean(initialWebSetup.connectedAt) ||
+    Boolean(liveWebConnection.connectedAt ?? initialWebSetup.connectedAt) ||
+    liveWebConnection.userConnectionState === "connected" ||
     ["CONNECTED", "READY", "SYNCING_HISTORY"].includes(channelRuntimeStatus);
+  const connectedPhoneNumber = liveWebConnection.phoneNumber || initialWebSetup.phoneNumber;
+  const isInboxReady = Boolean(health?.isInboxReady || isConnected);
   const shouldLockChannelConfiguration = hasSelectedChannel && isLinkedChannel;
   const selectedNumberStatus = selectedChannelId ? "Completed" : "Needs setup";
   const methodStatus = method ? "Completed" : "Needs setup";
   const connectionStatus = isConnected ? "Completed" : "Needs setup";
-  const inboxStatus = health?.isInboxReady ? "Completed" : "Review";
+  const inboxStatus = isInboxReady ? "Completed" : "Review";
   const [createChannelError, setCreateChannelError] = useState<string | null>(null);
   const [isCreatingChannel, setIsCreatingChannel] = useState(false);
   const [deletingChannelId, setDeletingChannelId] = useState<string | null>(null);
@@ -196,7 +223,41 @@ export function WhatsAppConnectionOnboarding({
 
   useEffect(() => {
     setPendingChannelId(selectedChannelId ?? "");
+    setConnectedViaPhonePairing(false);
+    setLiveWebConnection({
+      channelId: selectedChannelId,
+      connectionStatus: health?.runtimeStatus ?? initialWebSetup.connectionStatus,
+      phoneNumber: initialWebSetup.phoneNumber,
+      connectedAt: initialWebSetup.connectedAt,
+      userConnectionState: health?.userConnectionState ?? "unknown"
+    });
   }, [selectedChannelId]);
+
+  const handleWebConnectionStateChange = useCallback((next: {
+    connectionStatus: string;
+    phoneNumber: string;
+    connectedAt: string | null;
+    userConnectionState: "connected" | "recovering" | "reconnection_required" | "disconnected" | "unknown";
+  }) => {
+    setLiveWebConnection((current) => {
+      if (current.channelId !== selectedChannelId) return current;
+      if (
+        current.connectionStatus === next.connectionStatus &&
+        current.phoneNumber === next.phoneNumber &&
+        current.connectedAt === next.connectedAt &&
+        current.userConnectionState === next.userConnectionState
+      ) {
+        return current;
+      }
+      return { channelId: selectedChannelId, ...next };
+    });
+  }, [selectedChannelId]);
+
+  useEffect(() => {
+    if (mode === "settings" && selectedChannelId) {
+      setStep(2);
+    }
+  }, [mode, selectedChannelId]);
 
   useEffect(() => {
     const nextMethod = selectedChannel?.connectionMethod ?? defaultConnectionMethod;
@@ -275,7 +336,17 @@ export function WhatsAppConnectionOnboarding({
   }
 
   async function handleConnectionMethodChange(nextMethod: ConnectionMethod) {
-    if (isSavingMethod || nextMethod === pendingMethod) {
+    if (isSavingMethod) {
+      return;
+    }
+
+    if (nextMethod === pendingMethod) {
+      setStep(2);
+      return;
+    }
+
+    if (nextMethod === "api" && !metaEmbeddedSignup?.enabled) {
+      setCreateChannelError("Official WhatsApp Cloud API is disabled for this workspace.");
       return;
     }
 
@@ -381,9 +452,10 @@ export function WhatsAppConnectionOnboarding({
       }
       title={
         isGuided
-          ? "Connect your WhatsApp"
+          ? "Connect Your WhatsApp Workspace"
           : "WhatsApp setup checklist"
       }
+      variant={mode}
     >
       {!isGuided ? (
         <section className="wa-settings-checklist">
@@ -419,7 +491,7 @@ export function WhatsAppConnectionOnboarding({
               <span className="wa-settings-step-number">3</span>
               <div>
                 <strong>Connect phone</strong>
-                <p>{isConnected ? initialWebSetup.phoneNumber : "Scan QR or save API credentials."}</p>
+                <p>{isConnected ? connectedPhoneNumber : "Scan QR or save API credentials."}</p>
               </div>
               <span className={`wa-settings-step-status${isConnected ? " completed" : " needs-setup"}`}>
                 {connectionStatus}
@@ -431,7 +503,7 @@ export function WhatsAppConnectionOnboarding({
                 <strong>Verify inbox</strong>
                 <p>{readinessLabel}</p>
               </div>
-              <span className={`wa-settings-step-status${health?.isInboxReady ? " completed" : " review"}`}>
+              <span className={`wa-settings-step-status${isInboxReady ? " completed" : " review"}`}>
                 {inboxStatus}
               </span>
             </article>
@@ -495,18 +567,66 @@ export function WhatsAppConnectionOnboarding({
       ) : null}
 
       {isGuided ? (
-        <div className="wa-onboarding-summary-grid">
-          <article className="wa-onboarding-summary-card">
-            <span>Current package</span>
-            <strong>Workspace package active</strong>
-            <p>Start with the first WhatsApp number now. More numbers can be added later if the package allows it.</p>
+        <aside className="wa-guided-rail">
+          <article className="wa-guided-rail-card wa-guided-readiness-card">
+            <h3>Workspace Readiness</h3>
+            <div className="wa-guided-readiness-row">
+              <div className="wa-guided-readiness-ring" style={{ "--readiness": `${completedSetupSteps * 25}%` } as React.CSSProperties}>
+                <span>{completedSetupSteps * 25}%</span>
+              </div>
+              <div>
+                <strong>{isConnected ? "Almost there!" : "Getting there!"}</strong>
+                <p>Complete the setup steps to unlock your full workspace.</p>
+              </div>
+            </div>
           </article>
-          <article className="wa-onboarding-summary-card">
-            <span>Workspace readiness</span>
-            <strong>{readinessLabel}</strong>
-            <p>{isConnected ? "A number is already linked to this workspace." : "Connect the first number to activate the shared inbox."}</p>
+
+          <article className="wa-guided-rail-card">
+            <div className="wa-guided-rail-heading">
+              <h3>Connected Numbers</h3>
+              <a href="/settings/whatsapp">View all</a>
+            </div>
+            <div className="wa-guided-number-row">
+              <span className="wa-guided-card-icon">◉</span>
+              <div>
+                <strong>{isConnected ? connectedPhoneNumber || "WhatsApp connected" : "No numbers connected yet"}</strong>
+                <p>{isConnected ? readinessLabel : "Connect your first number to start receiving and sending messages."}</p>
+              </div>
+            </div>
           </article>
-        </div>
+
+          <article className="wa-guided-rail-card">
+            <div className="wa-guided-rail-heading">
+              <h3>Plan &amp; Billing</h3>
+              <a href="/packages">View plan</a>
+            </div>
+            <div className="wa-guided-number-row">
+              <span className="wa-guided-card-icon plan">♛</span>
+              <div>
+                <strong>Workspace Plan <span className="wa-guided-trial-pill">Active</span></strong>
+                <p>Your workspace package is active and ready for setup.</p>
+              </div>
+            </div>
+          </article>
+
+          <article className="wa-guided-rail-card wa-guided-checklist-card">
+            <div className="wa-guided-rail-heading">
+              <h3>Setup Checklist</h3>
+              <span>{completedSetupSteps} of 4 complete</span>
+            </div>
+            {[
+              ["Select your WhatsApp number", hasSelectedChannel],
+              ["Choose a connection method", Boolean(method)],
+              ["Connect and verify", isConnected],
+              ["Start your first conversation", isInboxReady]
+            ].map(([label, complete]) => (
+              <div className={`wa-guided-check-item${complete ? " complete" : ""}`} key={String(label)}>
+                <span>{complete ? "✓" : ""}</span>
+                <p>{label}</p>
+              </div>
+            ))}
+          </article>
+        </aside>
       ) : null}
 
       {shouldShowPostSelectionSections ? (
@@ -781,15 +901,48 @@ export function WhatsAppConnectionOnboarding({
                 ) : null}
 
                 {hasSelectedChannel ? (
-                  <WebQrSetupPanel
-                    channelId={selectedChannelId}
-                    health={health}
-                    initialValues={initialWebSetup}
-                    channelSelectionHref={selectedChannelHref}
-                    channelSelectionBasePath={channelSelectionBasePath}
-                    onboardingMode={mode}
-                    onBack={isGuided ? undefined : () => setStep(1)}
-                  />
+                  <>
+                    <div className="wa-link-method-switch" aria-label="Personal WhatsApp Web linking method" role="group">
+                      <button
+                        aria-pressed={webLinkMethod === "qr"}
+                        className={`button ${webLinkMethod === "qr" ? "button-primary" : "button-secondary"}`}
+                        onClick={() => setWebLinkMethod("qr")}
+                        type="button"
+                      >
+                        Scan QR code
+                      </button>
+                      <button
+                        aria-pressed={webLinkMethod === "phone"}
+                        className={`button ${webLinkMethod === "phone" ? "button-primary" : "button-secondary"}`}
+                        onClick={() => setWebLinkMethod("phone")}
+                        type="button"
+                      >
+                        Link with phone number
+                      </button>
+                    </div>
+                    {webLinkMethod === "phone" ? (
+                      <WebPhonePairingPanel
+                        channelId={selectedChannelId ?? ""}
+                        onPairingConnected={() => {
+                          setConnectedViaPhonePairing(true);
+                          setWebLinkMethod("qr");
+                        }}
+                        onUseQrCode={() => setWebLinkMethod("qr")}
+                      />
+                    ) : (
+                      <WebQrSetupPanel
+                        channelId={selectedChannelId}
+                        channelLabel={selectedChannel?.label ?? null}
+                        connectedViaPhonePairing={connectedViaPhonePairing}
+                        health={health}
+                        initialValues={initialWebSetup}
+                        channelSelectionBasePath={channelSelectionBasePath}
+                        onboardingMode={mode}
+                        onBack={isGuided ? undefined : () => setStep(1)}
+                        onConnectionStateChange={handleWebConnectionStateChange}
+                      />
+                    )}
+                  </>
                 ) : (
                   <HelpNotice title="Preparing WhatsApp number">
                     Connexa is preparing your workspace number. The QR setup will unlock automatically once the number is ready.
@@ -826,7 +979,7 @@ export function WhatsAppConnectionOnboarding({
                 <div className="table-subtle">
                   {health?.isHistoryStabilizing || health?.runtimeStatus === "SYNCING_HISTORY"
                     ? "Importing in background"
-                    : health?.isInboxReady
+                    : isInboxReady
                       ? "Ready"
                       : "Waiting for connection"}
                 </div>

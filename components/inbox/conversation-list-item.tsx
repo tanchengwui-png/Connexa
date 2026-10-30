@@ -1,4 +1,5 @@
 import type { InboxConversation } from "@/components/inbox/types";
+import { ContactAvatar } from "@/components/inbox/contact-avatar";
 
 type ConversationListItemProps = {
   avatarThemeClass: string;
@@ -28,17 +29,11 @@ export function ConversationListItem({
       type="button"
     >
       <div className="chatbox-row">
-        <div aria-hidden="true" className={`chatbox-avatar ${avatarThemeClass}`}>
-          {conversation.photoUrl ? (
-            <img
-              alt=""
-              className="chatbox-avatar-image"
-              src={`/api/conversations/${conversation.id}/avatar`}
-            />
-          ) : (
-            initials
-          )}
-        </div>
+        <ContactAvatar
+          className={`chatbox-avatar ${avatarThemeClass}`}
+          fallback={initials}
+          profilePicUrl={conversation.profilePicUrl}
+        />
 
         <div className="chatbox-content">
           <div className="inbox-row-head">

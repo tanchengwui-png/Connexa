@@ -221,8 +221,8 @@ export async function getScheduledMessagesData(
   };
 }
 
-export async function getConversationScheduledStats(workspaceId: string) {
-  const jobs = await listConversationScheduledJobs(workspaceId);
+export async function getConversationScheduledStats(workspaceId: string, conversationIds?: string[]) {
+  const jobs = await listConversationScheduledJobs(workspaceId, conversationIds);
 
   const statsByConversationId = new Map<string, ConversationScheduledStats>();
 
@@ -360,11 +360,15 @@ async function listScheduledOutboundJobs(input: {
   );
 }
 
-async function listConversationScheduledJobs(workspaceId: string) {
+async function listConversationScheduledJobs(workspaceId: string, conversationIds?: string[]) {
+  if (conversationIds && conversationIds.length === 0) {
+    return [];
+  }
   try {
     return await prisma.outboundMessageJob.findMany({
       where: {
         workspaceId,
+        ...(conversationIds ? { conversationId: { in: conversationIds } } : {}),
         status: {
           in: [OutboundMessageJobStatus.PENDING, OutboundMessageJobStatus.RUNNING, OutboundMessageJobStatus.FAILED]
         }
@@ -384,11 +388,13 @@ async function listConversationScheduledJobs(workspaceId: string) {
     `SELECT "conversationId", "availableAt"
      FROM "OutboundMessageJob"
      WHERE "workspaceId" = $1
-       AND status IN ($2, $3, $4)`,
+       AND status IN ($2, $3, $4)
+       ${conversationIds ? `AND "conversationId" = ANY($5::text[])` : ""}`,
     workspaceId,
     OutboundMessageJobStatus.PENDING,
     OutboundMessageJobStatus.RUNNING,
-    OutboundMessageJobStatus.FAILED
+    OutboundMessageJobStatus.FAILED,
+    ...(conversationIds ? [conversationIds] : [])
   );
 }
 

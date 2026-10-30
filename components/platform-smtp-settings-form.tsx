@@ -25,7 +25,6 @@ type PlatformSmtpSettingsFormProps = {
     automationWorkflowIdleHours: number;
     automationWorkflowExpireHours: number;
     freeTrialDurationDays: number;
-    expiredAccountCleanupDays: number;
     sessionTimeoutMinutes: number;
     rememberMeTimeoutMinutes: number;
     billplzConfigured: boolean;
@@ -89,7 +88,6 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
         automationWorkflowIdleHours: Number(formData.get("automationWorkflowIdleHours") ?? 24),
         automationWorkflowExpireHours: Number(formData.get("automationWorkflowExpireHours") ?? 72),
         freeTrialDurationDays: Number(formData.get("freeTrialDurationDays") ?? 14),
-        expiredAccountCleanupDays: Number(formData.get("expiredAccountCleanupDays") ?? 60),
         sessionTimeoutMinutes: convertSessionTimeoutToMinutes(
           Number(sessionTimeoutValue || 0),
           sessionTimeoutUnit
@@ -492,16 +490,6 @@ export function PlatformSmtpSettingsForm({ initialValues, adminEmail }: Platform
                 />
               </label>
 
-              <label className="control-block">
-                <span className="control-label">Auto Cleanup Expired Accounts After (Days)</span>
-                <input
-                  className="control-input"
-                  defaultValue={String(initialValues.expiredAccountCleanupDays)}
-                  min="1"
-                  name="expiredAccountCleanupDays"
-                  type="number"
-                />
-              </label>
             </div>
           </section>
 

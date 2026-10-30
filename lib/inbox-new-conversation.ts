@@ -12,7 +12,7 @@ import {
   resolveInboxRealtimeChannelKind,
   resolveSafeConversationRemoteId
 } from "@/lib/whatsapp";
-import { sendWhatsAppWebMessage } from "@/lib/whatsapp-web";
+import { sendWhatsAppMessage } from "@/lib/whatsapp-runtime";
 
 type NewConversationRequestStatus = "PENDING" | "ACCEPTED" | "SUCCEEDED" | "FAILED";
 
@@ -92,7 +92,7 @@ export async function startInboxConversationWithNewNumber(input: StartNewConvers
   if (!canStartUnsavedNumberConversation(channel)) {
     throw new NewConversationError(
       "NEW_NUMBER_CONVERSATION_UNSUPPORTED_CHANNEL",
-      "Starting a conversation with an unsaved number is supported only for active WhatsApp Web connections linked by QR code.",
+      "Starting a conversation with an unsaved number requires an active WhatsApp Web connection.",
       409
     );
   }
@@ -170,7 +170,7 @@ export async function startInboxConversationWithNewNumber(input: StartNewConvers
 
   if (!providerMessageId) {
     try {
-      const sendResult = await sendWhatsAppWebMessage({
+      const sendResult = await sendWhatsAppMessage({
         workspaceId: agent.workspaceId,
         channelId: channel.id,
         conversationId: `new-conversation:${agent.workspaceId}:${normalizedPhone}`,
@@ -200,7 +200,8 @@ export async function startInboxConversationWithNewNumber(input: StartNewConvers
   await applyHumanTakeoverPause({
     workspaceId: agent.workspaceId,
     conversationId: finalized.conversation.id,
-    pausedAt: finalized.message.sentAt
+    pausedAt: finalized.message.sentAt,
+    cancelPendingAutomation: true
   });
 
   await emitMessageToInbox({
@@ -265,30 +266,26 @@ async function finalizeAcceptedNewConversationRequest(input: {
   phone: string;
   displayName: string | null;
   messageBody: string;
-  providerMessageId: string;
+  providerMessageId: string | null;
 }) {
-  const existingMessage = await prisma.message.findUnique({
-    where: {
-      providerMessageId: input.providerMessageId
-    },
-    select: {
-      id: true,
-      body: true,
-      sentAt: true,
-      conversation: {
+  const existingMessage = input.providerMessageId
+    ? await prisma.message.findUnique({
+        where: { providerMessageId: input.providerMessageId },
         select: {
           id: true,
-          contact: {
+          body: true,
+          sentAt: true,
+          conversation: {
             select: {
               id: true,
-              displayName: true,
-              phone: true
+              contact: {
+                select: { id: true, displayName: true, phone: true }
+              }
             }
           }
         }
-      }
-    }
-  });
+      })
+    : null;
 
   if (existingMessage?.conversation?.contact) {
     await markNewConversationRequestSucceeded({
@@ -408,7 +405,8 @@ async function finalizeAcceptedNewConversationRequest(input: {
           source: "inbox-new-conversation",
           channelId: input.channelId,
           to: input.phone,
-          providerMessageId: input.providerMessageId
+          providerMessageId: input.providerMessageId,
+          delivery: input.providerMessageId ? "sent" : "accepted_untracked"
         }),
         sentAt
       });
@@ -441,7 +439,9 @@ async function finalizeAcceptedNewConversationRequest(input: {
       throw error;
     }
 
-    const persisted = await loadPersistedMessageResult(input.providerMessageId, input.requestId);
+    const persisted = input.providerMessageId
+      ? await loadPersistedMessageResult(input.providerMessageId, input.requestId)
+      : null;
     if (!persisted) {
       throw error;
     }
@@ -648,7 +648,7 @@ async function findOrCreateNewConversationRequest(input: {
   };
 }
 
-async function markNewConversationRequestAccepted(requestId: string, providerMessageId: string) {
+async function markNewConversationRequestAccepted(requestId: string, providerMessageId: string | null) {
   await prisma.$executeRawUnsafe(
     `UPDATE "InboxNewConversationRequest"
      SET status = 'ACCEPTED',

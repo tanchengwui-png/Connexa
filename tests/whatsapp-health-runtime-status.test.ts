@@ -1,10 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {
+// @ts-expect-error Node's strip-types runner requires the source extension.
+import * as runtimeStatus from "../lib/whatsapp-runtime-status.ts";
+
+const {
   isWhatsAppConnectedRuntimeStatus,
   isWhatsAppDisconnectedRuntimeStatus,
   isWhatsAppPreparingRuntimeStatus
-} from "../lib/whatsapp-runtime-status.js";
+} = runtimeStatus;
 
 test("QR and initializing states are not treated as connected", () => {
   assert.equal(isWhatsAppConnectedRuntimeStatus("QR_READY"), false);

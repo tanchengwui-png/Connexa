@@ -21,6 +21,7 @@ function createCandidate(overrides: Partial<{
   nextBillingAt: Date | null;
   autoRenew: boolean;
   managerId: string | null;
+  managerAccountId: string | null;
   managerName: string | null;
   managerEmail: string | null;
   managerStatus: string | null;
@@ -42,6 +43,7 @@ function createCandidate(overrides: Partial<{
     nextBillingAt: overrides.nextBillingAt ?? new Date("2026-07-07T10:00:00.000Z"),
     autoRenew: overrides.autoRenew ?? true,
     managerId: overrides.managerId ?? "agent_1",
+    managerAccountId: overrides.managerAccountId ?? "account_1",
     managerName: overrides.managerName ?? "Aisyah",
     managerEmail: overrides.managerEmail ?? "aisyah@connexa.test",
     managerStatus: overrides.managerStatus ?? "ACTIVE"
@@ -56,6 +58,8 @@ function createDeps() {
     summaryLines: string[];
     benefits: string[];
     introLine: string;
+    nextStepCopy: string;
+    appUrl: string;
   }> = [];
 
   return {
@@ -72,6 +76,7 @@ function createDeps() {
       releaseEventImpl: async (eventKey: string) => {
         reserved.delete(eventKey);
       },
+      createManageUrlImpl: () => "https://connexa.test/account-settings/billing/manage?token=signed-test-token",
       resolvePackageImpl: async (packageKey: "starter" | "professional" | "growth" | "enterprise") => ({
         code: packageKey,
         name:
@@ -100,13 +105,17 @@ function createDeps() {
         summaryLines: string[];
         benefits: string[];
         introLine: string;
+        nextStepCopy: string;
+        appUrl: string;
       }) => {
         sentPayloads.push({
           panelTitle: payload.panelTitle,
           recipientEmail: payload.candidate.recipientEmail,
           summaryLines: payload.summaryLines,
           benefits: payload.benefits,
-          introLine: payload.introLine
+          introLine: payload.introLine,
+          nextStepCopy: payload.nextStepCopy,
+          appUrl: payload.appUrl
         });
       }
     }
@@ -154,8 +163,17 @@ test("eligible paid-plan user receives one plan reminder email 1 day before expi
   assert.equal(result.sentCount, 1);
   assert.equal(sentPayloads.length, 1);
   assert.equal(sentPayloads[0]?.panelTitle, "Here's what you'll keep with Growth");
-  assert.match(sentPayloads[0]?.introLine ?? "", /renews tomorrow/i);
+  assert.match(sentPayloads[0]?.introLine ?? "", /expires tomorrow/i);
+  assert.equal(
+    sentPayloads[0]?.nextStepCopy,
+    "To continue enjoying your benefits without interruption, please visit the Billing and Subscription page to renew your plan."
+  );
+  assert.equal(
+    sentPayloads[0]?.appUrl,
+    "https://connexa.test/account-settings/billing/manage?token=signed-test-token"
+  );
   assert.ok(sentPayloads[0]?.summaryLines.some((line) => line.includes("Current plan price: MYR 149.00")));
+  assert.ok(sentPayloads[0]?.summaryLines.some((line) => line.startsWith("Expires:")));
   assert.ok(sentPayloads[0]?.benefits.includes("Automations"));
 });
 

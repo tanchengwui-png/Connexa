@@ -3,19 +3,43 @@
 import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { showInboxDesktopNotificationFromPage } from "@/lib/inbox-browser-notifications-client";
+import {
+  EMPTY_HISTORY_SYNC_BELL_STATE,
+  acknowledgeHistorySyncBell,
+  applyHistorySyncStatus,
+  getHistorySyncNotificationId,
+  parseHistorySyncBellState,
+  queueHistorySyncRecheck,
+  type HistorySyncBellState
+} from "@/lib/history-sync-bell";
+import {
+  readInboxDesktopNotificationsDisabled,
+  showInboxDesktopNotificationFromPage
+} from "@/lib/inbox-browser-notifications-client";
 import { playInboxNotificationTone } from "@/lib/inbox-notification-sound-client";
 import { useInboxNotificationSoundPreference } from "@/lib/use-inbox-notification-sound-preference";
 
 type DashboardNotification = {
   id: string;
-  conversationId: string;
+  conversationId: string | null;
   contactName: string;
   channelLabel: string | null;
-  kind?: "message" | "snooze-expired";
+  kind?: "message" | "snooze-expired" | "history-sync-complete";
   message: string;
   timestamp: string;
   timestampLabel: string;
+};
+
+type HistorySyncStatusResponse = {
+  checkedAt: string;
+  isCaughtUp: boolean;
+  version: string | null;
+  channels: Array<{
+    channelId: string;
+    channelLabel: string;
+    completedAt: string | null;
+    isCaughtUp: boolean;
+  }>;
 };
 
 type NotificationConversation = {
@@ -49,6 +73,11 @@ export function DashboardNotifications(props: {
   const notificationIdsRef = useRef<Set<string>>(new Set());
   const conversationSnapshotRef = useRef<Map<string, NotificationConversation>>(new Map());
   const hasConversationSnapshotRef = useRef(false);
+  const historySyncBellStateRef = useRef<HistorySyncBellState>({
+    ...EMPTY_HISTORY_SYNC_BELL_STATE
+  });
+  const persistHistorySyncBellStateRef = useRef<(state: HistorySyncBellState) => void>(() => undefined);
+  const refreshHistorySyncStatusRef = useRef<() => void>(() => undefined);
   const [isOpen, setIsOpen] = useState(false);
   const [notifications, setNotifications] = useState<DashboardNotification[]>([]);
   useInboxNotificationSoundPreference({
@@ -65,6 +94,25 @@ export function DashboardNotifications(props: {
         return;
       }
 
+      if (detail.kind === "message") {
+        const queued = queueHistorySyncRecheck(
+          historySyncBellStateRef.current,
+          new Date().toISOString()
+        );
+        if (queued.state !== historySyncBellStateRef.current) {
+          historySyncBellStateRef.current = queued.state;
+          persistHistorySyncBellStateRef.current(queued.state);
+        }
+        if (queued.invalidatedNotificationKey) {
+          const invalidatedId = getHistorySyncNotificationId(queued.invalidatedNotificationKey);
+          notificationIdsRef.current.delete(invalidatedId);
+          setNotifications((current) => current.filter((item) => item.id !== invalidatedId));
+        }
+        if (queued.state.pendingAfter) {
+          refreshHistorySyncStatusRef.current();
+        }
+      }
+
       if (notificationIdsRef.current.has(detail.id)) {
         return;
       }
@@ -77,6 +125,11 @@ export function DashboardNotifications(props: {
 
       if (
         props.workspaceId &&
+        props.agentId &&
+        !readInboxDesktopNotificationsDisabled({
+          agentId: props.agentId,
+          workspaceId: props.workspaceId
+        }) &&
         typeof document !== "undefined" &&
         document.visibilityState !== "visible" &&
         typeof Notification !== "undefined" &&
@@ -107,6 +160,107 @@ export function DashboardNotifications(props: {
   }, []);
 
   useEffect(() => {
+    if (!props.agentId || !props.workspaceId || isInboxRoute) {
+      return undefined;
+    }
+
+    const storageKey = `connexa:history-sync-bell:${props.workspaceId}:${props.agentId}`;
+    let isMounted = true;
+    let refreshController: AbortController | null = null;
+    let refreshPromise: Promise<void> | null = null;
+
+    const persistState = (state: HistorySyncBellState) => {
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(state));
+      } catch {
+        // Private browsing or a locked-down browser can disable local storage.
+      }
+    };
+
+    try {
+      historySyncBellStateRef.current = parseHistorySyncBellState(
+        window.localStorage.getItem(storageKey)
+      );
+    } catch {
+      historySyncBellStateRef.current = { ...EMPTY_HISTORY_SYNC_BELL_STATE };
+    }
+    persistHistorySyncBellStateRef.current = persistState;
+
+    const refreshStatus = () => {
+      if (refreshPromise || document.visibilityState !== "visible") {
+        return;
+      }
+
+      refreshController?.abort();
+      refreshController = new AbortController();
+      refreshPromise = (async () => {
+        const response = await fetch("/api/inbox/history-sync-status", {
+          method: "GET",
+          cache: "no-store",
+          signal: refreshController?.signal
+        }).catch(() => null);
+
+        if (!response?.ok || !isMounted) {
+          return;
+        }
+
+        const status = (await response.json().catch(() => null)) as HistorySyncStatusResponse | null;
+        if (!status || !Array.isArray(status.channels)) {
+          return;
+        }
+
+        const decision = applyHistorySyncStatus(historySyncBellStateRef.current, status);
+        historySyncBellStateRef.current = decision.state;
+        persistState(decision.state);
+
+        if (!decision.shouldPresent || !decision.state.notificationKey) {
+          return;
+        }
+
+        const id = getHistorySyncNotificationId(decision.state.notificationKey);
+        if (notificationIdsRef.current.has(id)) {
+          return;
+        }
+
+        const onlyChannel = status.channels.length === 1 ? status.channels[0] : null;
+        notificationIdsRef.current.add(id);
+        setNotifications((current) => [
+          {
+            id,
+            conversationId: null,
+            contactName: "WhatsApp history is ready",
+            channelLabel: onlyChannel?.channelLabel ?? null,
+            kind: "history-sync-complete" as const,
+            message: "All chat history has been imported and Connexa is caught up.",
+            timestamp: status.checkedAt,
+            timestampLabel: "Sync complete"
+          },
+          ...current.filter((item) => item.id !== id)
+        ].slice(0, MAX_NOTIFICATIONS));
+      })().finally(() => {
+        refreshPromise = null;
+      });
+    };
+
+    refreshHistorySyncStatusRef.current = refreshStatus;
+    refreshStatus();
+
+    const interval = window.setInterval(refreshStatus, 60_000);
+    window.addEventListener("focus", refreshStatus);
+    document.addEventListener("visibilitychange", refreshStatus);
+
+    return () => {
+      isMounted = false;
+      refreshController?.abort();
+      window.clearInterval(interval);
+      window.removeEventListener("focus", refreshStatus);
+      document.removeEventListener("visibilitychange", refreshStatus);
+      persistHistorySyncBellStateRef.current = () => undefined;
+      refreshHistorySyncStatusRef.current = () => undefined;
+    };
+  }, [isInboxRoute, props.agentId, props.workspaceId]);
+
+  useEffect(() => {
     if (isInboxRoute) {
       return undefined;
     }
@@ -122,7 +276,7 @@ export function DashboardNotifications(props: {
       refreshController?.abort();
       refreshController = new AbortController();
 
-      const response = await fetch("/api/conversations", {
+      const response = await fetch("/api/inbox/unread-summary", {
         method: "GET",
         cache: "no-store",
         signal: refreshController.signal
@@ -155,7 +309,7 @@ export function DashboardNotifications(props: {
 
     runRefresh();
 
-    const interval = window.setInterval(runRefresh, 8000);
+    const interval = window.setInterval(runRefresh, 60_000);
     window.addEventListener("focus", runRefresh);
     document.addEventListener("visibilitychange", runRefresh);
 
@@ -220,7 +374,23 @@ export function DashboardNotifications(props: {
     };
   }, [isOpen]);
 
+  const acknowledgeHistorySyncNotification = () => {
+    const nextState = acknowledgeHistorySyncBell(historySyncBellStateRef.current);
+    if (nextState !== historySyncBellStateRef.current) {
+      historySyncBellStateRef.current = nextState;
+      persistHistorySyncBellStateRef.current(nextState);
+    }
+  };
+
+  const toggleNotifications = () => {
+    if (!isOpen) {
+      acknowledgeHistorySyncNotification();
+    }
+    setIsOpen((current) => !current);
+  };
+
   const clearNotifications = () => {
+    acknowledgeHistorySyncNotification();
     setNotifications([]);
     setIsOpen(false);
   };
@@ -232,7 +402,7 @@ export function DashboardNotifications(props: {
         aria-haspopup="dialog"
         aria-label="Notifications"
         className="dashboard-topbar-icon-button"
-        onClick={() => setIsOpen((current) => !current)}
+        onClick={toggleNotifications}
         selected={isOpen}
         variant="icon"
       >
@@ -256,7 +426,9 @@ export function DashboardNotifications(props: {
               {notifications.map((notification) => (
                 <a
                   className="dashboard-notification-item"
-                  href={`/inbox?conversationId=${encodeURIComponent(notification.conversationId)}`}
+                  href={notification.conversationId
+                    ? `/inbox?conversationId=${encodeURIComponent(notification.conversationId)}`
+                    : "/inbox"}
                   key={notification.id}
                   onClick={() => setIsOpen(false)}
                 >
@@ -270,7 +442,7 @@ export function DashboardNotifications(props: {
           ) : (
             <div className="dashboard-notification-empty">
               <strong>No new notifications</strong>
-              <span>Incoming inbox messages will appear here.</span>
+              <span>Incoming messages and completed history syncs will appear here.</span>
             </div>
           )}
         </div>

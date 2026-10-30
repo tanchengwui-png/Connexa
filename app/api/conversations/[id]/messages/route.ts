@@ -6,6 +6,7 @@ import { resolveMediaAssetUrl } from "@/lib/media-library-urls";
 import { enqueueOutboundMessage } from "@/lib/outbound-message-jobs";
 import { assertWorkspaceHasOutboundMessageCapacity } from "@/lib/package-feature-limits";
 import { prisma } from "@/lib/prisma";
+import { storeRecordedVoiceNote } from "@/lib/recorded-voice-note";
 
 type ComposerAttachmentInput = {
   assetId: string;
@@ -33,6 +34,12 @@ export async function POST(request: NextRequest, context: RouteContext) {
     let interactiveListButtonText = "";
     let interactiveListOptions: string[] = [];
     let scheduledFor = "";
+    let recordedVoiceNote: File | null = null;
+    const requestIdempotencyKey = request.headers.get("idempotency-key")?.trim() || null;
+
+    if (requestIdempotencyKey && requestIdempotencyKey.length > 160) {
+      return NextResponse.json({ error: "Idempotency key is too long." }, { status: 400 });
+    }
 
     if (isFormData) {
       const formData = await request.formData();
@@ -45,6 +52,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
       interactiveListButtonText = `${formData.get("interactiveListButtonText") ?? ""}`.trim();
       interactiveListOptions = parseInteractiveChoices(formData.get("interactiveListOptions"), 10);
       scheduledFor = `${formData.get("scheduledFor") ?? ""}`.trim();
+      const recordedVoiceEntry = formData.get("recordedVoiceNote");
+      recordedVoiceNote = recordedVoiceEntry instanceof File && recordedVoiceEntry.size > 0 ? recordedVoiceEntry : null;
     } else {
       const body = (await request.json()) as {
         body?: string;
@@ -77,11 +86,11 @@ export async function POST(request: NextRequest, context: RouteContext) {
           }));
     const attachmentIds = normalizedAttachments.map((attachment) => attachment.assetId);
 
-    if (!text && !attachmentIds.length) {
+    if (!text && !attachmentIds.length && !recordedVoiceNote) {
       return NextResponse.json({ error: "Message body or media is required." }, { status: 400 });
     }
 
-    if ((interactiveButtons.length || interactiveListOptions.length) && attachmentIds.length) {
+    if ((interactiveButtons.length || interactiveListOptions.length) && (attachmentIds.length || recordedVoiceNote)) {
       return NextResponse.json({ error: "Interactive messages cannot include attachments yet." }, { status: 400 });
     }
 
@@ -185,10 +194,7 @@ export async function POST(request: NextRequest, context: RouteContext) {
         (entry): entry is { asset: NonNullable<SelectedMediaAsset>; sendAsVoice: boolean } => Boolean(entry)
       );
 
-    await assertWorkspaceHasOutboundMessageCapacity(
-      agent.workspaceId,
-      (text ? 1 : 0) + orderedMediaAssets.length
-    );
+    await assertWorkspaceHasOutboundMessageCapacity(agent.workspaceId, (text ? 1 : 0) + orderedMediaAssets.length + (recordedVoiceNote ? 1 : 0));
 
     const messages = [];
 
@@ -210,7 +216,8 @@ export async function POST(request: NextRequest, context: RouteContext) {
         to: conversation.contact.phone,
         interactiveButtons,
         interactiveListButtonText,
-        interactiveListOptions
+        interactiveListOptions,
+        idempotencyKey: requestIdempotencyKey ? `${requestIdempotencyKey}:text` : null
       });
       messages.push(textMessage);
     }
@@ -235,15 +242,52 @@ export async function POST(request: NextRequest, context: RouteContext) {
         to: conversation.contact.phone,
         interactiveButtons: [],
         interactiveListButtonText: "",
-        interactiveListOptions: []
+        interactiveListOptions: [],
+        idempotencyKey: requestIdempotencyKey ? `${requestIdempotencyKey}:attachment:${index}` : null
       });
       messages.push(nextMessage);
+    }
+
+    if (recordedVoiceNote) {
+      const storedVoiceNote = await storeRecordedVoiceNote({
+        workspaceId: agent.workspaceId,
+        file: recordedVoiceNote
+      });
+
+      try {
+        const nextMessage = await enqueueOutboundMessage({
+          workspaceId: conversation.workspaceId,
+          channelId: conversation.channelId,
+          mediaAssetId: null,
+          attachmentMimeType: storedVoiceNote.mimeType,
+          attachmentName: storedVoiceNote.attachmentName,
+          attachmentUrl: resolveMediaAssetUrl(storedVoiceNote.attachmentUrl),
+          attachmentPath: storedVoiceNote.attachmentPath,
+          sendAudioAsVoice: true,
+          conversationId: id,
+          body: "",
+          availableAt: scheduledAt,
+          senderId: agent.id,
+          replyToMessageId: !text && orderedMediaAssets.length === 0 ? replyToMessageId || null : null,
+          source: "manual-reply",
+          to: conversation.contact.phone,
+          interactiveButtons: [],
+          interactiveListButtonText: "",
+          interactiveListOptions: [],
+          idempotencyKey: requestIdempotencyKey ? `${requestIdempotencyKey}:recorded-voice` : null
+        });
+        messages.push(nextMessage);
+      } catch (error) {
+        await storedVoiceNote.cleanup();
+        throw error;
+      }
     }
 
     await applyHumanTakeoverPause({
       workspaceId: conversation.workspaceId,
       conversationId: id,
-      pausedAt: messages[messages.length - 1].sentAt
+      pausedAt: messages[messages.length - 1].sentAt,
+      cancelPendingAutomation: !scheduledAt
     });
 
     return NextResponse.json({ message: messages[0], messages }, { status: 201 });

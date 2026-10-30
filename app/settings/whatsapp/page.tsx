@@ -58,6 +58,14 @@ export default async function WhatsAppSetupPage({ searchParams }: WhatsAppSetupP
         }))}
         health={{
           runtimeStatus: health.runtimeStatus,
+          runtimePresent: health.runtimePresent,
+          senderReachable: health.senderReachable,
+          senderError: health.senderError,
+          userConnectionState: health.userConnectionState,
+          qrCodeDataUrl: health.qrCodeDataUrl,
+          qrCodeGeneratedAt: health.qrCodeGeneratedAt,
+          qrCodeExpiresAt: health.qrCodeExpiresAt,
+          qrCodeExpired: health.qrCodeExpired,
           isConnectionStalled: health.isConnectionStalled,
           isInboxReady: health.isInboxReady,
           isHistoryStabilizing: health.isHistoryStabilizing,
@@ -78,7 +86,7 @@ export default async function WhatsAppSetupPage({ searchParams }: WhatsAppSetupP
           businessAccountId: selectedChannel?.businessAccountId ?? null,
           accessTokenLastFour: selectedChannel?.accessTokenLastFour ?? null,
           verifyTokenLastFour: selectedChannel?.verifyTokenLastFour ?? null,
-          qrCodeDataUrl: channel?.qrCodeDataUrl ?? null,
+          qrCodeDataUrl: health.qrCodeDataUrl,
           lastError: selectedChannel?.lastError ?? channel?.lastError ?? "",
           connectedAt: selectedChannel?.connectedAt?.toISOString() ?? channel?.connectedAt?.toISOString() ?? null
         }}

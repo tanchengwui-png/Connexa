@@ -144,9 +144,18 @@ export function validateInboxUploadFile(input: {
 }
 
 export function sanitizeUploadedFileName(fileName: string) {
-  const extension = path.extname(fileName);
-  const baseName = path.basename(fileName, extension).replace(/[^a-zA-Z0-9-_ ]/g, "").trim();
-  return `${baseName || "upload"}${extension.toLowerCase()}`;
+  const normalizedName = fileName.normalize("NFC").replace(/\\/g, "/");
+  const extension = path.extname(normalizedName);
+  const baseName = path
+    .basename(normalizedName, extension)
+    // Preserve readable Unicode names (for example Chinese and Malay text),
+    // while excluding path separators, control characters, and characters
+    // that are unsafe across common filesystems.
+    .replace(/[\u0000-\u001f\u007f<>:"/\\|?*]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const safeExtension = extension.replace(/[^\p{L}\p{N}.]/gu, "").toLowerCase();
+  return `${baseName || "upload"}${safeExtension}`;
 }
 
 export function isVoiceMimeType(mimeType: string | null | undefined) {

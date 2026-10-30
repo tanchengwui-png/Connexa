@@ -39,7 +39,7 @@ export async function PUT(request: NextRequest) {
       metaAppId: body.metaAppId ?? "",
       metaAppSecret: body.metaAppSecret ?? "",
       metaConfigId: body.metaConfigId ?? "",
-      metaGraphVersion: body.metaGraphVersion ?? "v23.0",
+      metaGraphVersion: body.metaGraphVersion ?? "v26.0",
       metaRedirectUri: body.metaRedirectUri ?? "",
       metaWebhookVerifyToken: body.metaWebhookVerifyToken ?? ""
     });

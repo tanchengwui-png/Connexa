@@ -1,36 +1,36 @@
 "use client";
 
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
-import { AttachmentPreview } from "@/components/attachment-preview";
 import { ScheduleSendDialog } from "@/components/inbox/schedule-send-dialog";
-import { addMalaysiaDays, getMalaysiaDateKey } from "@/lib/malaysia-time";
 import type { ScheduledMessagesFilter } from "@/lib/scheduled-messages";
+
+type ScheduledMessageRow = {
+  id: string;
+  channelId: string | null;
+  channelLabel: string | null;
+  conversationId: string;
+  contactName: string;
+  phone: string;
+  bodyPreview: string;
+  attachmentMimeType: string | null;
+  attachmentName: string | null;
+  attachmentUrl: string | null;
+  scheduledFor: string;
+  scheduledForIso: string;
+  createdAt: string;
+  createdAtIso: string;
+  status: "Canceled" | "Due now" | "Failed" | "Processing" | "Scheduled" | "Sent";
+  statusKey: "canceled" | "due" | "failed" | "processing" | "scheduled" | "sent";
+  createdBy: string;
+  lastError: string | null;
+};
 
 type ScheduledMessagesBoardProps = {
   conversationId?: string | null;
   channelId?: string | null;
   filter: ScheduledMessagesFilter;
-  rows: Array<{
-    id: string;
-    channelId: string | null;
-    channelLabel: string | null;
-    conversationId: string;
-    contactName: string;
-    phone: string;
-    bodyPreview: string;
-    attachmentMimeType: string | null;
-    attachmentName: string | null;
-    attachmentUrl: string | null;
-    scheduledFor: string;
-    scheduledForIso: string;
-    createdAt: string;
-    createdAtIso: string;
-    status: "Canceled" | "Due now" | "Failed" | "Processing" | "Scheduled" | "Sent";
-    statusKey: "canceled" | "due" | "failed" | "processing" | "scheduled" | "sent";
-    createdBy: string;
-    lastError: string | null;
-  }>;
+  rows: ScheduledMessageRow[];
   summary: {
     scheduled: number;
     due: number;
@@ -41,13 +41,18 @@ type ScheduledMessagesBoardProps = {
   };
 };
 
+type ConfirmationAction = {
+  action: "cancel" | "send-now";
+  jobIds: string[];
+};
+
 const FILTER_OPTIONS: Array<{ key: ScheduledMessagesFilter; label: string }> = [
+  { key: "all", label: "All" },
   { key: "scheduled", label: "Scheduled" },
   { key: "due", label: "Due now" },
   { key: "failed", label: "Failed" },
   { key: "canceled", label: "Canceled" },
-  { key: "sent", label: "Sent" },
-  { key: "all", label: "All" }
+  { key: "sent", label: "Sent" }
 ];
 
 export function ScheduledMessagesBoard({
@@ -63,11 +68,23 @@ export function ScheduledMessagesBoard({
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [rescheduleTarget, setRescheduleTarget] = useState<{ id: string; scheduledForIso: string } | null>(null);
+  const [confirmation, setConfirmation] = useState<ConfirmationAction | null>(null);
 
-  const actionableRows = rows.filter(
-    (row) => row.statusKey === "scheduled" || row.statusKey === "due" || row.statusKey === "failed"
-  );
+  const actionableRows = rows.filter(isActionableRow);
   const allActionableSelected = actionableRows.length > 0 && actionableRows.every((row) => selectedIds.includes(row.id));
+  const selectedCount = selectedIds.length;
+  const visibleTotal = getFilterCount(filter, summary);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && confirmation && !isPending) {
+        setConfirmation(null);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmation, isPending]);
 
   const runAction = (jobId: string, payload: { action: "cancel" | "reschedule" | "send-now"; scheduledFor?: string }) => {
     setErrorById((current) => ({ ...current, [jobId]: "" }));
@@ -76,12 +93,9 @@ export function ScheduledMessagesBoard({
     startTransition(async () => {
       const response = await fetch(`/api/outbound-message-jobs/${jobId}`, {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-
       const data = (await response.json().catch(() => null)) as { error?: string } | null;
 
       if (!response.ok) {
@@ -94,21 +108,15 @@ export function ScheduledMessagesBoard({
     });
   };
 
-  const runBulkAction = (action: "cancel" | "send-now") => {
+  const runBulkAction = (action: "cancel" | "send-now", jobIds: string[]) => {
     setBulkError(null);
 
     startTransition(async () => {
       const response = await fetch("/api/outbound-message-jobs/bulk", {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          action,
-          jobIds: selectedIds
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, jobIds })
       });
-
       const data = (await response.json().catch(() => null)) as { error?: string } | null;
 
       if (!response.ok) {
@@ -121,138 +129,158 @@ export function ScheduledMessagesBoard({
     });
   };
 
+  const confirmAction = () => {
+    if (!confirmation) return;
+    const { action, jobIds } = confirmation;
+    setConfirmation(null);
+
+    if (jobIds.length === 1) {
+      runAction(jobIds[0], { action });
+      return;
+    }
+    runBulkAction(action, jobIds);
+  };
+
   const toggleSelected = (jobId: string) => {
-    setSelectedIds((current) =>
-      current.includes(jobId) ? current.filter((value) => value !== jobId) : [...current, jobId]
-    );
+    setSelectedIds((current) => (current.includes(jobId) ? current.filter((value) => value !== jobId) : [...current, jobId]));
   };
 
   return (
-    <>
-      <section className="auth-page-stack">
-        <section className="auth-page-hero auth-page-hero-compact scheduled-messages-hero">
-          <div className="auth-page-hero-copy">
-            <span className="auth-page-kicker">Outbound queue</span>
-            <h2>Scheduled Messages</h2>
-            <p>
-              {conversationId
-                ? "Manage outbound jobs for this conversation with clear queue state, timing, and recovery actions."
-                : "Review, bulk-manage, and reschedule queued outbound jobs from one controlled queue."}
-            </p>
-            <div className="auth-page-hero-metrics">
-              <span className="auth-page-hero-stat">
-                <strong>{summary.total}</strong>
-                <small>total jobs</small>
-              </span>
-              <span className="auth-page-hero-stat">
-                <strong>{summary.due}</strong>
-                <small>due now</small>
-              </span>
-              <span className="auth-page-hero-stat">
-                <strong>{summary.failed}</strong>
-                <small>failed</small>
-              </span>
-              <span className="auth-page-hero-panel scheduled-queue-status-card">
-                <span className="auth-page-hero-panel-label">Queue status</span>
-                <strong>{selectedIds.length ? `${selectedIds.length} selected for bulk action` : `${actionableRows.length} actionable jobs`}</strong>
-                <p>
-                  Filter by scheduled, due, failed, canceled, or sent jobs, then act on the queue below.
-                </p>
-              </span>
-            </div>
-          </div>
-        </section>
+    <section className="scheduled-messages-page">
+      <header className="scheduled-messages-page-header">
+        <div>
+          <span className="scheduled-messages-eyebrow">Outbound queue</span>
+          <h1>Scheduled Messages</h1>
+          <p>{conversationId ? "Manage outbound jobs for this conversation." : "Manage scheduled and queued outbound messages."}</p>
+        </div>
+        <div className="scheduled-summary" aria-label="Scheduled message summary">
+          <SummaryItem label="total" value={summary.total} />
+          <SummaryItem label="scheduled" value={summary.scheduled} />
+          <SummaryItem label="due now" value={summary.due} />
+          <SummaryItem label="failed" value={summary.failed} />
+        </div>
+        <p className="scheduled-queue-helper">
+          {selectedCount
+            ? `${selectedCount} selected for bulk action.`
+            : `${actionableRows.length} actionable ${actionableRows.length === 1 ? "job" : "jobs"} · Filter the queue below to manage scheduled messages.`}
+        </p>
+      </header>
 
-        <section className="content-card scheduled-messages-shell">
-        <div className="card-header scheduled-messages-head">
-          <div>
-            <h3 className="card-title">Queue view</h3>
-            <p className="muted">
-              {conversationId
-                ? "Viewing scheduled outbound activity for one conversation."
-                : "Review and manage queued outbound jobs from one clean list."}
-            </p>
-          </div>
-          <div className="scheduled-inline-stats">
-            <span>{summary.total} total</span>
-            <span>{summary.due} due</span>
-            <span>{summary.failed} failed</span>
-            <span>{summary.sent} sent</span>
-          </div>
-          <div className="scheduled-messages-filters">
-            {FILTER_OPTIONS.map((option) => (
+      <section className="scheduled-queue-panel" aria-label="Scheduled message queue">
+        <nav aria-label="Scheduled message status filters" className="scheduled-status-filters">
+          {FILTER_OPTIONS.map((option) => {
+            const count = getFilterCount(option.key, summary);
+            const isActive = filter === option.key;
+            return (
               <a
-                className={`scheduled-filter-chip${filter === option.key ? " active" : ""}`}
+                aria-current={isActive ? "page" : undefined}
+                className={`scheduled-status-filter${isActive ? " active" : ""}${count === 0 ? " is-empty" : ""}`}
                 href={buildScheduledMessagesHref(option.key, conversationId, channelId)}
                 key={option.key}
               >
                 <span>{option.label}</span>
-                <strong>{getFilterCount(option.key, summary)}</strong>
+                <strong>{count}</strong>
               </a>
-            ))}
-          </div>
-        </div>
+            );
+          })}
+        </nav>
 
-        {actionableRows.length ? (
-          <div className="scheduled-bulk-toolbar">
-            <label className="auth-checkbox scheduled-bulk-select-all">
-              <input
-                checked={allActionableSelected}
-                onChange={() =>
-                  setSelectedIds(allActionableSelected ? [] : actionableRows.map((row) => row.id))
-                }
-                type="checkbox"
-              />
-              <span>Select all actionable</span>
-            </label>
-            <span className="table-subtle">
-              {selectedIds.length ? `${selectedIds.length} selected` : "Select scheduled, due, or failed jobs for bulk actions."}
-            </span>
+        {selectedCount ? (
+          <div className="scheduled-bulk-toolbar" role="status">
+            <strong>{selectedCount} selected</strong>
             <div className="scheduled-bulk-actions">
-              <button
-                className="button button-secondary"
-                disabled={isPending || !selectedIds.length}
-                onClick={() => runBulkAction("send-now")}
-                type="button"
-              >
+              <button className="button button-secondary" disabled={isPending} onClick={() => setConfirmation({ action: "send-now", jobIds: selectedIds })} type="button">
                 Send selected now
               </button>
-              <button
-                className="button button-secondary"
-                disabled={isPending || !selectedIds.length}
-                onClick={() => runBulkAction("cancel")}
-                type="button"
-              >
+              <button className="button button-danger" disabled={isPending} onClick={() => setConfirmation({ action: "cancel", jobIds: selectedIds })} type="button">
                 Cancel selected
+              </button>
+              <button className="button button-ghost" disabled={isPending} onClick={() => setSelectedIds([])} type="button">
+                Clear selection
               </button>
             </div>
           </div>
         ) : null}
 
-        {bulkError ? <div className="scheduled-message-error">{bulkError}</div> : null}
+        {bulkError ? <div className="scheduled-message-error" role="alert">{bulkError}</div> : null}
 
         {rows.length ? (
-          <div className="scheduled-queue-sections">
-            {renderQueueSection({
-              title: getQueueTitle(filter),
-              description: getQueueDescription(filter, conversationId),
-              rows,
-              emptyText: getEmptyTitle(filter),
-              selectedIds,
-              toggleSelected,
-              isPending,
-              errorById,
-              runAction,
-              setRescheduleTarget
-            })}
-          </div>
+          <>
+            <div className="scheduled-table-scroll">
+              <table className="scheduled-message-table">
+                <colgroup>
+                  <col className="scheduled-column-selection" />
+                  <col className="scheduled-column-recipient" />
+                  <col className="scheduled-column-message" />
+                  <col className="scheduled-column-time" />
+                  <col className="scheduled-column-creator" />
+                  <col className="scheduled-column-status" />
+                  <col className="scheduled-column-actions" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th scope="col">
+                      {actionableRows.length ? (
+                        <label className="scheduled-select-all">
+                          <input
+                            aria-label="Select all actionable scheduled messages"
+                            checked={allActionableSelected}
+                            onChange={() => setSelectedIds(allActionableSelected ? [] : actionableRows.map((row) => row.id))}
+                            type="checkbox"
+                          />
+                        </label>
+                      ) : null}
+                    </th>
+                    <th scope="col">Recipient</th>
+                    <th scope="col">Message preview</th>
+                    <th scope="col">Scheduled for</th>
+                    <th scope="col">Created by</th>
+                    <th scope="col">Status</th>
+                    <th scope="col"><span className="visually-hidden">Actions</span></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <ScheduledMessageTableRow
+                      error={errorById[row.id]}
+                      isPending={isPending}
+                      key={row.id}
+                      onConfirm={(action) => setConfirmation({ action, jobIds: [row.id] })}
+                      onReschedule={() => setRescheduleTarget({ id: row.id, scheduledForIso: row.scheduledForIso })}
+                      onToggleSelected={() => toggleSelected(row.id)}
+                      row={row}
+                      selected={selectedIds.includes(row.id)}
+                    />
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="scheduled-mobile-list">
+              {rows.map((row) => (
+                <ScheduledMessageMobileCard
+                  error={errorById[row.id]}
+                  isPending={isPending}
+                  key={row.id}
+                  onConfirm={(action) => setConfirmation({ action, jobIds: [row.id] })}
+                  onReschedule={() => setRescheduleTarget({ id: row.id, scheduledForIso: row.scheduledForIso })}
+                  onToggleSelected={() => toggleSelected(row.id)}
+                  row={row}
+                  selected={selectedIds.includes(row.id)}
+                />
+              ))}
+            </div>
+          </>
         ) : (
           <div className="scheduled-messages-empty">
             <strong>{getEmptyTitle(filter)}</strong>
-            <p className="muted">{getEmptyDescription(filter, conversationId)}</p>
+            <p>{getEmptyDescription(filter, conversationId)}</p>
           </div>
         )}
-        </section>
+
+        <footer className="scheduled-queue-footer">
+          <span>{`Showing ${rows.length} of ${visibleTotal} ${visibleTotal === 1 ? "job" : "jobs"}`}</span>
+        </footer>
       </section>
 
       <ScheduleSendDialog
@@ -261,351 +289,157 @@ export function ScheduledMessagesBoard({
         isPending={isPending}
         onClose={() => setRescheduleTarget(null)}
         onSave={(value) => {
-          if (!rescheduleTarget) {
-            return;
-          }
-
-          runAction(rescheduleTarget.id, {
-            action: "reschedule",
-            scheduledFor: value
-          });
+          if (rescheduleTarget) runAction(rescheduleTarget.id, { action: "reschedule", scheduledFor: value });
         }}
       />
-    </>
+
+      {confirmation ? (
+        <div className="inbox-dialog-backdrop" onClick={() => !isPending && setConfirmation(null)}>
+          <section aria-labelledby="scheduled-action-confirmation-title" aria-modal="true" className="inbox-dialog confirmation-dialog" onClick={(event) => event.stopPropagation()} role="dialog">
+            <div className="inbox-dialog-head">
+              <div>
+                <strong id="scheduled-action-confirmation-title">{confirmation.action === "send-now" ? "Send scheduled message now?" : "Cancel scheduled message?"}</strong>
+                <p>
+                  {confirmation.action === "send-now"
+                    ? `${confirmation.jobIds.length} selected ${confirmation.jobIds.length === 1 ? "message will" : "messages will"} bypass the scheduled time and send immediately.`
+                    : `${confirmation.jobIds.length} selected ${confirmation.jobIds.length === 1 ? "message will" : "messages will"} be canceled. This cannot be undone.`}
+                </p>
+              </div>
+              <button aria-label="Close confirmation" className="inbox-dialog-close" disabled={isPending} onClick={() => setConfirmation(null)} type="button">×</button>
+            </div>
+            <div className="inbox-dialog-actions">
+              <button className="inbox-dialog-secondary" disabled={isPending} onClick={() => setConfirmation(null)} type="button">Keep scheduled</button>
+              <button className={confirmation.action === "cancel" ? "confirmation-dialog-danger" : "inbox-dialog-primary"} disabled={isPending} onClick={confirmAction} type="button">
+                {confirmation.action === "send-now" ? "Send now" : "Cancel messages"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
-function buildScheduledMessagesHref(
-  filter: ScheduledMessagesFilter,
-  conversationId?: string | null,
-  channelId?: string | null
-) {
+function SummaryItem({ label, value }: { label: string; value: number }) {
+  return <span className="scheduled-summary__item"><strong>{value}</strong><small>{label}</small></span>;
+}
+
+function ScheduledMessageTableRow({ error, isPending, onConfirm, onReschedule, onToggleSelected, row, selected }: ScheduledMessageRowProps) {
+  const isActionable = isActionableRow(row);
+  const recipient = getRecipient(row);
+
+  return (
+    <tr className={`scheduled-message-table-row ${row.statusKey}`}>
+      <td>
+        {isActionable ? <label className="scheduled-row-select"><input aria-label={`Select scheduled message for ${recipient.primary}`} checked={selected} onChange={onToggleSelected} type="checkbox" /></label> : null}
+      </td>
+      <td><RecipientCell recipient={recipient} /></td>
+      <td>
+        <p className="scheduled-message-preview" title={row.bodyPreview}>{row.bodyPreview || "No message content"}</p>
+        {row.attachmentUrl ? <a className="scheduled-message-attachment-link" href={row.attachmentUrl} rel="noreferrer" target="_blank">{row.attachmentName || "Open attachment"}</a> : null}
+        {row.lastError || error ? <div className="scheduled-message-error">{row.lastError || error}</div> : null}
+      </td>
+      <td><time dateTime={row.scheduledForIso} title={row.scheduledForIso}>{row.scheduledFor}</time></td>
+      <td>{row.createdBy || "—"}</td>
+      <td><span className={`scheduled-status-pill ${row.statusKey}`}>{row.status}</span></td>
+      <td><ScheduledMessageActions isActionable={isActionable} isPending={isPending} onConfirm={onConfirm} onReschedule={onReschedule} recipient={recipient.primary} row={row} /></td>
+    </tr>
+  );
+}
+
+function ScheduledMessageMobileCard({ error, isPending, onConfirm, onReschedule, onToggleSelected, row, selected }: ScheduledMessageRowProps) {
+  const isActionable = isActionableRow(row);
+  const recipient = getRecipient(row);
+
+  return (
+    <article className={`scheduled-message-mobile-card ${row.statusKey}`}>
+      <div className="scheduled-mobile-card-head">
+        <div className="scheduled-mobile-recipient">
+          {isActionable ? <label className="scheduled-row-select"><input aria-label={`Select scheduled message for ${recipient.primary}`} checked={selected} onChange={onToggleSelected} type="checkbox" /></label> : null}
+          <RecipientCell recipient={recipient} />
+        </div>
+        <span className={`scheduled-status-pill ${row.statusKey}`}>{row.status}</span>
+      </div>
+      <p className="scheduled-message-preview" title={row.bodyPreview}>{row.bodyPreview || "No message content"}</p>
+      <dl className="scheduled-mobile-meta"><div><dt>Scheduled</dt><dd><time dateTime={row.scheduledForIso}>{row.scheduledFor}</time></dd></div><div><dt>Created by</dt><dd>{row.createdBy || "—"}</dd></div></dl>
+      {row.attachmentUrl ? <a className="scheduled-message-attachment-link" href={row.attachmentUrl} rel="noreferrer" target="_blank">{row.attachmentName || "Open attachment"}</a> : null}
+      {row.lastError || error ? <div className="scheduled-message-error">{row.lastError || error}</div> : null}
+      <ScheduledMessageActions isActionable={isActionable} isPending={isPending} onConfirm={onConfirm} onReschedule={onReschedule} recipient={recipient.primary} row={row} />
+    </article>
+  );
+}
+
+type ScheduledMessageRowProps = {
+  error?: string;
+  isPending: boolean;
+  onConfirm: (action: "cancel" | "send-now") => void;
+  onReschedule: () => void;
+  onToggleSelected: () => void;
+  row: ScheduledMessageRow;
+  selected: boolean;
+};
+
+function ScheduledMessageActions({ isActionable, isPending, onConfirm, onReschedule, recipient, row }: Pick<ScheduledMessageRowProps, "isPending" | "onConfirm" | "onReschedule" | "row"> & { isActionable: boolean; recipient: string }) {
+  return (
+    <details className="scheduled-row-actions">
+      <summary aria-label={`Actions for scheduled message to ${recipient}`}><span aria-hidden="true">⋯</span></summary>
+      <div className="scheduled-row-actions-menu" role="menu">
+        {isActionable ? <button disabled={isPending} onClick={() => onConfirm("send-now")} role="menuitem" type="button">Send now</button> : null}
+        {isActionable ? <button disabled={isPending} onClick={onReschedule} role="menuitem" type="button">Reschedule</button> : null}
+        <a href={`/inbox?conversationId=${row.conversationId}`} role="menuitem">Open conversation</a>
+        {isActionable ? <button className="is-destructive" disabled={isPending} onClick={() => onConfirm("cancel")} role="menuitem" type="button">Cancel</button> : null}
+      </div>
+    </details>
+  );
+}
+
+function RecipientCell({ recipient }: { recipient: { primary: string; secondary: string | null } }) {
+  return <div className="scheduled-recipient"><strong>{recipient.primary}</strong>{recipient.secondary ? <span>{recipient.secondary}</span> : null}</div>;
+}
+
+function getRecipient(row: ScheduledMessageRow) {
+  const name = row.contactName?.trim();
+  const phone = row.phone?.trim();
+  const hasContactName = Boolean(name && name !== "Unknown contact");
+  return {
+    primary: hasContactName ? name! : phone || "Unknown recipient",
+    secondary: hasContactName && phone && phone !== name ? phone : null
+  };
+}
+
+function isActionableRow(row: ScheduledMessageRow) {
+  return row.statusKey === "scheduled" || row.statusKey === "due" || row.statusKey === "failed";
+}
+
+function buildScheduledMessagesHref(filter: ScheduledMessagesFilter, conversationId?: string | null, channelId?: string | null) {
   const params = new URLSearchParams();
-
-  if (filter !== "scheduled") {
-    params.set("filter", filter);
-  }
-
-  if (conversationId) {
-    params.set("conversationId", conversationId);
-  }
-  if (channelId) {
-    params.set("channelId", channelId);
-  }
-
+  if (filter !== "scheduled") params.set("filter", filter);
+  if (conversationId) params.set("conversationId", conversationId);
+  if (channelId) params.set("channelId", channelId);
   const query = params.toString();
   return query ? `/scheduled-messages?${query}` : "/scheduled-messages";
 }
 
-function getFilterCount(
-  filter: ScheduledMessagesFilter,
-  summary: ScheduledMessagesBoardProps["summary"]
-) {
+function getFilterCount(filter: ScheduledMessagesFilter, summary: ScheduledMessagesBoardProps["summary"]) {
   switch (filter) {
-    case "scheduled":
-      return summary.scheduled;
-    case "due":
-      return summary.due;
-    case "failed":
-      return summary.failed;
-    case "canceled":
-      return summary.canceled;
-    case "sent":
-      return summary.sent;
-    case "all":
-      return summary.total;
-    default:
-      return 0;
+    case "scheduled": return summary.scheduled;
+    case "due": return summary.due;
+    case "failed": return summary.failed;
+    case "canceled": return summary.canceled;
+    case "sent": return summary.sent;
+    case "all": return summary.total;
   }
 }
 
 function getEmptyTitle(filter: ScheduledMessagesFilter) {
-  switch (filter) {
-    case "failed":
-      return "No failed jobs.";
-    case "due":
-      return "Nothing is due right now.";
-    case "sent":
-      return "No sent jobs yet.";
-    case "canceled":
-      return "No canceled jobs yet.";
-    case "all":
-      return "No scheduled jobs yet.";
-    default:
-      return "No scheduled jobs in this view yet.";
-  }
+  if (filter === "failed") return "No failed scheduled messages";
+  if (filter === "due") return "Nothing is due right now";
+  if (filter === "all") return "No scheduled messages";
+  return `No ${FILTER_OPTIONS.find((option) => option.key === filter)?.label.toLowerCase() ?? "scheduled"} messages`;
 }
 
 function getEmptyDescription(filter: ScheduledMessagesFilter, conversationId?: string | null) {
-  if (conversationId) {
-    return "This conversation does not have any outbound jobs in the selected queue view.";
-  }
-
-  switch (filter) {
-    case "failed":
-      return "The queue is healthy. Failed jobs will appear here when delivery needs a manual retry.";
-    case "due":
-      return "Jobs that need immediate worker attention will show up here.";
-    case "sent":
-      return "Completed outbound sends will appear here once the queue starts delivering jobs.";
-    case "canceled":
-      return "Canceled jobs are preserved here for operator history.";
-    default:
-      return "Once scheduled sending is used from the composer, this queue becomes the clean place to manage it.";
-  }
-}
-
-function getQueueTitle(filter: ScheduledMessagesFilter) {
-  switch (filter) {
-    case "due":
-      return "Due Now";
-    case "failed":
-      return "Failed Jobs";
-    case "canceled":
-      return "Canceled Jobs";
-    case "sent":
-      return "Sent Jobs";
-    case "all":
-      return "All Jobs";
-    default:
-      return "Scheduled Jobs";
-  }
-}
-
-function getQueueDescription(filter: ScheduledMessagesFilter, conversationId?: string | null) {
-  if (conversationId) {
-    return "Outbound jobs for the selected conversation, grouped by scheduled time.";
-  }
-
-  switch (filter) {
-    case "due":
-      return "Jobs that should be sent now or need immediate operator review.";
-    case "failed":
-      return "Outbound jobs that need a retry or manual intervention.";
-    case "canceled":
-      return "Canceled jobs preserved for operational history.";
-    case "sent":
-      return "Completed outbound sends grouped by their scheduled time.";
-    case "all":
-      return "The full outbound queue in one grouped list.";
-    default:
-      return "Future outbound jobs waiting in the queue.";
-  }
-}
-
-function groupRowsByTimeBucket(rows: ScheduledMessagesBoardProps["rows"]) {
-  const now = new Date();
-  const todayKey = getMalaysiaDateKey(now);
-  const tomorrowKey = getMalaysiaDateKey(addMalaysiaDays(now, 1));
-
-  const buckets: Array<{
-    key: "overdue" | "today" | "tomorrow" | "later";
-    label: string;
-    description: string;
-    rows: ScheduledMessagesBoardProps["rows"];
-  }> = [
-    {
-      key: "overdue",
-      label: "Overdue",
-      description: "Past scheduled times that should be reviewed first.",
-      rows: []
-    },
-    {
-      key: "today",
-      label: "Today",
-      description: "Jobs scheduled before the day ends.",
-      rows: []
-    },
-    {
-      key: "tomorrow",
-      label: "Tomorrow",
-      description: "Upcoming jobs scheduled for the next day.",
-      rows: []
-    },
-    {
-      key: "later",
-      label: "Later",
-      description: "Future jobs beyond tomorrow.",
-      rows: []
-    }
-  ];
-
-  for (const row of rows) {
-    const scheduledAtMs = Date.parse(row.scheduledForIso);
-
-    if (Number.isNaN(scheduledAtMs)) {
-      buckets[3].rows.push(row);
-      continue;
-    }
-
-    if (scheduledAtMs < Date.now()) {
-      buckets[0].rows.push(row);
-      continue;
-    }
-
-    const scheduledDateKey = getMalaysiaDateKey(row.scheduledForIso);
-
-    if (scheduledDateKey === todayKey) {
-      buckets[1].rows.push(row);
-      continue;
-    }
-
-    if (scheduledDateKey === tomorrowKey) {
-      buckets[2].rows.push(row);
-      continue;
-    }
-
-    buckets[3].rows.push(row);
-  }
-
-  return buckets.filter((bucket) => bucket.rows.length > 0);
-}
-
-function renderQueueSection(input: {
-  title: string;
-  description: string;
-  rows: ScheduledMessagesBoardProps["rows"];
-  emptyText: string;
-  selectedIds: string[];
-  toggleSelected: (jobId: string) => void;
-  isPending: boolean;
-  errorById: Record<string, string>;
-  runAction: (jobId: string, payload: { action: "cancel" | "reschedule" | "send-now"; scheduledFor?: string }) => void;
-  setRescheduleTarget: (target: { id: string; scheduledForIso: string } | null) => void;
-}) {
-  if (!input.rows.length) {
-    return (
-      <section className="scheduled-queue-section">
-        <div className="scheduled-queue-section-head">
-          <div>
-            <h4>{input.title}</h4>
-            <p>{input.description}</p>
-          </div>
-        </div>
-        <div className="scheduled-messages-empty scheduled-messages-empty-inline">
-          <strong>{input.emptyText}</strong>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="scheduled-queue-section">
-      <div className={`scheduled-queue-section-head ${input.title === "All Jobs" ? "is-all-jobs" : ""}`}>
-        <div>
-          <h4>{input.title}</h4>
-          <p>{input.description}</p>
-        </div>
-        <span className="scheduled-queue-section-count">{input.rows.length}</span>
-      </div>
-      <div className="scheduled-bucket-list">
-        {groupRowsByTimeBucket(input.rows).map((bucket) => (
-          <section className={`scheduled-time-bucket ${bucket.key === "overdue" ? "is-overdue" : ""}`} key={bucket.key}>
-            <div className="scheduled-time-bucket-head">
-              <div>
-                <h5>{bucket.label}</h5>
-                <p>{bucket.description}</p>
-              </div>
-              <span className="scheduled-time-bucket-count">{bucket.rows.length}</span>
-            </div>
-            <div className="scheduled-message-list">
-              {bucket.rows.map((row) => {
-                const isActionable =
-                  row.statusKey === "scheduled" || row.statusKey === "due" || row.statusKey === "failed";
-
-                return (
-                  <article className={`scheduled-message-row ${row.statusKey}`} key={row.id}>
-                    <div className="scheduled-message-main">
-                      <div className="scheduled-message-topline">
-                        <div className="scheduled-message-identity">
-                          {isActionable ? (
-                            <label className="auth-checkbox scheduled-row-select">
-                              <input
-                                checked={input.selectedIds.includes(row.id)}
-                                onChange={() => input.toggleSelected(row.id)}
-                                type="checkbox"
-                              />
-                              <span />
-                            </label>
-                          ) : null}
-                          <div className="scheduled-message-identity-copy">
-                            <strong>{row.contactName}</strong>
-                            <span>{row.phone}</span>
-                            {row.channelLabel ? <span>{row.channelLabel}</span> : null}
-                          </div>
-                        </div>
-                        <span className={`scheduled-status-pill ${row.statusKey}`}>{row.status}</span>
-                      </div>
-
-                      <p className="scheduled-message-preview">{row.bodyPreview}</p>
-
-                      {row.attachmentUrl ? (
-                        <div className="scheduled-message-attachment">
-                          <AttachmentPreview
-                            className="attachment-preview-compact"
-                            fileName={row.attachmentName}
-                            mimeType={row.attachmentMimeType}
-                            openLabel="Open attachment"
-                            url={row.attachmentUrl}
-                          />
-                        </div>
-                      ) : null}
-
-                      <div className="scheduled-message-meta">
-                        <span>Scheduled for {row.scheduledFor}</span>
-                        <span>Queued {row.createdAt}</span>
-                        <span>Created by {row.createdBy}</span>
-                        {row.attachmentName && !row.attachmentUrl ? <span>Attachment {row.attachmentName}</span> : null}
-                      </div>
-
-                      {row.lastError ? <div className="scheduled-message-error">{row.lastError}</div> : null}
-                      {input.errorById[row.id] ? <div className="scheduled-message-error">{input.errorById[row.id]}</div> : null}
-                    </div>
-
-                    <div className="scheduled-message-actions">
-                      {isActionable ? (
-                        <button
-                          className="button button-primary"
-                          disabled={input.isPending}
-                          onClick={() => input.runAction(row.id, { action: "send-now" })}
-                          type="button"
-                        >
-                          Send now
-                        </button>
-                      ) : null}
-
-                      {isActionable ? (
-                        <div className="scheduled-message-secondary-actions">
-                          <button
-                            className="button button-secondary"
-                            disabled={input.isPending}
-                            onClick={() => input.setRescheduleTarget({ id: row.id, scheduledForIso: row.scheduledForIso })}
-                            type="button"
-                          >
-                            Reschedule
-                          </button>
-                          <button
-                            className="button button-secondary"
-                            disabled={input.isPending}
-                            onClick={() => input.runAction(row.id, { action: "cancel" })}
-                            type="button"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : null}
-
-                      <a className="button button-secondary" href={`/inbox?conversationId=${row.conversationId}`}>
-                        Open conversation
-                      </a>
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-        ))}
-      </div>
-    </section>
-  );
+  if (conversationId) return "This conversation does not have outbound jobs in the selected queue view.";
+  if (filter === "failed") return "Failed jobs will appear here when a delivery or queue action fails.";
+  return "Messages scheduled for future delivery will appear here.";
 }
